@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      App Sandbox is disabled because we need to:
+        - Execute the bundled naive binary (Process API)
+        - Spawn networksetup, lsof, curl, kill (system commands)
+        - Write config/PAC files outside the sandbox container
+
+      Every other entitlement removed during the security review:
+        - cs.disable-library-validation:        not needed; bundled Mach-O is signed
+        - cs.disable-executable-page-protection: not needed; lsof inspection runs in
+                                                its own process
+        - automation.apple-events:               not needed; networksetup is invoked
+                                                directly with Process, no AppleEvents
+        - files.downloads.read-write:            not needed; binary picker uses
+                                                NSOpenPanel which grants user-selected
+                                                read-write per file
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Outgoing network connections (proxy client) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Incoming network connections (SOCKS listener on loopback) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Files the user explicitly chose via NSOpenPanel (custom naive binary) -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

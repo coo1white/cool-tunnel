@@ -7,13 +7,13 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		B1D073272FA598AD00E952AE /* naive.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = naive.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1D073272FA598AD00E952AE /* naive.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = naive.app; path = "Cool tunnel.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		B1D073292FA598AD00E952AE /* naive */ = {
+		B1D073292FA598AD00E952AE /* COOL-TUNNEL */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = naive;
+			path = "COOL-TUNNEL";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +32,7 @@
 		B1D0731E2FA598AD00E952AE = {
 			isa = PBXGroup;
 			children = (
-				B1D073292FA598AD00E952AE /* naive */,
+				B1D073292FA598AD00E952AE /* COOL-TUNNEL */,
 				B1D073282FA598AD00E952AE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,10 +48,11 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		B1D073262FA598AD00E952AE /* naive */ = {
+		B1D073262FA598AD00E952AE /* COOL-TUNNEL */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = B1D073322FA598AE00E952AE /* Build configuration list for PBXNativeTarget "naive" */;
+			buildConfigurationList = B1D073322FA598AE00E952AE /* Build configuration list for PBXNativeTarget "COOL-TUNNEL" */;
 			buildPhases = (
+				B1CAB05E2FA598AE00E952AF /* Build Rust core */,
 				B1D073232FA598AD00E952AE /* Sources */,
 				B1D073242FA598AD00E952AE /* Frameworks */,
 				B1D073252FA598AD00E952AE /* Resources */,
@@ -61,12 +62,12 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				B1D073292FA598AD00E952AE /* naive */,
+				B1D073292FA598AD00E952AE /* COOL-TUNNEL */,
 			);
-			name = naive;
+			name = "COOL-TUNNEL";
 			packageProductDependencies = (
 			);
-			productName = naive;
+			productName = "COOL-TUNNEL";
 			productReference = B1D073272FA598AD00E952AE /* naive.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -85,7 +86,7 @@
 					};
 				};
 			};
-			buildConfigurationList = B1D073222FA598AD00E952AE /* Build configuration list for PBXProject "naive" */;
+			buildConfigurationList = B1D073222FA598AD00E952AE /* Build configuration list for PBXProject "COOL-TUNNEL" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -99,7 +100,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				B1D073262FA598AD00E952AE /* naive */,
+				B1D073262FA598AD00E952AE /* COOL-TUNNEL */,
 			);
 		};
 /* End PBXProject section */
@@ -113,6 +114,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		B1CAB05E2FA598AE00E952AF /* Build Rust core */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/core/Cargo.toml",
+				"$(SRCROOT)/core/Cargo.lock",
+			);
+			name = "Build Rust core";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/cool-tunnel-core",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\n\nCARGO=\"\"\nfor candidate in \"$HOME/.cargo/bin/cargo\" \"/opt/homebrew/bin/cargo\" \"/usr/local/bin/cargo\"; do\n    if [ -x \"$candidate\" ]; then\n        CARGO=\"$candidate\"\n        break\n    fi\ndone\nif [ -z \"$CARGO\" ]; then\n    if command -v cargo >/dev/null 2>&1; then\n        CARGO=\"$(command -v cargo)\"\n    else\n        echo \"error: cargo not found. Install Rust via https://rustup.rs/ and rebuild.\" >&2\n        exit 1\n    fi\nfi\n\ncd \"$SRCROOT/core\"\n\ncase \"$CONFIGURATION\" in\n    Release) PROFILE=\"release\"; FLAGS=\"--release\" ;;\n    *)       PROFILE=\"debug\";   FLAGS=\"\" ;;\nesac\n\ncase \"$NATIVE_ARCH\" in\n    arm64|aarch64) RUST_TARGET=\"aarch64-apple-darwin\" ;;\n    x86_64)        RUST_TARGET=\"x86_64-apple-darwin\" ;;\n    *)             RUST_TARGET=\"aarch64-apple-darwin\" ;;\nesac\n\necho \"info: building cool-tunnel-core ($PROFILE, $RUST_TARGET)\"\n\"$CARGO\" build $FLAGS --target \"$RUST_TARGET\" --bin cool-tunnel-core\n\nDEST_DIR=\"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nmkdir -p \"$DEST_DIR\"\ncp \"target/$RUST_TARGET/$PROFILE/cool-tunnel-core\" \"$DEST_DIR/cool-tunnel-core\"\nchmod +x \"$DEST_DIR/cool-tunnel-core\"\n\necho \"info: cool-tunnel-core copied to $DEST_DIR\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		B1D073232FA598AD00E952AE /* Sources */ = {
@@ -162,7 +188,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -223,7 +249,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -244,6 +270,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "COOL-TUNNEL/naive.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
@@ -264,7 +291,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
-				MARKETING_VERSION = 0.1.2;
+				MARKETING_VERSION = 0.1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive;
 				PRODUCT_NAME = "Cool tunnel";
 				REGISTER_APP_GROUPS = YES;
@@ -272,7 +299,7 @@
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -287,6 +314,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "COOL-TUNNEL/naive.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
@@ -307,7 +335,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
-				MARKETING_VERSION = 0.1.2;
+				MARKETING_VERSION = 0.1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive;
 				PRODUCT_NAME = "Cool tunnel";
 				REGISTER_APP_GROUPS = YES;
@@ -315,7 +343,7 @@
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -328,7 +356,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		B1D073222FA598AD00E952AE /* Build configuration list for PBXProject "naive" */ = {
+		B1D073222FA598AD00E952AE /* Build configuration list for PBXProject "COOL-TUNNEL" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				B1D073302FA598AE00E952AE /* Debug */,
@@ -337,7 +365,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B1D073322FA598AE00E952AE /* Build configuration list for PBXNativeTarget "naive" */ = {
+		B1D073322FA598AE00E952AE /* Build configuration list for PBXNativeTarget "COOL-TUNNEL" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				B1D073332FA598AE00E952AE /* Debug */,
