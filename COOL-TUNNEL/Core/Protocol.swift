@@ -100,7 +100,9 @@ public enum CoreEvent: Sendable, Hashable {
     case logLine(source: LogSource, line: String)
     case stateChanged(running: Bool)
     case anomaly(reason: AnomalyReason, detail: String)
-    case diagnosticProgress(step: String, ok: Bool)
+    /// `elapsedMs` is the wall-clock duration of the step in ms.
+    /// Defaults to 0 when the engine omits it (older binaries).
+    case diagnosticProgress(step: String, ok: Bool, elapsedMs: UInt64)
 
     private enum Tag: String, Decodable {
         case logLine = "log_line"
@@ -134,15 +136,22 @@ extension CoreEvent: Decodable {
                 detail: data.decode(String.self, forKey: .detail)
             )
         case .diagnosticProgress:
+            // `elapsed_ms` is optional on the wire so older engine
+            // builds (which never sent it) keep decoding cleanly. Fall
+            // back to 0 — the renderer treats that as "no timing".
+            let elapsed =
+                try data.decodeIfPresent(UInt64.self, forKey: .elapsedMs) ?? 0
             self = try .diagnosticProgress(
                 step: data.decode(String.self, forKey: .step),
-                ok: data.decode(Bool.self, forKey: .ok)
+                ok: data.decode(Bool.self, forKey: .ok),
+                elapsedMs: elapsed
             )
         }
     }
 
     private enum DataKeys: String, CodingKey {
         case source, line, running, reason, detail, step, ok
+        case elapsedMs = "elapsed_ms"
     }
 }
 
