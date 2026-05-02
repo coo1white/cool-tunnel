@@ -47,9 +47,9 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 ### docker-compose.yml
 ```yaml
 services:
-  naive-caddy:
+  cool-tunnel:
     build: .
-    container_name: naive-caddy
+    container_name: cool-tunnel
     restart: unless-stopped
     ports:
       - "80:80"
@@ -70,8 +70,8 @@ volumes:
 
 ```bash
 # Create project folder
-mkdir -p /opt/naive-caddy
-cd /opt/naive-caddy
+mkdir -p /opt/cool-tunnel
+cd /opt/cool-tunnel
 
 # Create Dockerfile
 cat > Dockerfile <<'EOF'
@@ -108,9 +108,9 @@ echo OK > site/index.html
 # Create docker-compose.yml
 cat > docker-compose.yml <<'EOF'
 services:
-  naive-caddy:
+  cool-tunnel:
     build: .
-    container_name: naive-caddy
+    container_name: cool-tunnel
     restart: unless-stopped
     ports:
       - "80:80"
@@ -136,13 +136,13 @@ docker compose up -d
 
 ```bash
 # Check logs
-docker logs --tail 30 naive-caddy
+docker logs --tail 30 cool-tunnel
 
 # Watch logs in real-time
-docker logs -f naive-caddy
+docker logs -f cool-tunnel
 
 # Confirm forward_proxy module loaded
-docker exec naive-caddy caddy list-modules | grep forward
+docker exec cool-tunnel caddy list-modules | grep forward
 
 # Restart container
 docker compose restart
@@ -191,9 +191,9 @@ If you get `SSL_ERROR_SYSCALL` on Mac client:
 - Verify Caddyfile uses `:443, DOMAIN` syntax
 - Check that `tls` directive is present
 - Ensure `file_server` is used instead of `respond "OK"`
-- Confirm forward_proxy module is loaded: `docker exec naive-caddy caddy list-modules | grep forward`
+- Confirm forward_proxy module is loaded: `docker exec cool-tunnel caddy list-modules | grep forward`
 
 If container won't start:
 - Check port 80 and 443 are free: `ss -ltnp | grep -E ':80|:443'`
 - Stop conflicting services: `systemctl stop nginx apache2 caddy`
-- Check Docker logs: `docker logs naive-caddy`
+- Check Docker logs: `docker logs cool-tunnel`

@@ -1,0 +1,69 @@
+// SystemIntegration/CodeSignVerifier.swift
+//
+// Wrapper around `SecStaticCodeCheckValidity` for tampering detection on
+// every binary the app spawns: the bundled `cool-tunnel-core` engine and
+// any user-supplied `naive` Mach-O.
+//
+// Validation here means: the binary has an intact code signature. Tampering
+// (replacing the file, modifying its bytes, stripping the signature) makes
+// the call fail. We deliberately do *not* require a specific identity so a
+// user can drop in their own `naive` build, but the binary must be signed.
+
+import Foundation
+import Security
+
+/// Errors produced by [`CodeSignVerifier`].
+public enum CodeSignError: Error, Sendable, Equatable {
+    /// `SecStaticCodeCreateWithPath` could not create a static code handle.
+    /// The path may not exist, may not be a Mach-O, or may not be readable.
+    case cannotCreateStaticCode(OSStatus)
+    /// The signature is missing, broken, or its hashes do not match the
+    /// binary's bytes — i.e. the file has been tampered with.
+    case invalidSignature(OSStatus)
+
+    public var localizedDescription: String {
+        switch self {
+        case .cannotCreateStaticCode(let status):
+            "could not read code signature (OSStatus \(status))"
+        case .invalidSignature(let status):
+            "code signature is invalid or missing (OSStatus \(status))"
+        }
+    }
+}
+
+/// Stateless verifier for Mach-O code signatures.
+public enum CodeSignVerifier {
+
+    /// Throws if the binary at `url` is not validly code-signed.
+    ///
+    /// Detects: an unsigned binary, a binary with a stripped signature, a
+    /// binary whose bytes have been modified after signing, an ad-hoc
+    /// signature with broken hashes. Does **not** restrict signing identity
+    /// — callers can layer team-id checks on top if needed.
+    public static func verifyValid(at url: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try Self.verifyValidSync(at: url)
+        }.value
+    }
+
+    private static func verifyValidSync(at url: URL) throws {
+        var staticCode: SecStaticCode?
+        let createStatus = SecStaticCodeCreateWithPath(
+            url as CFURL,
+            SecCSFlags(rawValue: 0),
+            &staticCode
+        )
+        guard createStatus == errSecSuccess, let code = staticCode else {
+            throw CodeSignError.cannotCreateStaticCode(createStatus)
+        }
+
+        let checkStatus = SecStaticCodeCheckValidity(
+            code,
+            SecCSFlags(rawValue: 0),
+            nil
+        )
+        guard checkStatus == errSecSuccess else {
+            throw CodeSignError.invalidSignature(checkStatus)
+        }
+    }
+}

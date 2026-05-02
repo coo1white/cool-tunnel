@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Server-Side Debugging Script for Debian 13
-# Tests Caddy, Docker, and Naive Proxy configuration
+# Tests Caddy, Docker, and COOL TUNNEL configuration
 
 echo "=========================================="
 echo "Server-Side Debugging Script"

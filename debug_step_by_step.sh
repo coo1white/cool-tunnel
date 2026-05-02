@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Step-by-Step Debugging for Naive Proxy
+# Step-by-Step Debugging for COOL TUNNEL
 # Run each command individually to identify the issue
 
 echo "=== STEP 1: Check if NaiveProxy is running ==="

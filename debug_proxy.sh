@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Naive Proxy Debugging Script
+# COOL TUNNEL Debugging Script
 # Tests connectivity from macOS client to Debian server with Caddy/Docker
 
 echo "=========================================="
