@@ -20,9 +20,7 @@ use thiserror::Error;
 /// assert_eq!(p.get(), 1080);
 /// assert!(Port::new(0).is_err());
 /// ```
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "u16", into = "u16")]
 pub struct Port(u16);
 

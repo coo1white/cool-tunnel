@@ -9,7 +9,7 @@
 
 use crate::domain::Port;
 
-use super::heuristics::{TrafficSnapshot, classify};
+use super::heuristics::{classify, TrafficSnapshot};
 
 /// Parses `lsof -iTCP` stdout, scoped to a known listener port.
 ///
@@ -55,7 +55,13 @@ pub fn parse(output: &str, port: Port) -> TrafficSnapshot {
         }
     }
 
-    classify(raw_lines, established, local_clients, remote, exposed_listen)
+    classify(
+        raw_lines,
+        established,
+        local_clients,
+        remote,
+        exposed_listen,
+    )
 }
 
 #[cfg(test)]
@@ -118,7 +124,8 @@ mod tests {
 
     #[test]
     fn remote_connection_counts_correctly() {
-        let output = "naive 1234 user 9u IPv4 c 0t0 TCP 192.168.1.5:54322->8.8.8.8:443 (ESTABLISHED)\n";
+        let output =
+            "naive 1234 user 9u IPv4 c 0t0 TCP 192.168.1.5:54322->8.8.8.8:443 (ESTABLISHED)\n";
         let snap = parse(output, port());
         assert_eq!(snap.established, 1);
         assert_eq!(snap.local_clients, 0);

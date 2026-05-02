@@ -6,4 +6,4 @@ pub mod naive_config;
 pub mod pac;
 
 pub use naive_config::NaiveConfig;
-pub use pac::{DEFAULT_DIRECT_DOMAINS, generate_pac};
+pub use pac::{generate_pac, DEFAULT_DIRECT_DOMAINS};

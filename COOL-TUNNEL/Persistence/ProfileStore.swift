@@ -41,8 +41,8 @@ public struct ProfileStore: @unchecked Sendable {
     /// `UserDefaults` blob with passwords stripped.
     public func loadProfiles() -> [Profile] {
         guard let data = defaults.data(forKey: Keys.profiles),
-              let stored = try? JSONDecoder().decode([Profile].self, from: data),
-              !stored.isEmpty
+            let stored = try? JSONDecoder().decode([Profile].self, from: data),
+            !stored.isEmpty
         else {
             return [.default]
         }
