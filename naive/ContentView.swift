@@ -23,6 +23,8 @@ private final class TunnelState: ObservableObject {
     @Published var isModeChanging = false
     @Published var abnormalTrafficBlocked = false
     var proxySessionID = UUID()
+    var modeCommandGeneration: UInt64 = 0
+    var pendingProxyRequest: PendingProxyRequest?
 
     // Activity monitor
     @Published var activityTimer: Timer?
@@ -32,8 +34,10 @@ private final class TunnelState: ObservableObject {
     @Published var isTestRunning = false
 
     // Logs
-    @Published var logs = "Proxy is stopped."
+    @Published var logLines: [String] = ["Proxy is stopped."]
     @Published var logLineCount = 1
+    @Published var logRevision: UInt64 = 0
+    var logCarry = ""
 
     // Profiles
     @Published var profiles = [ProxyProfile.defaultProfile]
@@ -42,6 +46,7 @@ private final class TunnelState: ObservableObject {
     // Settings
     @Published var directDomains = ContentView.defaultDirectDomains
     @Published var customBinaryPath = ""
+    @Published var skipProxyConfirmations = false
     var didLoadSettings = false
 }
 
@@ -50,6 +55,9 @@ private final class TunnelState: ObservableObject {
 struct ContentView: View {
     @StateObject private var tunnelState = TunnelState.shared
     @State private var showSettings = false
+    @State private var stressTask: Task<Void, Never>?
+    @State private var profileSyncTask: Task<Void, Never>?
+    @State private var isApplyingProfile = false
 
     // MARK: Storage keys & constants
 
@@ -58,12 +66,15 @@ struct ContentView: View {
         static let customBinaryPath = "tunnelState.customBinaryPath"
         static let profiles = "connectionProfiles"
         static let selectedProfile = "selectedConnectionProfile"
+        static let skipProxyConfirmations = "skipProxyConfirmations"
     }
 
     fileprivate static let appSupportDirectoryName = "NaiveProxyMac"
     fileprivate static let configFileName = "config.json"
     fileprivate static let pacFileName = "smart-proxy.pac"
     fileprivate static let maxLogLines = 1000
+    fileprivate static let logTrimBatchSize = 120
+    fileprivate static let logAutoScrollThrottleMs: Int = 140
 
     fileprivate static let byteCountFormatter: ByteCountFormatter = {
         let f = ByteCountFormatter()
@@ -97,11 +108,13 @@ struct ContentView: View {
         }
         .frame(minWidth: 840, idealWidth: 940, minHeight: 760, idealHeight: 820)
         .onAppear { loadSettings() }
-        .onChange(of: tunnelState.selectedProfileID) { applySelectedProfile() }
-        .onChange(of: tunnelState.server)    { syncSelectedProfile() }
-        .onChange(of: tunnelState.username)  { syncSelectedProfile() }
-        .onChange(of: tunnelState.password)  { syncSelectedProfile() }
-        .onChange(of: tunnelState.localPort) { syncSelectedProfile() }
+        .onChange(of: tunnelState.selectedProfileID) { _, _ in applySelectedProfile() }
+        // Debounce profile persistence to avoid stalling UI while typing.
+        .onChange(of: tunnelState.server)    { _, _ in scheduleProfileSync() }
+        .onChange(of: tunnelState.username)  { _, _ in scheduleProfileSync() }
+        .onChange(of: tunnelState.password)  { _, _ in scheduleProfileSync() }
+        .onChange(of: tunnelState.localPort) { _, _ in scheduleProfileSync() }
+        .onChange(of: tunnelState.skipProxyConfirmations) { _, _ in saveSkipProxyConfirmations() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             stopProxy()
         }
@@ -109,6 +122,7 @@ struct ContentView: View {
             SettingsView(
                 directDomains: $tunnelState.directDomains,
                 customBinaryPath: $tunnelState.customBinaryPath,
+                skipProxyConfirmations: $tunnelState.skipProxyConfirmations,
                 onSaveDomains: saveDirectDomains,
                 onReplaceBinary: replaceNaiveBinary,
                 onResetDomains: resetDirectDomains
@@ -249,6 +263,21 @@ extension ContentView {
         proxyButton("Settings", image: "gearshape") {
             showSettings = true
         }
+
+#if DEBUG
+        proxyButton(stressTask == nil ? "UX Stress: Rapid Switching" : "Stop UX Stress", image: "bolt") {
+            if let stressTask {
+                stressTask.cancel()
+                self.stressTask = nil
+                appendToLog("\n[Stress] Cancel requested.\n")
+            } else {
+                self.stressTask = Task { @MainActor in
+                    await runUXStressSwitching()
+                    self.stressTask = nil
+                }
+            }
+        }
+#endif
     }
 
     private func proxyButton(
@@ -261,6 +290,7 @@ extension ContentView {
                                isPrimary: isPrimary, isDisabled: disabled)
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
     private var logsView: some View {
@@ -274,12 +304,17 @@ extension ContentView {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    Text(tunnelState.logs)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .foregroundStyle(Color(nsColor: .textColor))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .id("log-bottom")
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(tunnelState.logLines.enumerated()), id: \.offset) { idx, line in
+                            Text(line)
+                                .font(.system(size: 12.5, design: .monospaced))
+                                .foregroundStyle(Color(nsColor: .textColor))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .id(idx)
+                        }
+                    }
+                    .padding(12)
                 }
                 .background(Color(nsColor: .textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -287,7 +322,17 @@ extension ContentView {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(.separator.opacity(0.35), lineWidth: 1)
                 }
-                .onChange(of: tunnelState.logs) { proxy.scrollTo("log-bottom", anchor: .bottom) }
+                // Under heavy logging, scrolling on every append can stall the UI. Throttle instead.
+                .onReceive(
+                    tunnelState.$logRevision.throttle(
+                        for: .milliseconds(Self.logAutoScrollThrottleMs),
+                        scheduler: RunLoop.main,
+                        latest: true
+                    )
+                ) { _ in
+                    let last = max(0, tunnelState.logLines.count - 1)
+                    proxy.scrollTo(last, anchor: .bottom)
+                }
             }
             .frame(minHeight: 160, maxHeight: .infinity)
         }
@@ -323,7 +368,6 @@ extension ContentView {
                     ForEach(tunnelState.profiles, id: \.id) { profile in
                         Button {
                             tunnelState.selectedProfileID = profile.id
-                            applySelectedProfile()
                         } label: {
                             ProfileRow(profile: profile,
                                        isSelected: tunnelState.selectedProfileID == profile.id)
@@ -389,8 +433,7 @@ extension ContentView {
         guard !tunnelState.isRunning, !tunnelState.isModeChanging else { return }
 
         guard let naiveURL = currentNaiveBinaryURL() else {
-            tunnelState.logs = "Error: naive binary not found in app bundle."
-            tunnelState.logLineCount = 1
+            setLogs("Error: naive binary not found in app bundle.")
             return
         }
         guard let safePort = validatedPortString() else {
@@ -439,8 +482,7 @@ extension ContentView {
                 }
             }
 
-            tunnelState.logs = "Starting NaiveProxy...\nBinary: \(naiveURL.path)\nConfig: \(configURL.path)\nRuntime: config file, listen=socks://127.0.0.1:\(safePort), proxy=\(maskedProxyURL)\n"
-            tunnelState.logLineCount = tunnelState.logs.reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
+            setLogs("Starting NaiveProxy...\nBinary: \(naiveURL.path)\nConfig: \(configURL.path)\nRuntime: config file, listen=socks://127.0.0.1:\(safePort), proxy=\(maskedProxyURL)\n")
             appendToLog("Binary size: \(fileSize(at: naiveURL.path)) bytes\n")
             try task.run()
 
@@ -495,6 +537,7 @@ extension ContentView {
     private func stopProxy() {
         stopActivityMonitor()
         tunnelState.proxySessionID = UUID()
+        tunnelState.modeCommandGeneration &+= 1
         tunnelState.isModeChanging = false
         (tunnelState.process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         tunnelState.process?.terminate()
@@ -521,9 +564,6 @@ extension ContentView {
         guard let safePort = validatedPortString(), let port = Int(safePort) else {
             appendToLog("\nInvalid local port.\n"); return
         }
-        guard !tunnelState.isModeChanging else {
-            appendToLog("\nMode change already running. Please wait.\n"); return
-        }
         guard confirmSystemProxyChange(mode: .global, port: port) else {
             appendToLog("\nCancelled global proxy change.\n"); return
         }
@@ -536,21 +576,29 @@ extension ContentView {
                     appendToLog("\nNaiveProxy is not listening on port \(port). Restarting proxy...\n")
                     restartProxy()
                 } else {
-                    proceedWithGlobalProxy(port: port)
+                    requestEnableGlobalProxy(port: port)
                 }
             }
         }
     }
 
-    private func proceedWithGlobalProxy(port: Int) {
+    private func requestEnableGlobalProxy(port: Int) {
+        if tunnelState.isModeChanging {
+            tunnelState.pendingProxyRequest = .enableGlobal(port: port)
+            appendToLog("\nQueued: enable Global proxy (will run after current change)\n")
+            return
+        }
+
+        let generation = nextModeCommandGeneration()
         tunnelState.isModeChanging = true
         appendToLog("\n=== Enabling Global SOCKS Proxy ===\n")
         appendToLog("Target: Wi-Fi service\n")
         appendToLog("SOCKS server: 127.0.0.1:\(port)\n")
 
         Task.detached(priority: .userInitiated) {
-            let result = enableGlobalProxyCommand(port: port)
+            let result = await SystemProxyCommandQueue.shared.enableGlobal(port: port)
             await MainActor.run {
+                guard tunnelState.modeCommandGeneration == generation else { return }
                 appendToLog(result.output)
                 if result.success, tunnelState.isRunning {
                     tunnelState.activeProxyMode = .global
@@ -563,6 +611,7 @@ extension ContentView {
                     appendToLog("Check system permissions and network settings\n")
                 }
                 tunnelState.isModeChanging = false
+                drainPendingProxyRequestIfNeeded()
             }
         }
     }
@@ -571,9 +620,6 @@ extension ContentView {
         guard let safePort = validatedPortString(), let port = Int(safePort) else {
             appendToLog("\nInvalid local port. Smart proxy was not enabled.\n"); return
         }
-        guard !tunnelState.isModeChanging else {
-            appendToLog("\nMode change already running. Please wait.\n"); return
-        }
         guard confirmSystemProxyChange(mode: .smart, port: port) else {
             appendToLog("\nCancelled smart proxy change.\n"); return
         }
@@ -581,59 +627,93 @@ extension ContentView {
         do {
             let pacURL = try writePACFile(port: port)
             let pacURLString = pacURL.absoluteString
-            tunnelState.isModeChanging = true
-            appendToLog("\n=== Enabling Smart PAC Proxy ===\n")
-            appendToLog("PAC file: \(pacURL.path)\n")
-            appendToLog("Direct domains: \(tunnelState.directDomains.count) configured\n")
-
-            Task.detached(priority: .userInitiated) {
-                let result = enableSmartProxyCommand(port: port, pacURLString: pacURLString)
-                await MainActor.run {
-                    appendToLog(result.output)
-                    if result.success, tunnelState.isRunning {
-                        tunnelState.activeProxyMode = .smart
-                        appendToLog("✓ Smart proxy enabled successfully\n")
-                        appendToLog("China/domains go DIRECT, other traffic via SG VPS\n")
-                    } else if !tunnelState.isRunning {
-                        tunnelState.activeProxyMode = .stopped
-                    } else {
-                        appendToLog("✗ Failed to enable smart proxy\n")
-                    }
-                    tunnelState.isModeChanging = false
-                }
-            }
+            requestEnableSmartProxy(port: port, pacURLString: pacURLString, pacPathForLog: pacURL.path)
         } catch {
             appendToLog("\nFailed to write PAC file: \(error.localizedDescription)\n")
         }
     }
 
-    private func disableSystemProxy() {
-        guard !tunnelState.isModeChanging else {
-            appendToLog("\nMode change already running. Please wait.\n"); return
+    private func requestEnableSmartProxy(port: Int, pacURLString: String, pacPathForLog: String) {
+        if tunnelState.isModeChanging {
+            tunnelState.pendingProxyRequest = .enableSmart(port: port, pacURLString: pacURLString, pacPathForLog: pacPathForLog)
+            appendToLog("\nQueued: enable Smart proxy (will run after current change)\n")
+            return
         }
+
+        let generation = nextModeCommandGeneration()
+        tunnelState.isModeChanging = true
+        appendToLog("\n=== Enabling Smart PAC Proxy ===\n")
+        appendToLog("PAC file: \(pacPathForLog)\n")
+        appendToLog("Direct domains: \(tunnelState.directDomains.count) configured\n")
+
+        Task.detached(priority: .userInitiated) {
+            let result = await SystemProxyCommandQueue.shared.enableSmart(port: port, pacURLString: pacURLString)
+            await MainActor.run {
+                guard tunnelState.modeCommandGeneration == generation else { return }
+                appendToLog(result.output)
+                if result.success, tunnelState.isRunning {
+                    tunnelState.activeProxyMode = .smart
+                    appendToLog("✓ Smart proxy enabled successfully\n")
+                    appendToLog("China/domains go DIRECT, other traffic via SG VPS\n")
+                } else if !tunnelState.isRunning {
+                    tunnelState.activeProxyMode = .stopped
+                } else {
+                    appendToLog("✗ Failed to enable smart proxy\n")
+                }
+                tunnelState.isModeChanging = false
+                drainPendingProxyRequestIfNeeded()
+            }
+        }
+    }
+
+    private func disableSystemProxy() {
         let nextMode: ActiveProxyMode = tunnelState.isRunning ? .localOnly : .stopped
+        requestDisableSystemProxy(nextMode: nextMode)
+    }
+
+    private func requestDisableSystemProxy(nextMode: ActiveProxyMode) {
+        if tunnelState.isModeChanging {
+            tunnelState.pendingProxyRequest = .disable(nextMode: nextMode)
+            appendToLog("\nQueued: disable system proxy (will run after current change)\n")
+            return
+        }
+
+        let generation = nextModeCommandGeneration()
         tunnelState.isModeChanging = true
         appendToLog("\nDisabling system proxy...\n")
 
         Task.detached(priority: .userInitiated) {
-            let result = disableSystemProxyCommand()
+            let result = await SystemProxyCommandQueue.shared.disable()
             await MainActor.run {
+                guard tunnelState.modeCommandGeneration == generation else { return }
                 appendToLog(result.output)
                 if result.success { tunnelState.activeProxyMode = nextMode }
                 tunnelState.isModeChanging = false
+                drainPendingProxyRequestIfNeeded()
             }
         }
     }
 
     private func disableAllSystemProxies() {
+        let generation = nextModeCommandGeneration()
         appendToLog("\nRestoring macOS proxy settings after stop...\n")
         Task.detached(priority: .userInitiated) {
-            let result = disableSystemProxyCommand()
-            await MainActor.run { appendToLog(result.output) }
+            let result = await SystemProxyCommandQueue.shared.disable()
+            await MainActor.run {
+                guard tunnelState.modeCommandGeneration == generation else { return }
+                appendToLog(result.output)
+            }
         }
     }
 
+    private func nextModeCommandGeneration() -> UInt64 {
+        tunnelState.modeCommandGeneration &+= 1
+        return tunnelState.modeCommandGeneration
+    }
+
     private func confirmSystemProxyChange(mode: ActiveProxyMode, port: Int) -> Bool {
+        if tunnelState.skipProxyConfirmations { return true }
+
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = mode == .global ? "Enable Global System Proxy?" : "Enable Smart System Proxy?"
@@ -642,7 +722,14 @@ extension ContentView {
             : "This will change macOS network settings using networksetup and enable a local PAC file. Matching direct domains bypass the proxy; other proxy-aware traffic uses 127.0.0.1:\(port). You can undo it with Disable System Proxy."
         alert.addButton(withTitle: "Enable")
         alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don’t ask again"
+        let didEnable = alert.runModal() == .alertFirstButtonReturn
+        if didEnable, alert.suppressionButton?.state == .on {
+            tunnelState.skipProxyConfirmations = true
+            saveSkipProxyConfirmations()
+        }
+        return didEnable
     }
 
     private func checkProxyListening(port: Int) async -> Bool {
@@ -654,6 +741,21 @@ extension ContentView {
 // MARK: - Activity Monitor
 
 extension ContentView {
+    @MainActor
+    private func drainPendingProxyRequestIfNeeded() {
+        guard !tunnelState.isModeChanging, let req = tunnelState.pendingProxyRequest else { return }
+        tunnelState.pendingProxyRequest = nil
+
+        switch req {
+        case .enableGlobal(let port):
+            requestEnableGlobalProxy(port: port)
+        case .enableSmart(let port, let pacURLString, let pacPathForLog):
+            requestEnableSmartProxy(port: port, pacURLString: pacURLString, pacPathForLog: pacPathForLog)
+        case .disable(let nextMode):
+            requestDisableSystemProxy(nextMode: nextMode)
+        }
+    }
+
     private func startActivityMonitor(pid: Int32) {
         stopActivityMonitor()
         tunnelState.lastActivitySnapshot = ""
@@ -805,28 +907,76 @@ extension ContentView {
 // MARK: - Logging
 
 extension ContentView {
-    private func appendToLog(_ text: String) {
-        tunnelState.logs += text
-        tunnelState.logLineCount += text.reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
+    private func setLogs(_ text: String) {
+        tunnelState.logCarry = ""
+        tunnelState.logLines = splitToDisplayLines(text, carry: &tunnelState.logCarry)
+        if tunnelState.logLines.isEmpty { tunnelState.logLines = [""] }
+        tunnelState.logLineCount = tunnelState.logLines.count
+        tunnelState.logRevision &+= 1
+    }
 
-        if tunnelState.logLineCount > Self.maxLogLines {
-            let trimmed = tunnelState.logs
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .suffix(Self.maxLogLines)
-            tunnelState.logs = trimmed.joined(separator: "\n")
-            tunnelState.logLineCount = trimmed.count
+    private func appendToLog(_ text: String) {
+        let newLines = splitToDisplayLines(text, carry: &tunnelState.logCarry)
+        if tunnelState.logLines.isEmpty { tunnelState.logLines = [""] }
+        if newLines.isEmpty {
+            // no complete lines yet; just update last visible line with carry
+            tunnelState.logLines[tunnelState.logLines.count - 1] = tunnelState.logCarry
+        } else {
+            // Replace last line with carry (partial), then append complete lines.
+            tunnelState.logLines[tunnelState.logLines.count - 1] = tunnelState.logCarry
+            tunnelState.logLines.append(contentsOf: newLines)
         }
+        tunnelState.logLineCount = tunnelState.logLines.count
+        tunnelState.logRevision &+= 1
+
+        trimLogsIfNeeded()
     }
 
     private func clearLogs() {
-        tunnelState.logs = ""
-        tunnelState.logLineCount = 0
+        tunnelState.logCarry = ""
+        tunnelState.logLines = [""]
+        tunnelState.logLineCount = 1
+        tunnelState.logRevision &+= 1
+    }
+
+    private func trimLogsIfNeeded() {
+        let threshold = Self.maxLogLines + Self.logTrimBatchSize
+        guard tunnelState.logLineCount > threshold else { return }
+        let dropCount = min(Self.logTrimBatchSize, max(0, tunnelState.logLineCount - Self.maxLogLines))
+        guard dropCount > 0 else { return }
+        tunnelState.logLines.removeFirst(dropCount)
+        if tunnelState.logLines.isEmpty { tunnelState.logLines = [""] }
+        tunnelState.logLineCount = tunnelState.logLines.count
+    }
+
+    private func splitToDisplayLines(_ incoming: String, carry: inout String) -> [String] {
+        if incoming.isEmpty { return [] }
+        let combined = carry + incoming
+        let parts = combined.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if combined.hasSuffix("\n") {
+            carry = ""
+            return parts
+        } else {
+            carry = parts.last ?? ""
+            return Array(parts.dropLast())
+        }
     }
 }
 
 // MARK: - Profiles & Persistence
 
 extension ContentView {
+    @MainActor
+    private func scheduleProfileSync() {
+        guard !isApplyingProfile else { return }
+        profileSyncTask?.cancel()
+        profileSyncTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms debounce
+            guard !Task.isCancelled else { return }
+            syncSelectedProfile()
+        }
+    }
+
     private func loadSettings() {
         guard !tunnelState.didLoadSettings else { return }
         tunnelState.didLoadSettings = true
@@ -836,6 +986,7 @@ extension ContentView {
             tunnelState.directDomains = saved
         }
         tunnelState.customBinaryPath = UserDefaults.standard.string(forKey: Keys.customBinaryPath) ?? ""
+        tunnelState.skipProxyConfirmations = UserDefaults.standard.bool(forKey: Keys.skipProxyConfirmations)
     }
 
     private func loadProfiles() {
@@ -874,10 +1025,12 @@ extension ContentView {
               let profile = tunnelState.profiles.first(where: { $0.id == tunnelState.selectedProfileID })
         else { return }
 
+        isApplyingProfile = true
         tunnelState.server = profile.server
         tunnelState.username = profile.username
         tunnelState.password = profile.password
         tunnelState.localPort = profile.localPort
+        isApplyingProfile = false
         saveProfiles()
     }
 
@@ -932,6 +1085,10 @@ extension ContentView {
             .filter { !$0.isEmpty }
         UserDefaults.standard.set(tunnelState.directDomains, forKey: Keys.directDomains)
         appendToLog("\nSaved \(tunnelState.directDomains.count) direct domains. Restart proxy to regenerate PAC rules.\n")
+    }
+
+    private func saveSkipProxyConfirmations() {
+        UserDefaults.standard.set(tunnelState.skipProxyConfirmations, forKey: Keys.skipProxyConfirmations)
     }
 
     private func resetDirectDomains() {
@@ -1176,6 +1333,12 @@ private enum ProxyTestMode: Sendable {
     }
 }
 
+private enum PendingProxyRequest: Sendable {
+    case enableGlobal(port: Int)
+    case enableSmart(port: Int, pacURLString: String, pacPathForLog: String)
+    case disable(nextMode: ActiveProxyMode)
+}
+
 private struct TrafficInspection: Sendable {
     let snapshot: String
     let establishedConnections: Int
@@ -1309,6 +1472,7 @@ private struct ProfileRow: View {
 private struct SettingsView: View {
     @Binding var directDomains: [String]
     @Binding var customBinaryPath: String
+    @Binding var skipProxyConfirmations: Bool
 
     let onSaveDomains: () -> Void
     let onReplaceBinary: (URL) -> Void
@@ -1332,6 +1496,7 @@ private struct SettingsView: View {
                             HStack(alignment: .top, spacing: 16) { binarySection; aboutSection }
                             VStack(alignment: .leading, spacing: 16) { binarySection; aboutSection }
                         }
+                        proxyConfirmSection
                     }
                     .padding(.vertical, 2)
                 }
@@ -1430,6 +1595,22 @@ private struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private var proxyConfirmSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Skip confirmation dialogs for system proxy changes", isOn: $skipProxyConfirmations)
+                    .toggleStyle(.switch)
+                Text("If enabled, Smart/Global proxy buttons will change macOS network settings without showing a modal warning each time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(6)
+        } label: {
+            Label("System proxy confirmations", systemImage: "exclamationmark.triangle")
+                .font(.system(size: 14, weight: .bold))
+        }
+    }
+
     private func infoRow(_ label: String, value: String, monospaced: Bool = false) -> some View {
         HStack {
             Text(label).foregroundStyle(.secondary)
@@ -1448,7 +1629,8 @@ private struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "rev0.0.1"
+        let v = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.1.2"
+        return v.hasPrefix("rev") ? v : "rev\(v)"
     }
 }
 
@@ -1522,6 +1704,22 @@ nonisolated private func runCommandOutputStatic(_ path: String, _ arguments: [St
 
 nonisolated private func runNetworkSetupStatic(arguments: [String]) -> CommandResult {
     runCommandResultStatic("/usr/sbin/networksetup", arguments)
+}
+
+private actor SystemProxyCommandQueue {
+    static let shared = SystemProxyCommandQueue()
+
+    func enableGlobal(port: Int) -> ProxyCommandResult {
+        enableGlobalProxyCommand(port: port)
+    }
+
+    func enableSmart(port: Int, pacURLString: String) -> ProxyCommandResult {
+        enableSmartProxyCommand(port: port, pacURLString: pacURLString)
+    }
+
+    func disable() -> ProxyCommandResult {
+        disableSystemProxyCommand()
+    }
 }
 
 // MARK: - Network Setup Commands
@@ -1734,3 +1932,104 @@ private func shortTimeString() -> String {
 // MARK: - Preview
 
 #Preview { ContentView() }
+
+// MARK: - UX Stress Runner (Debug)
+
+extension ContentView {
+    @MainActor
+    fileprivate func runUXStressSwitching() async {
+        // Stress goal: reproduce “user repeatedly switching button functions” without touching
+        // macOS network settings or spawning processes. This targets UI stalls/re-renders/log spam.
+        let iterations = 1800
+        let delayNs: UInt64 = 9_000_000 // ~9ms (higher pressure than a frame)
+
+        appendToLog("\n[Stress] Starting rapid switching (\(iterations) iterations)...\n")
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        var last = start
+        var hitchesOver50ms = 0
+        var worstMs = 0
+        var injectedProfileCount = 0
+
+        func durationMs(_ d: Duration) -> Int {
+            let s = Double(d.components.seconds) * 1000
+            let msFromAttos = Double(d.components.attoseconds) / 1e15
+            return Int((s + msFromAttos).rounded())
+        }
+
+        for n in 1...iterations {
+            if Task.isCancelled { break }
+
+            // Simulate fast user toggles across the common buttons:
+            // - start/stop (UI state flips only)
+            // - smart/global/restore (mode + modeChanging)
+            switch n % 6 {
+            case 0:
+                // "Start Smart Mode" (UI-only simulation)
+                tunnelState.isRunning = true
+                tunnelState.activeProxyMode = .smart
+                appendToLog("[Stress] start -> Smart\n")
+            case 1:
+                // "Enable Global Proxy" (modeChanging flip)
+                tunnelState.isModeChanging = true
+                tunnelState.activeProxyMode = .global
+                tunnelState.isModeChanging = false
+                appendToLog("[Stress] switch -> Global\n")
+            case 2:
+                // "Restore macOS Proxy" (back to local only)
+                tunnelState.isModeChanging = true
+                tunnelState.activeProxyMode = .localOnly
+                tunnelState.isModeChanging = false
+                appendToLog("[Stress] restore -> Local Only\n")
+            case 3:
+                // "Timeout Test" flag flicker
+                tunnelState.isTestRunning = true
+                tunnelState.isTestRunning = false
+            case 4:
+                // Profile switching pressure (simulate user clicking profile list rapidly)
+                if tunnelState.profiles.count < 6, injectedProfileCount < 5 {
+                    injectedProfileCount += 1
+                    tunnelState.profiles.append(ProxyProfile(
+                        id: UUID().uuidString,
+                        server: "stress-\(injectedProfileCount).example.com",
+                        username: "u\(injectedProfileCount)",
+                        password: "",
+                        localPort: "\(1080 + injectedProfileCount)"
+                    ))
+                }
+                if let random = tunnelState.profiles.randomElement() {
+                    tunnelState.selectedProfileID = random.id
+                }
+            default:
+                // "Stop"
+                tunnelState.isRunning = false
+                tunnelState.activeProxyMode = .stopped
+            }
+
+            // Extra logging bursts to test log view pressure.
+            if n % 25 == 0 {
+                for i in 0..<10 {
+                    appendToLog("[Stress] burst \(n).\(i) mode=\(tunnelState.activeProxyMode.title)\n")
+                }
+            }
+            if n % 240 == 0 { clearLogs() }
+
+            let now = clock.now
+            let delta = last.duration(to: now)
+            let deltaMs = durationMs(delta)
+            if deltaMs > 50 {
+                hitchesOver50ms += 1
+                worstMs = max(worstMs, deltaMs)
+            }
+            last = now
+
+            try? await Task.sleep(nanoseconds: delayNs)
+        }
+
+        let elapsed = start.duration(to: clock.now)
+        let elapsedMs = durationMs(elapsed)
+
+        appendToLog("\n[Stress] Done. elapsed=\(elapsedMs)ms, hitches(>50ms)=\(hitchesOver50ms), worst=\(worstMs)ms\n")
+    }
+}
