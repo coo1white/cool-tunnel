@@ -314,11 +314,17 @@ public final class TunnelOrchestrator {
     }
 
     public func runDiagnostics() async {
+        // Wall-clock the whole call client-side so the summary can show
+        // total elapsed (engine probes are streamed individually via
+        // `diagnosticProgress` events while we await the response).
+        let started = Date()
+        appendInfo("diagnostics: starting…")
         do {
             let response = try await core.send(.runDiagnostics)
             if case .diagnostic(let report) = response {
                 lastDiagnosticReport = report
-                appendInfo("diagnostics: \(report.probes.count) probes")
+                let total = Self.formatElapsed(since: started)
+                appendInfo("diagnostics: \(report.probes.count) probes in \(total)")
             }
         } catch {
             recordError("diagnostics failed: \(error)")
@@ -326,15 +332,52 @@ public final class TunnelOrchestrator {
     }
 
     public func runLatencyTest(mode: ProxyTestMode) async {
+        let started = Date()
+        appendInfo("latency: starting (\(mode.rawValue))…")
         do {
             let response = try await core.send(.runLatencyTest(mode: mode))
             if case .latency(let report) = response {
                 lastLatencyReport = report
-                appendInfo("latency: \(report.samples.count) samples")
+                // Per-sample timing breakdown into the live log so the
+                // user can read the DNS / connect / TLS / first-byte
+                // split alongside the total — matches how clash-verge
+                // surfaces probe results in its log pane.
+                for sample in report.samples {
+                    appendInfo(Self.formatSampleLine(sample))
+                }
+                let total = Self.formatElapsed(since: started)
+                appendInfo("latency: \(report.samples.count) samples in \(total)")
             }
         } catch {
             recordError("latency test failed: \(error)")
         }
+    }
+
+    // MARK: - Time formatting helpers
+
+    /// Renders a `Date` interval as an `Nms` (or `N.NNs` if ≥ 1s) tag
+    /// for log lines. Fractional under-millisecond values round up to
+    /// `1ms` so user-visible timings never show `0ms`.
+    private static func formatElapsed(since start: Date) -> String {
+        let ms = max(1.0, Date().timeIntervalSince(start) * 1000.0)
+        if ms >= 1000.0 {
+            return String(format: "%.2fs", ms / 1000.0)
+        }
+        return "\(Int(ms.rounded()))ms"
+    }
+
+    /// One-liner readout for a [`LatencySample`], suitable for the live
+    /// log. Includes total elapsed, the curl-reported breakdown
+    /// (DNS / connect / TLS / first-byte), and a status glyph.
+    private static func formatSampleLine(_ sample: LatencySample) -> String {
+        let glyph = sample.ok ? "✓" : "✗"
+        let total = "\(Int(sample.elapsedMs.rounded()))ms"
+        let dns = "\(Int(sample.dnsMs.rounded()))ms"
+        let connect = "\(Int(sample.connectMs.rounded()))ms"
+        let tls = "\(Int(sample.tlsMs.rounded()))ms"
+        let firstByte = "\(Int(sample.firstByteMs.rounded()))ms"
+        return
+            "\(glyph) \(sample.url) total=\(total) dns=\(dns) connect=\(connect) tls=\(tls) ttfb=\(firstByte)"
     }
 
     // MARK: - Event subscription
@@ -368,8 +411,16 @@ public final class TunnelOrchestrator {
                 recordError("Critical: \(detail). Auto-stopping.")
                 Task { await self.stop() }
             }
-        case .diagnosticProgress(let step, let ok):
-            appendInfo("\(ok ? "✓" : "✗") \(step)")
+        case .diagnosticProgress(let step, let ok, let elapsedMs):
+            // `elapsedMs == 0` means the engine omitted timing (older
+            // build); fall back to the legacy bare-step format so users
+            // running mismatched binaries still get useful output.
+            let glyph = ok ? "✓" : "✗"
+            if elapsedMs == 0 {
+                appendInfo("\(glyph) \(step)")
+            } else {
+                appendInfo("\(glyph) \(step) (\(elapsedMs)ms)")
+            }
         }
     }
 

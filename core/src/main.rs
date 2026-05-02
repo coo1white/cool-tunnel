@@ -355,7 +355,10 @@ async fn dispatch(
             let port = current_port(&state).await.ok_or_else(|| {
                 ErrorPayload::new("not_running", "diagnostics require a running proxy")
             })?;
-            let report = run_diagnostics(port)
+            // Pass the engine-wide events channel so each probe can
+            // emit a `DiagnosticProgress` with timing as it completes.
+            // The Swift orchestrator turns those into live log lines.
+            let report = run_diagnostics(port, &events)
                 .await
                 .map_err(|err| ErrorPayload::new("diagnostic_failed", err.to_string()))?;
             Ok(ResponsePayload::Diagnostic(report))
@@ -364,7 +367,7 @@ async fn dispatch(
             let port = current_port(&state).await.ok_or_else(|| {
                 ErrorPayload::new("not_running", "latency test requires a running proxy")
             })?;
-            let report = run_latency(mode, port)
+            let report = run_latency(mode, port, &events)
                 .await
                 .map_err(|err| ErrorPayload::new("diagnostic_failed", err.to_string()))?;
             Ok(ResponsePayload::Latency(report))

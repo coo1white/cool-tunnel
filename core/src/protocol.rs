@@ -259,12 +259,20 @@ pub enum Event {
         /// Human-readable detail.
         detail: String,
     },
-    /// Diagnostic progress for long-running operations.
+    /// Diagnostic progress for long-running operations. Emitted live as
+    /// each probe inside `run_diagnostics` / `run_latency` finishes so
+    /// the UI log can render `✓ probe_name (47ms)` in real time instead
+    /// of waiting for the whole report to come back as a single
+    /// `Response::Diagnostic` / `Response::Latency` payload.
     DiagnosticProgress {
-        /// Step name.
+        /// Step name (probe URL or symbolic identifier).
         step: String,
         /// `true` when the step finished without error.
         ok: bool,
+        /// Wall-clock duration of just this step, in milliseconds.
+        /// Defaults to 0 in older clients that did not include timing.
+        #[serde(default)]
+        elapsed_ms: u64,
     },
 }
 
