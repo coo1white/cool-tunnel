@@ -1,0 +1,53 @@
+# Server-Side Debugging Commands (Debian 13)
+# Run these one by one on your server
+
+# COMMAND 1: Check Docker status
+systemctl status docker
+
+# COMMAND 2: Check Docker containers
+docker ps -a
+
+# COMMAND 3: Check if port 443 is listening
+netstat -tlnp | grep :443
+
+# COMMAND 4: Check Caddy container status (if running in Docker)
+docker ps | grep caddy
+
+# COMMAND 5: Check Caddy service status (if running as system service)
+systemctl status caddy
+
+# COMMAND 6: Check Caddy logs (Docker)
+docker logs --tail 20 $(docker ps -q -f name=caddy)
+
+# COMMAND 7: Check Caddy logs (system service)
+journalctl -u caddy -n 20 --no-pager
+
+# COMMAND 8: Check firewall status
+sudo ufw status
+
+# COMMAND 9: Check Caddyfile (system)
+cat /etc/caddy/Caddyfile
+
+# COMMAND 10: Check Caddyfile (Docker container)
+docker exec $(docker ps -q -f name=caddy) cat /etc/caddy/Caddyfile
+
+# COMMAND 11: Test local connection to port 443
+curl -v --max-time 5 https://localhost
+
+# COMMAND 12: Check Docker networks
+docker network ls
+
+# COMMAND 13: Check system resources
+free -h
+
+# COMMAND 14: Check disk space
+df -h
+
+# COMMAND 15: Restart Docker (if needed)
+sudo systemctl restart docker
+
+# COMMAND 16: Restart Caddy (Docker)
+docker restart <caddy-container-name>
+
+# COMMAND 17: Restart Caddy (system service)
+sudo systemctl restart caddy
