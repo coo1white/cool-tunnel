@@ -1,0 +1,79 @@
+// Persistence/SettingsStore.swift
+//
+// Settings unrelated to a specific profile: the direct-domain list, an
+// optional override path for the bundled `naive` binary, and the user's
+// preference about confirmation dialogs.
+
+import Foundation
+
+/// Persisted user settings.
+public struct AppSettings: Sendable, Codable, Equatable {
+    public var directDomains: [String]
+    public var customNaiveBinaryPath: String
+    public var skipProxyConfirmations: Bool
+
+    public init(
+        directDomains: [String],
+        customNaiveBinaryPath: String,
+        skipProxyConfirmations: Bool
+    ) {
+        self.directDomains = directDomains
+        self.customNaiveBinaryPath = customNaiveBinaryPath
+        self.skipProxyConfirmations = skipProxyConfirmations
+    }
+
+    /// Default `AppSettings` matching the previously hard-coded Swift
+    /// defaults.
+    public static let `default` = AppSettings(
+        directDomains: defaultDirectDomains,
+        customNaiveBinaryPath: "",
+        skipProxyConfirmations: false
+    )
+
+    /// Direct-domain list shipped out of the box. Mirrors
+    /// `core::config::pac::DEFAULT_DIRECT_DOMAINS`.
+    public static let defaultDirectDomains: [String] = [
+        ".cn", "baidu.com", "bdstatic.com", "bilibili.com", "douyin.com",
+        "jd.com", "mi.com", "netease.com", "qq.com", "taobao.com",
+        "tmall.com", "weibo.com", "weixin.qq.com", "xiaohongshu.com",
+        "youku.com", "zhihu.com",
+    ]
+}
+
+/// Persists [`AppSettings`] in `UserDefaults`. Each field has its own key
+/// so partial reads remain useful when a future field is added.
+///
+/// Marked `@unchecked Sendable` because `UserDefaults` is documented
+/// as thread-safe but does not yet conform to `Sendable` itself.
+public struct SettingsStore: @unchecked Sendable {
+
+    private enum Keys {
+        static let directDomains = "directDomains"
+        static let customBinary = "customNaiveBinaryPath"
+        static let skipConfirmations = "skipProxyConfirmations"
+    }
+
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public func load() -> AppSettings {
+        let direct = defaults.stringArray(forKey: Keys.directDomains)
+            ?? AppSettings.defaultDirectDomains
+        let custom = defaults.string(forKey: Keys.customBinary) ?? ""
+        let skip = defaults.bool(forKey: Keys.skipConfirmations)
+        return AppSettings(
+            directDomains: direct,
+            customNaiveBinaryPath: custom,
+            skipProxyConfirmations: skip
+        )
+    }
+
+    public func save(_ settings: AppSettings) {
+        defaults.set(settings.directDomains, forKey: Keys.directDomains)
+        defaults.set(settings.customNaiveBinaryPath, forKey: Keys.customBinary)
+        defaults.set(settings.skipProxyConfirmations, forKey: Keys.skipConfirmations)
+    }
+}
