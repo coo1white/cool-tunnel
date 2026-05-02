@@ -118,6 +118,15 @@ public final class TunnelOrchestrator {
     // MARK: - Bootstrap
 
     /// Loads persisted state and starts the engine. Idempotent.
+    ///
+    /// Performs **exactly one** code-signature check before the UI
+    /// appears: `cool-tunnel-core` is verified inside [`CoreClient.start`]
+    /// because the engine has to launch for the app to function. The
+    /// bundled `naive` binary is **not** verified here — its signature,
+    /// host-arch slice, and `--version` output are inspected lazily the
+    /// first time the user opens Settings or clicks Start, so launch
+    /// stays fast and we avoid pre-paying authentication cost the user
+    /// may never need (read-only profile browsing doesn't spawn naive).
     public func bootstrapIfNeeded() async {
         guard !didBootstrap else { return }
         didBootstrap = true
@@ -126,7 +135,6 @@ public final class TunnelOrchestrator {
         selectedProfileID = profileStore.loadSelectedID() ?? profiles.first?.id
         settings = settingsStore.load()
         firewallState = await firewall.currentState()
-        await refreshNaiveDescriptor()
 
         do {
             try await core.start()
@@ -137,8 +145,10 @@ public final class TunnelOrchestrator {
     }
 
     /// Re-inspects the active naive binary and caches the descriptor for
-    /// the Settings view. Called on bootstrap and after the user changes
-    /// the override path so the chip / arch summary stays accurate.
+    /// the Settings view. Called from `SettingsView.onAppear` (lazy first
+    /// inspection) and after the user changes the override path so the
+    /// chip / arch summary stays accurate. **Not** called from
+    /// `bootstrapIfNeeded` — see that method's docs for the rationale.
     public func refreshNaiveDescriptor() async {
         do {
             activeNaiveDescriptor = try await naiveResolver.resolve(settings: settings)
