@@ -88,6 +88,19 @@ public struct SettingsView: View {
             // touches the Test button.
             inspection = orchestrator.activeNaiveDescriptor
         }
+        .task {
+            // Bootstrap deliberately skips naive verification to keep the
+            // launch path to a single auth check (cool-tunnel-core only).
+            // The Settings view is the natural place to pay that cost
+            // lazily — by the time the user is here they're about to
+            // either configure the binary or just look at it. Running
+            // the inspection in a `.task` (cancelled on view dismiss)
+            // means we never block presentation of the sheet.
+            if orchestrator.activeNaiveDescriptor == nil {
+                await orchestrator.refreshNaiveDescriptor()
+                inspection = orchestrator.activeNaiveDescriptor
+            }
+        }
     }
 
     // MARK: - Chip detection row
