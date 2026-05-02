@@ -13,7 +13,7 @@ use crate::domain::{Port, ProxyTestMode};
 use crate::protocol::{DiagnosticReport, LatencyReport, ProbeResult};
 
 pub use metrics::{parse_write_out, secs_to_ms};
-pub use probe::{ProbeOptions, run_probe};
+pub use probe::{run_probe, ProbeOptions};
 
 /// Targets used for the global-mode latency test. Matches the Swift
 /// `runTimeoutTest` argument list.

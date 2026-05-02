@@ -54,7 +54,10 @@ mod tests {
                    time_total=0.345678\n";
         let m = parse_write_out(raw);
         assert_eq!(m.get("http_code").map(String::as_str), Some("204"));
-        assert_eq!(m.get("remote_ip").map(String::as_str), Some("142.250.190.36"));
+        assert_eq!(
+            m.get("remote_ip").map(String::as_str),
+            Some("142.250.190.36")
+        );
         let dns_ms = secs_to_ms(m.get("time_namelookup")).unwrap();
         assert!((dns_ms - 1.234).abs() < 0.01);
     }

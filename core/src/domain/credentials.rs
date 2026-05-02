@@ -194,7 +194,10 @@ mod tests {
 
     #[test]
     fn rejects_empty_username() {
-        assert_eq!(Username::parse("   "), Err(InvalidCredentials::EmptyUsername));
+        assert_eq!(
+            Username::parse("   "),
+            Err(InvalidCredentials::EmptyUsername)
+        );
     }
 
     #[test]

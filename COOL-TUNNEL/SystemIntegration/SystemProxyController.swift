@@ -71,7 +71,8 @@ public struct SystemProxyController: Sendable {
     /// services and the leading "An asterisk..." legend line.
     public func activeServices() async throws -> [String] {
         let output = try await run(["-listallnetworkservices"])
-        return output
+        return
+            output
             .split(separator: "\n", omittingEmptySubsequences: true)
             .lazy
             .filter { !$0.contains("asterisk") }

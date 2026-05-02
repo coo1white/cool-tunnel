@@ -60,7 +60,8 @@ public struct SettingsStore: @unchecked Sendable {
     }
 
     public func load() -> AppSettings {
-        let direct = defaults.stringArray(forKey: Keys.directDomains)
+        let direct =
+            defaults.stringArray(forKey: Keys.directDomains)
             ?? AppSettings.defaultDirectDomains
         let custom = defaults.string(forKey: Keys.customBinary) ?? ""
         let skip = defaults.bool(forKey: Keys.skipConfirmations)

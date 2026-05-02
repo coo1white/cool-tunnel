@@ -59,8 +59,7 @@ public struct ControlPanelView: View {
     private func startButton(mode: ProxyMode, label: String, system: String) -> some View {
         Button {
             Task {
-                do { try await orchestrator.start(mode: mode) }
-                catch { /* surfaced via lastError */ }
+                do { try await orchestrator.start(mode: mode) } catch { /* surfaced via lastError */  }
             }
         } label: {
             Label(label, systemImage: system)
