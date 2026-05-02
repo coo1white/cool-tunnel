@@ -342,7 +342,7 @@ public struct CoreRequestFrame: Sendable, Encodable {
         case .stopProxy, .runDiagnostics, .shutdown:
             try container.encodeNil(forKey: .params)
         case .validateProfile(let profile),
-             .generateNaiveConfig(let profile):
+            .generateNaiveConfig(let profile):
             try container.encode(ProfileEnvelope(profile: profile), forKey: .params)
         case .generatePac(let domains, let port):
             try container.encode(GeneratePacParams(directDomains: domains, port: port), forKey: .params)

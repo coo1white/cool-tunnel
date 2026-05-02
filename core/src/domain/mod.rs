@@ -15,9 +15,7 @@ pub mod profile;
 pub mod proxy_mode;
 pub mod server;
 
-pub use credentials::{
-    Credentials, EncodedCredentials, InvalidCredentials, Password, Username,
-};
+pub use credentials::{Credentials, EncodedCredentials, InvalidCredentials, Password, Username};
 pub use port::{InvalidPort, Port};
 pub use profile::{Profile, ProfileId, RawProfile, ValidationError};
 pub use proxy_mode::{ProxyMode, ProxyTestMode};

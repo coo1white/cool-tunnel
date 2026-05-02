@@ -124,7 +124,7 @@ public actor CoreClient {
 
         let frame = CoreRequestFrame(id: id, request: request)
         var data = try encoder.encode(frame)
-        data.append(0x0A) // newline terminator
+        data.append(0x0A)  // newline terminator
 
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation

@@ -101,10 +101,7 @@ mod tests {
             Port::new(1080).unwrap(),
         );
         let cfg = NaiveConfig::from_profile(&profile);
-        assert_eq!(
-            cfg.proxy,
-            "https://nick:p%40ss%2Fword@naive.example.com"
-        );
+        assert_eq!(cfg.proxy, "https://nick:p%40ss%2Fword@naive.example.com");
     }
 
     #[test]
@@ -113,7 +110,10 @@ mod tests {
         let json = cfg.to_pretty_json().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["listen"], "socks://127.0.0.1:1080");
-        assert_eq!(parsed["proxy"], "https://nick:19990515Wry@naive.example.com");
+        assert_eq!(
+            parsed["proxy"],
+            "https://nick:19990515Wry@naive.example.com"
+        );
     }
 
     #[test]

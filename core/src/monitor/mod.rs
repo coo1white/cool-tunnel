@@ -55,7 +55,9 @@ pub async fn run(pid: u32, port: Port) -> Result<TrafficSnapshot, MonitorError> 
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() && stdout.trim().is_empty() {
-        return Err(MonitorError::NonZeroExit(output.status.code().unwrap_or(-1)));
+        return Err(MonitorError::NonZeroExit(
+            output.status.code().unwrap_or(-1),
+        ));
     }
     Ok(parse(&stdout, port))
 }

@@ -17,7 +17,7 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use cool_tunnel_core::config::{NaiveConfig, generate_pac};
+use cool_tunnel_core::config::{generate_pac, NaiveConfig};
 use cool_tunnel_core::diagnostics::{run_diagnostics, run_latency};
 use cool_tunnel_core::monitor;
 use cool_tunnel_core::protocol::{
@@ -26,12 +26,19 @@ use cool_tunnel_core::protocol::{
 };
 use cool_tunnel_core::supervisor::ProxySupervisor;
 use tokio::io::{AsyncWriteExt as _, BufReader};
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 const OUTBOUND_BUFFER: usize = 256;
 const EVENT_BUFFER: usize = 256;
 const MONITOR_INTERVAL_SECS: u64 = 5;
+/// Per-anomaly-reason suppression window for [`monitor_loop`]. The same
+/// reason is forwarded to Swift at most once per window; distinct
+/// reasons are not blocked by each other. 100 ms balances responsive
+/// surfacing of new conditions against UI-flooding when the proxy is
+/// flapping. Tuned together with the stress test in
+/// `cool_tunnel_core::util::debounce`.
+const ANOMALY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 /// Hard cap on a single inbound JSON frame (one stdin line), in bytes.
 /// Frames larger than this are dropped with an `Outbound::Error` reply
 /// rather than buffered. 1 MiB is two orders of magnitude above any
@@ -141,7 +148,10 @@ async fn run() -> std::io::Result<()> {
                 continue;
             }
         };
-        let id = value.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let id = value
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
 
         match serde_json::from_value::<Request>(value) {
             Ok(request) => {
@@ -265,7 +275,10 @@ async fn handle_request(
     let id = request.id;
     let result = dispatch(state, request.kind, events).await;
     let frame = match result {
-        Ok(payload) => Outbound::Response { id, result: payload },
+        Ok(payload) => Outbound::Response {
+            id,
+            result: payload,
+        },
         Err(error) => Outbound::Error { id, error },
     };
     let _ = outbound.send(frame).await;
@@ -277,12 +290,12 @@ async fn dispatch(
     events: mpsc::Sender<Event>,
 ) -> Result<ResponsePayload, ErrorPayload> {
     match kind {
-        RequestKind::ValidateProfile { profile: _ } => Ok(ResponsePayload::Validation(
-            ValidationReport {
+        RequestKind::ValidateProfile { profile: _ } => {
+            Ok(ResponsePayload::Validation(ValidationReport {
                 ok: true,
                 reason: None,
-            },
-        )),
+            }))
+        }
         RequestKind::GenerateNaiveConfig { profile } => {
             let config = NaiveConfig::from_profile(&profile);
             let json = config
@@ -326,10 +339,7 @@ async fn dispatch(
                 (guard.supervisor.take(), guard.monitor_handle.take())
             };
             let Some(supervisor) = supervisor else {
-                return Err(ErrorPayload::new(
-                    "not_running",
-                    "proxy is not running",
-                ));
+                return Err(ErrorPayload::new("not_running", "proxy is not running"));
             };
             if let Some(handle) = monitor_handle {
                 handle.abort();
@@ -370,23 +380,33 @@ async fn dispatch(
 }
 
 async fn monitor_loop(pid: u32, port: cool_tunnel_core::domain::Port, events: mpsc::Sender<Event>) {
-    let mut ticker =
-        tokio::time::interval(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the first immediate tick — give naive a moment to bind before we probe.
     ticker.tick().await;
+
+    // Anomalies are emitted at most once per `ANOMALY_DEBOUNCE` per
+    // reason. The probe interval is currently 5 s so this only kicks
+    // in on tighter probe schedules or when several consecutive probes
+    // happen to fall inside the window after a missed tick. Keeping
+    // the debouncer here (rather than at the channel boundary) makes
+    // the suppression policy local and easy to reason about.
+    let mut anomaly_debouncer = cool_tunnel_core::util::debounce::Debouncer::new(ANOMALY_DEBOUNCE);
+
     loop {
         ticker.tick().await;
         match monitor::run(pid, port).await {
             Ok(snapshot) => {
                 if let Some(anomaly) = snapshot.anomaly {
                     let reason: AnomalyReason = (&anomaly).into();
-                    let _ = events
-                        .send(Event::Anomaly {
-                            reason,
-                            detail: anomaly.detail,
-                        })
-                        .await;
+                    if anomaly_debouncer.admit(reason, std::time::Instant::now()) {
+                        let _ = events
+                            .send(Event::Anomaly {
+                                reason,
+                                detail: anomaly.detail,
+                            })
+                            .await;
+                    }
                 }
             }
             Err(err) => {

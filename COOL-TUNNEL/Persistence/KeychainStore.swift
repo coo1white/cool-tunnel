@@ -102,7 +102,7 @@ public struct KeychainStore: Sendable {
         switch status {
         case errSecSuccess:
             guard let data = item as? Data,
-                  let password = String(data: data, encoding: .utf8)
+                let password = String(data: data, encoding: .utf8)
             else { throw KeychainError.malformedItem }
             return password
         case errSecItemNotFound:

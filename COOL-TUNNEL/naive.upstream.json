@@ -1,0 +1,7 @@
+{
+  "upstream_tag": "v147.0.7727.49-1",
+  "arm64_tarball_sha256": "e85403f4fc99153bb892186b87a867ba9141dcae029d80e303303a50d3701cb0",
+  "x64_tarball_sha256":   "70c81a99cd2fab1f64d41a26d3d2b5eea8f88ec2859352c224e3280c5948dbba",
+  "merged_universal_sha256": "04966402132b724df02a1b42ee71d07aecc3a9c0a487239d711c93c0f8797dd0",
+  "fetched_at": "2026-05-02T18:19:24Z"
+}

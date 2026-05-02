@@ -69,7 +69,9 @@ if [ -f "/etc/caddy/Caddyfile" ]; then
     cat /etc/caddy/Caddyfile
 elif docker ps | grep -q caddy; then
     echo "Caddy is running in Docker, checking container config..."
-    docker exec $(docker ps -q -f name=caddy) cat /etc/caddy/Caddyfile 2>/dev/null || echo "Could not read Caddyfile from container"
+    # Quote the inner command substitution so a multi-line container ID
+    # list (or one with whitespace) doesn't word-split into extra args.
+    docker exec "$(docker ps -q -f name=caddy)" cat /etc/caddy/Caddyfile 2>/dev/null || echo "Could not read Caddyfile from container"
 else
     echo -e "${YELLOW}⚠ Caddyfile not found at standard location${NC}"
 fi
@@ -80,7 +82,7 @@ echo "TEST 6: Check Caddy Logs"
 echo "------------------------------------------"
 if docker ps | grep -q caddy; then
     echo "Caddy container logs (last 20 lines):"
-    docker logs --tail 20 $(docker ps -q -f name=caddy)
+    docker logs --tail 20 "$(docker ps -q -f name=caddy)"
 elif systemctl is-active --quiet caddy; then
     echo "Caddy service logs (last 20 lines):"
     journalctl -u caddy -n 20 --no-pager

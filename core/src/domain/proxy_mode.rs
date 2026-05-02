@@ -85,8 +85,14 @@ mod tests {
 
     #[test]
     fn serializes_in_snake_case() {
-        assert_eq!(serde_json::to_string(&ProxyMode::LocalOnly).unwrap(), "\"local_only\"");
-        assert_eq!(serde_json::to_string(&ProxyMode::Smart).unwrap(), "\"smart\"");
+        assert_eq!(
+            serde_json::to_string(&ProxyMode::LocalOnly).unwrap(),
+            "\"local_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProxyMode::Smart).unwrap(),
+            "\"smart\""
+        );
     }
 
     #[test]
