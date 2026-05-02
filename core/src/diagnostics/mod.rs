@@ -7,10 +7,13 @@
 mod metrics;
 mod probe;
 
+use std::time::Instant;
+
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 use crate::domain::{Port, ProxyTestMode};
-use crate::protocol::{DiagnosticReport, LatencyReport, ProbeResult};
+use crate::protocol::{DiagnosticReport, Event, LatencyReport, ProbeResult};
 
 pub use metrics::{parse_write_out, secs_to_ms};
 pub use probe::{run_probe, ProbeOptions};
@@ -44,11 +47,18 @@ pub enum DiagnosticError {
 /// The result list is intentionally small; richer diagnostics are run via
 /// [`run_latency`].
 ///
+/// Emits a [`Event::DiagnosticProgress`] for the probe so the live log
+/// window can render `✓ upstream_via_socks (47ms)` in real time rather
+/// than waiting for the response payload.
+///
 /// # Errors
 ///
 /// Returns [`DiagnosticError::Io`] if `curl` cannot be spawned.
-pub async fn run_diagnostics(port: Port) -> Result<DiagnosticReport, DiagnosticError> {
-    let probes = vec![probe_through_proxy(port).await?];
+pub async fn run_diagnostics(
+    port: Port,
+    events: &mpsc::Sender<Event>,
+) -> Result<DiagnosticReport, DiagnosticError> {
+    let probes = vec![probe_through_proxy(port, events).await?];
     Ok(DiagnosticReport { probes })
 }
 
@@ -57,12 +67,17 @@ pub async fn run_diagnostics(port: Port) -> Result<DiagnosticReport, DiagnosticE
 /// The first target is probed without a proxy (to compare baseline DNS/TCP
 /// timings). Remaining targets are probed via the local SOCKS listener.
 ///
+/// Emits one [`Event::DiagnosticProgress`] per probe with the probe URL
+/// as the step name and the wall-clock elapsed time. The Swift side
+/// renders these as `✓ https://… (123ms)` in the live log.
+///
 /// # Errors
 ///
 /// Returns [`DiagnosticError::Io`] if `curl` cannot be spawned for any probe.
 pub async fn run_latency(
     mode: ProxyTestMode,
     port: Port,
+    events: &mpsc::Sender<Event>,
 ) -> Result<LatencyReport, DiagnosticError> {
     let targets: &[&str] = match mode {
         ProxyTestMode::Smart => SMART_TARGETS,
@@ -78,19 +93,55 @@ pub async fn run_latency(
             connect_timeout_secs: 5,
             max_time_secs: 12,
         };
-        samples.push(run_probe(&opts).await?);
+        // Wall-clock the whole probe so the live log shows total time
+        // including proxy handshake, not just the curl-reported segments.
+        let started = Instant::now();
+        let sample = run_probe(&opts).await?;
+        let elapsed_ms = ms_to_u64(started.elapsed().as_secs_f64() * 1000.0);
+        let step_label = if idx == 0 {
+            // The first probe is the no-proxy baseline; label it so the
+            // UI log makes the comparison obvious without the user having
+            // to know the target ordering.
+            format!("baseline {url}")
+        } else {
+            format!("via proxy {url}")
+        };
+        // `try_send` would lose events under back-pressure; we use the
+        // fully awaited `send` so the live log keeps order even if the
+        // consumer falls behind. Failure means the channel has closed
+        // (engine shutting down), in which case it is safe to drop.
+        let _ = events
+            .send(Event::DiagnosticProgress {
+                step: step_label,
+                ok: sample.ok,
+                elapsed_ms,
+            })
+            .await;
+        samples.push(sample);
     }
     Ok(LatencyReport { samples })
 }
 
-async fn probe_through_proxy(port: Port) -> Result<ProbeResult, DiagnosticError> {
+async fn probe_through_proxy(
+    port: Port,
+    events: &mpsc::Sender<Event>,
+) -> Result<ProbeResult, DiagnosticError> {
     let opts = ProbeOptions {
         url: "https://ipinfo.io/ip".to_owned(),
         proxy_port: Some(port),
         connect_timeout_secs: 5,
         max_time_secs: 12,
     };
+    let started = Instant::now();
     let sample = run_probe(&opts).await?;
+    let elapsed_ms = ms_to_u64(started.elapsed().as_secs_f64() * 1000.0);
+    let _ = events
+        .send(Event::DiagnosticProgress {
+            step: "upstream_via_socks".to_owned(),
+            ok: sample.ok,
+            elapsed_ms,
+        })
+        .await;
     Ok(ProbeResult {
         name: "upstream_via_socks".to_owned(),
         ok: sample.ok,
