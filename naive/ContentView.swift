@@ -1,41 +1,53 @@
 import SwiftUI
 import Foundation
 import UniformTypeIdentifiers
+import AppKit
+import Combine
+
+@MainActor
+private final class TunnelState: ObservableObject {
+    static let shared = TunnelState()
+
+    @Published var server = "naive.example.com"
+    @Published var username = "user"
+    @Published var password = ""
+    @Published var localPort = "1080"
+    @Published var logs = "Proxy is stopped."
+    @Published var logLineCount = 1
+    @Published var isRunning = false
+    @Published var process: Process?
+    @Published var activityTimer: Timer?
+    @Published var lastActivitySnapshot = ""
+    @Published var directDomains = ContentView.defaultDirectDomains
+    @Published var customBinaryPath = ""
+    @Published var profiles = [ProxyProfile.defaultProfile]
+    @Published var selectedProfileID: String? = ProxyProfile.defaultProfile.id
+    @Published var activeProxyMode: ActiveProxyMode = .stopped
+    @Published var abnormalTrafficBlocked = false
+    @Published var isModeChanging = false
+    @Published var isTestRunning = false
+    var didLoadSettings = false
+}
 
 struct ContentView: View {
-    @State private var server = "naive.example.com"
-    @State private var username = "user"
-    @State private var password = ""
-    @State private var localPort = "1080"
-    @State private var logs = "Proxy is stopped."
-    @State private var logBuffer = [String]()
-    @State private var logLineCount = 1
+    @StateObject private var tunnelState = TunnelState.shared
     private let maxLogLines = 1000
-    @State private var isRunning = false
-    @State private var process: Process?
-    @State private var activityTimer: Timer?
-    @State private var lastActivitySnapshot = ""
     @State private var showSettings = false
-    @State private var directDomains = ContentView.defaultDirectDomains
-    @State private var customBinaryPath = ""
-    @State private var profiles = [ProxyProfile.defaultProfile]
-    @State private var selectedProfileID: String? = ProxyProfile.defaultProfile.id
-    @State private var activeProxyMode: ActiveProxyMode = .stopped
-    @State private var abnormalTrafficBlocked = false
-    @State private var isModeChanging = false
-    @State private var isTestRunning = false
 
     private static let directDomainsKey = "directDomains"
-    private static let customBinaryPathKey = "customBinaryPath"
+    private static let customBinaryPathKey = "tunnelState.customBinaryPath"
     private static let profilesKey = "connectionProfiles"
     private static let selectedProfileKey = "selectedConnectionProfile"
+    private static let appSupportDirectoryName = "NaiveProxyMac"
+    private static let configFileName = "config.json"
+    private static let pacFileName = "smart-proxy.pac"
     private static let byteCountFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useKB]
         formatter.countStyle = .file
         return formatter
     }()
-    private static let defaultDirectDomains = [
+    fileprivate static let defaultDirectDomains = [
         ".cn",
         "baidu.com",
         "bdstatic.com",
@@ -56,30 +68,10 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color.accentColor.opacity(0.20),
-                    Color(nsColor: .windowBackgroundColor),
-                    Color.black.opacity(0.05)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            Color(nsColor: .windowBackgroundColor)
             .ignoresSafeArea()
 
-            Circle()
-                .fill(Color.accentColor.opacity(0.10))
-                .frame(width: 360, height: 360)
-                .blur(radius: 70)
-                .offset(x: -360, y: -330)
-
-            Circle()
-                .fill(Color.blue.opacity(0.08))
-                .frame(width: 420, height: 420)
-                .blur(radius: 85)
-                .offset(x: 390, y: 350)
-
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 headerView
 
                 controlPanel
@@ -89,36 +81,34 @@ struct ContentView: View {
                 logsView
                     .frame(maxHeight: .infinity)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 24)
-            .padding(.bottom, 18)
+            .padding(20)
         }
-        .frame(minWidth: 820, idealWidth: 920, minHeight: 760, idealHeight: 820)
+        .frame(minWidth: 840, idealWidth: 940, minHeight: 760, idealHeight: 820)
         .onAppear {
             loadSettings()
         }
-        .onChange(of: selectedProfileID) {
+        .onChange(of: tunnelState.selectedProfileID) {
             applySelectedProfile()
         }
-        .onChange(of: server) {
+        .onChange(of: tunnelState.server) {
             syncSelectedProfile()
         }
-        .onChange(of: username) {
+        .onChange(of: tunnelState.username) {
             syncSelectedProfile()
         }
-        .onChange(of: password) {
+        .onChange(of: tunnelState.password) {
             syncSelectedProfile()
         }
-        .onChange(of: localPort) {
+        .onChange(of: tunnelState.localPort) {
             syncSelectedProfile()
         }
-        .onDisappear {
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             stopProxy()
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(
-                directDomains: $directDomains,
-                customBinaryPath: $customBinaryPath,
+                directDomains: $tunnelState.directDomains,
+                customBinaryPath: $tunnelState.customBinaryPath,
                 onSaveDomains: saveDirectDomains,
                 onReplaceBinary: replaceNaiveBinary,
                 onResetDomains: resetDirectDomains
@@ -129,25 +119,24 @@ struct ContentView: View {
     private var headerView: some View {
         HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(
                         LinearGradient(
-                            colors: [.accentColor, .accentColor.opacity(0.66)],
+                            colors: [.accentColor, .accentColor.opacity(0.82)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
 
-                Image(systemName: "network")
-                    .font(.system(size: 26, weight: .bold))
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(.white)
             }
-            .frame(width: 54, height: 54)
-            .shadow(color: .accentColor.opacity(0.28), radius: 12, y: 5)
+            .frame(width: 52, height: 52)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Cool tunnel")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .font(.system(size: 28, weight: .semibold))
                     .lineLimit(1)
 
                 HStack(spacing: 6) {
@@ -160,7 +149,7 @@ struct ContentView: View {
                     Text("crafted by Alice")
                         .lineLimit(1)
                 }
-                .font(.system(size: 13, weight: .medium))
+                .font(.callout)
                 .foregroundStyle(.secondary)
             }
 
@@ -168,27 +157,26 @@ struct ContentView: View {
 
             statusPill
         }
-        .padding(16)
-        .frame(minHeight: 86)
+        .padding(18)
+        .frame(minHeight: 88)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 22))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.separator.opacity(0.35), lineWidth: 1)
         }
-        .shadow(color: Color.black.opacity(0.08), radius: 18, y: 8)
     }
 
     private var statusSubtitle: String {
-        if isModeChanging {
+        if tunnelState.isModeChanging {
             return "Applying network settings..."
         }
 
-        if isTestRunning {
+        if tunnelState.isTestRunning {
             return "Diagnostics are running"
         }
 
-        return isRunning ? "Secure tunnel is active" : "Ready to start a smart proxy session"
+        return tunnelState.isRunning ? "Secure tunnel is active" : "Ready to start a smart proxy session"
     }
 
     private var statusPill: some View {
@@ -197,22 +185,22 @@ struct ContentView: View {
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
 
-            Text(activeProxyMode.title)
+            Text(tunnelState.activeProxyMode.title)
                 .font(.system(size: 12, weight: .bold))
         }
         .foregroundStyle(statusColor)
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .background(statusColor.opacity(0.12))
+        .background(.quaternary)
         .clipShape(Capsule())
         .overlay {
             Capsule()
-                .stroke(statusColor.opacity(0.22), lineWidth: 1)
+                .stroke(.separator.opacity(0.4), lineWidth: 1)
         }
     }
 
     private var statusColor: Color {
-        switch activeProxyMode {
+        switch tunnelState.activeProxyMode {
         case .stopped:
             return .secondary
         case .smart:
@@ -225,23 +213,23 @@ struct ContentView: View {
     }
 
     private var cardBackground: some ShapeStyle {
-        .regularMaterial
+        .thinMaterial
     }
 
     private var controlPanel: some View {
         let columns = [
-            GridItem(.adaptive(minimum: 186, maximum: 240), spacing: 8)
+            GridItem(.adaptive(minimum: 190, maximum: 250), spacing: 10)
         ]
 
         return LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
             controlButtons()
         }
-        .padding(12)
+        .padding(10)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.separator.opacity(0.3), lineWidth: 1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -249,75 +237,75 @@ struct ContentView: View {
     @ViewBuilder
     private func controlButtons() -> some View {
         Button {
-            guard !isRunning else { return }
+            guard !tunnelState.isRunning else { return }
             startProxy()
         } label: {
             SidebarButtonLabel(
                 title: "Start Smart Mode",
                 systemImage: "play.fill",
                 isPrimary: true,
-                isDisabled: isRunning || isModeChanging
+                isDisabled: tunnelState.isRunning || tunnelState.isModeChanging
             )
         }
         .buttonStyle(.plain)
 
         Button {
-            guard isRunning, !isModeChanging else { return }
+            guard tunnelState.isRunning, !tunnelState.isModeChanging else { return }
             stopProxy()
         } label: {
             SidebarButtonLabel(
                 title: "Stop",
                 systemImage: "stop.fill",
-                isDisabled: !isRunning || isModeChanging
+                isDisabled: !tunnelState.isRunning || tunnelState.isModeChanging
             )
         }
         .buttonStyle(.plain)
 
         Button {
-            guard isRunning && activeProxyMode != .global && !isModeChanging else { return }
+            guard tunnelState.isRunning && tunnelState.activeProxyMode != .global && !tunnelState.isModeChanging else { return }
             enableSystemProxy()
         } label: {
             SidebarButtonLabel(
                 title: "Enable Global Proxy",
                 systemImage: "switch.2",
-                isDisabled: !isRunning || activeProxyMode == .global || isModeChanging
+                isDisabled: !tunnelState.isRunning || tunnelState.activeProxyMode == .global || tunnelState.isModeChanging
             )
         }
         .buttonStyle(.plain)
 
         Button {
-            guard !isModeChanging else { return }
+            guard !tunnelState.isModeChanging else { return }
             disableSystemProxy()
         } label: {
             SidebarButtonLabel(
-                title: "Disable System Proxy",
+                title: "Restore macOS Proxy",
                 systemImage: "xmark.circle",
-                isDisabled: isModeChanging
+                isDisabled: tunnelState.isModeChanging
             )
         }
         .buttonStyle(.plain)
 
         Button {
-            guard !isTestRunning else { return }
+            guard !tunnelState.isTestRunning else { return }
             runTimeoutTest(mode: .smart)
         } label: {
-            SidebarButtonLabel(title: "Timeout Test: Smart", systemImage: "timer", isDisabled: isTestRunning)
+            SidebarButtonLabel(title: "Timeout Test: Smart", systemImage: "timer", isDisabled: tunnelState.isTestRunning)
         }
         .buttonStyle(.plain)
 
         Button {
-            guard !isTestRunning else { return }
+            guard !tunnelState.isTestRunning else { return }
             runTimeoutTest(mode: .global)
         } label: {
-            SidebarButtonLabel(title: "Timeout Test: Global", systemImage: "timer.circle", isDisabled: isTestRunning)
+            SidebarButtonLabel(title: "Timeout Test: Global", systemImage: "timer.circle", isDisabled: tunnelState.isTestRunning)
         }
         .buttonStyle(.plain)
 
         Button {
-            guard !isTestRunning else { return }
+            guard !tunnelState.isTestRunning else { return }
             runDiagnostics()
         } label: {
-            SidebarButtonLabel(title: "Test Proxy", systemImage: "stethoscope", isDisabled: isTestRunning)
+            SidebarButtonLabel(title: "Test Proxy", systemImage: "stethoscope", isDisabled: tunnelState.isTestRunning)
         }
         .buttonStyle(.plain)
 
@@ -346,20 +334,20 @@ struct ContentView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    Text(logs)
+                    Text(tunnelState.logs)
                         .font(.system(size: 12.5, design: .monospaced))
                         .foregroundStyle(Color(nsColor: .textColor))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                         .id("log-bottom")
                 }
-                .background(Color.black.opacity(0.075))
-                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(.separator.opacity(0.35), lineWidth: 1)
                 }
-                .onChange(of: logs) {
+                .onChange(of: tunnelState.logs) {
                     proxy.scrollTo("log-bottom", anchor: .bottom)
                 }
             }
@@ -367,10 +355,10 @@ struct ContentView: View {
         }
         .padding(14)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.separator.opacity(0.3), lineWidth: 1)
         }
     }
 
@@ -403,31 +391,31 @@ struct ContentView: View {
 
             ScrollView {
                 VStack(spacing: 4) {
-                    ForEach(profiles, id: \.id) { profile in
+                    ForEach(tunnelState.profiles, id: \.id) { profile in
                         Button(action: {
-                            selectedProfileID = profile.id
+                            tunnelState.selectedProfileID = profile.id
                             applySelectedProfile()
                         }) {
                             ProfileRow(
                                 profile: profile,
-                                isSelected: selectedProfileID == profile.id
+                                isSelected: tunnelState.selectedProfileID == profile.id
                             )
                         }
                         .buttonStyle(.plain)
-                        .disabled(isRunning)
+                        .disabled(tunnelState.isRunning)
                     }
                 }
                 .padding(4)
             }
             .frame(minWidth: 220, idealWidth: 250, maxWidth: 280)
             .frame(height: 150)
-            .background(Color.black.opacity(0.045))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(.separator.opacity(0.3), lineWidth: 1)
             }
-            .disabled(isRunning)
+            .disabled(tunnelState.isRunning)
 
             HStack {
                 Button {
@@ -435,14 +423,14 @@ struct ContentView: View {
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
-                .disabled(isRunning)
+                .disabled(tunnelState.isRunning)
 
                 Button {
                     removeSelectedProfile()
                 } label: {
                     Label("Remove", systemImage: "minus")
                 }
-                .disabled(isRunning || profiles.count <= 1)
+                .disabled(tunnelState.isRunning || tunnelState.profiles.count <= 1)
             }
             .controlSize(.small)
         }
@@ -453,34 +441,34 @@ struct ContentView: View {
             GridRow {
                 Text("Server")
                     .frame(width: 126, alignment: .leading)
-                TextField("naive.example.com", text: $server)
+                TextField("naive.example.com", text: $tunnelState.server)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(isRunning)
+                    .disabled(tunnelState.isRunning)
             }
 
             GridRow {
                 Text("Username")
                     .frame(width: 126, alignment: .leading)
-                TextField("username", text: $username)
+                TextField("username", text: $tunnelState.username)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(isRunning)
+                    .disabled(tunnelState.isRunning)
             }
 
             GridRow {
                 Text("Password")
                     .frame(width: 126, alignment: .leading)
-                SecureField("Password", text: $password)
+                SecureField("Password", text: $tunnelState.password)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(isRunning)
+                    .disabled(tunnelState.isRunning)
             }
 
             GridRow {
                 Text("Local SOCKS Port")
                     .frame(width: 126, alignment: .leading)
-                TextField("1080", text: $localPort)
+                TextField("1080", text: $tunnelState.localPort)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 120)
-                    .disabled(isRunning)
+                    .disabled(tunnelState.isRunning)
             }
         }
         .padding(.top, 4)
@@ -488,16 +476,31 @@ struct ContentView: View {
     }
 
     private func startProxy() {
-        guard !isRunning, !isModeChanging else { return }
+        guard !tunnelState.isRunning, !tunnelState.isModeChanging else { return }
 
         guard let naiveURL = currentNaiveBinaryURL() else {
-            logs = "Error: naive binary not found in app bundle."
+            tunnelState.logs = "Error: naive binary not found in app bundle."
+            tunnelState.logLineCount = 1
+            return
+        }
+
+        guard let safePort = validatedPortString() else {
+            appendToLog("\nInvalid local port. Use a value from 1 to 65535.\n")
+            return
+        }
+
+        guard validatedServerString() != nil else {
+            appendToLog("\nInvalid server. Use a host name or host:port without a URL scheme, path, spaces, or credentials.\n")
+            return
+        }
+
+        guard validatedCredentials() else {
+            appendToLog("\nMissing username or password. Refusing to start an unauthenticated upstream tunnel.\n")
             return
         }
 
         do {
             let configURL = try writeConfig()
-            let safePort = localPort.trimmingCharacters(in: .whitespacesAndNewlines)
             let maskedProxyURL = maskedProxyURLString()
 
             let task = Process()
@@ -520,19 +523,22 @@ struct ContentView: View {
 
             task.terminationHandler = { _ in
                 Task { @MainActor in
-                    isRunning = false
-                    activeProxyMode = .stopped
+                    tunnelState.isRunning = false
+                    tunnelState.activeProxyMode = .stopped
                     appendToLog("\nProxy stopped.\n")
                 }
             }
 
-            logs = "Starting NaiveProxy...\nBinary: \(naiveURL.path)\nConfig: \(configURL.path)\nRuntime: config file, listen=socks://127.0.0.1:\(safePort), proxy=\(maskedProxyURL)\n"
+            tunnelState.logs = "Starting NaiveProxy...\nBinary: \(naiveURL.path)\nConfig: \(configURL.path)\nRuntime: config file, listen=socks://127.0.0.1:\(safePort), proxy=\(maskedProxyURL)\n"
+            tunnelState.logLineCount = tunnelState.logs.reduce(0) { count, character in
+                character == "\n" ? count + 1 : count
+            }
             appendToLog("Binary size: \(fileSize(at: naiveURL.path)) bytes\n")
             try task.run()
 
-            process = task
-            isRunning = true
-            abnormalTrafficBlocked = false
+            tunnelState.process = task
+            tunnelState.isRunning = true
+            tunnelState.abnormalTrafficBlocked = false
             appendToLog("Process started with pid \(task.processIdentifier).\n")
             
             // Wait for proxy to start listening
@@ -562,12 +568,12 @@ struct ContentView: View {
                     appendToLog("- Port \(safePort) may be in use by another application\n")
                     appendToLog("- NaiveProxy binary may have compatibility issues\n")
                     appendToLog("- Check the configuration file: \(configURL.path)\n")
-                    appendToLog("Consider using a different port or checking system logs.\n")
+                    appendToLog("Consider using a different port or checking system tunnelState.logs.\n")
                 }
             }
         } catch {
             appendToLog("Failed to start: \(error.localizedDescription)")
-            isRunning = false
+            tunnelState.isRunning = false
         }
     }
 
@@ -580,8 +586,8 @@ struct ContentView: View {
     }
 
     private func currentNaiveBinaryURL() -> URL? {
-        if !customBinaryPath.isEmpty {
-            let customURL = URL(fileURLWithPath: customBinaryPath)
+        if !tunnelState.customBinaryPath.isEmpty {
+            let customURL = URL(fileURLWithPath: tunnelState.customBinaryPath)
             if FileManager.default.isExecutableFile(atPath: customURL.path) {
                 return customURL
             }
@@ -602,43 +608,42 @@ struct ContentView: View {
 
     private func stopProxy() {
         stopActivityMonitor()
-        process?.terminate()
-        process = nil
-        isRunning = false
-        activeProxyMode = .stopped
-        if !isModeChanging {
+        tunnelState.process?.standardOutput = nil
+        tunnelState.process?.standardError = nil
+        tunnelState.process?.terminate()
+        tunnelState.process = nil
+        tunnelState.isRunning = false
+        tunnelState.activeProxyMode = .stopped
+        removeSensitiveRuntimeFiles()
+        if !tunnelState.isModeChanging {
             disableSystemProxy()
         }
     }
 
     private func appendToLog(_ text: String) {
-        logBuffer.append(text)
-
-        logs += text
-        logLineCount += text.reduce(0) { count, character in
+        tunnelState.logs += text
+        tunnelState.logLineCount += text.reduce(0) { count, character in
             character == "\n" ? count + 1 : count
         }
 
-        if logLineCount > maxLogLines {
-            let trimmedLines = logs.split(separator: "\n", omittingEmptySubsequences: false).suffix(maxLogLines)
-            logs = trimmedLines.joined(separator: "\n")
-            logLineCount = trimmedLines.count
-            logBuffer = [logs]
+        if tunnelState.logLineCount > maxLogLines {
+            let trimmedLines = tunnelState.logs.split(separator: "\n", omittingEmptySubsequences: false).suffix(maxLogLines)
+            tunnelState.logs = trimmedLines.joined(separator: "\n")
+            tunnelState.logLineCount = trimmedLines.count
         }
     }
     
     private func clearLogs() {
-        logBuffer.removeAll()
-        logs = ""
-        logLineCount = 0
+        tunnelState.logs = ""
+        tunnelState.logLineCount = 0
     }
 
     private func startActivityMonitor(pid: Int32) {
         stopActivityMonitor()
-        lastActivitySnapshot = ""
-        let monitoredPort = localPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        tunnelState.lastActivitySnapshot = ""
+        let monitoredPort = tunnelState.localPort.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        activityTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+        tunnelState.activityTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             Task.detached(priority: .utility) {
                 let inspection = inspectNaiveTraffic(pid: pid, localPort: monitoredPort)
 
@@ -650,37 +655,40 @@ struct ContentView: View {
     }
 
     private func handleTrafficInspection(_ inspection: TrafficInspection) {
-        guard isRunning else { return }
+        guard tunnelState.isRunning else { return }
         guard !inspection.snapshot.isEmpty else { return }
 
-        if inspection.snapshot != lastActivitySnapshot {
-            lastActivitySnapshot = inspection.snapshot
+        if inspection.snapshot != tunnelState.lastActivitySnapshot {
+            tunnelState.lastActivitySnapshot = inspection.snapshot
             appendToLog("\n[Activity \(shortTimeString())]\n\(inspection.summary)\n\(inspection.snapshot)")
         }
 
-        if let reason = inspection.abnormalReason, !abnormalTrafficBlocked {
+        if let reason = inspection.abnormalReason, !tunnelState.abnormalTrafficBlocked {
             blockAbnormalTraffic(reason: reason)
         }
     }
 
     private func blockAbnormalTraffic(reason: String) {
-        abnormalTrafficBlocked = true
+        tunnelState.abnormalTrafficBlocked = true
         appendToLog("\n[Security Block] Abnormal traffic detected: \(reason)\n")
         appendToLog("Action: disabled system proxy and stopped NaiveProxy to prevent uncontrolled traffic.\n")
         stopProxy()
     }
 
     private func stopActivityMonitor() {
-        activityTimer?.invalidate()
-        activityTimer = nil
-        lastActivitySnapshot = ""
+        tunnelState.activityTimer?.invalidate()
+        tunnelState.activityTimer = nil
+        tunnelState.lastActivitySnapshot = ""
     }
 
     private func writeConfig() throws -> URL {
-        let safeServer = server.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeUsername = percentEncodedCredential(username.trimmingCharacters(in: .whitespacesAndNewlines))
-        let safePassword = percentEncodedCredential(password.trimmingCharacters(in: .whitespacesAndNewlines))
-        let safePort = localPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let safeServer = validatedServerString(),
+              let safePort = validatedPortString() else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+
+        let safeUsername = percentEncodedCredential(tunnelState.username.trimmingCharacters(in: .whitespacesAndNewlines))
+        let safePassword = percentEncodedCredential(tunnelState.password.trimmingCharacters(in: .whitespacesAndNewlines))
 
         let configObject = [
             "listen": "socks://127.0.0.1:\(safePort)",
@@ -692,17 +700,14 @@ struct ContentView: View {
             options: [.prettyPrinted, .sortedKeys]
         )
 
-        let supportURL = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("NaiveProxyMac", isDirectory: true)
+        let supportURL = appSupportDirectoryURL()
 
         try FileManager.default.createDirectory(
             at: supportURL,
             withIntermediateDirectories: true
         )
 
-        let configURL = supportURL.appendingPathComponent("config.json")
+        let configURL = supportURL.appendingPathComponent(Self.configFileName)
         try jsonData.write(to: configURL, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
@@ -712,12 +717,55 @@ struct ContentView: View {
         return configURL
     }
 
-    private func proxyURLString() -> String {
-        let safeServer = server.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeUsername = percentEncodedCredential(username.trimmingCharacters(in: .whitespacesAndNewlines))
-        let safePassword = percentEncodedCredential(password.trimmingCharacters(in: .whitespacesAndNewlines))
+    private func appSupportDirectoryURL() -> URL {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent(Self.appSupportDirectoryName, isDirectory: true)
+    }
 
-        return "https://\(safeUsername):\(safePassword)@\(safeServer)"
+    private func removeSensitiveRuntimeFiles() {
+        let configURL = appSupportDirectoryURL().appendingPathComponent(Self.configFileName)
+        try? FileManager.default.removeItem(at: configURL)
+    }
+
+    private func validatedPortString() -> String? {
+        let candidate = tunnelState.localPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = Int(candidate), (1...65535).contains(port) else {
+            return nil
+        }
+        return "\(port)"
+    }
+
+    private func validatedServerString() -> String? {
+        let candidate = tunnelState.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty,
+              candidate.count <= 253,
+              candidate.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              !candidate.contains("://"),
+              !candidate.contains("@"),
+              !candidate.contains("/"),
+              !candidate.contains("?"),
+              !candidate.contains("#") else {
+            return nil
+        }
+
+        if let portSeparator = candidate.lastIndex(of: ":") {
+            let host = String(candidate[..<portSeparator])
+            let portString = String(candidate[candidate.index(after: portSeparator)...])
+            guard !host.isEmpty,
+                  let port = Int(portString),
+                  (1...65535).contains(port) else {
+                return nil
+            }
+        }
+
+        return candidate
+    }
+
+    private func validatedCredentials() -> Bool {
+        !tunnelState.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !tunnelState.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func percentEncodedCredential(_ value: String) -> String {
@@ -727,20 +775,26 @@ struct ContentView: View {
     }
 
     private func maskedProxyURLString() -> String {
-        let safeServer = server.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeServer = validatedServerString() ?? tunnelState.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeUsername = tunnelState.username.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return "https://\(safeUsername):********@\(safeServer)"
     }
 
     private func enableSystemProxy() {
-        guard let port = Int(localPort) else {
+        guard let safePort = validatedPortString(),
+              let port = Int(safePort) else {
             appendToLog("\nInvalid local port.\n")
             return
         }
 
-        guard !isModeChanging else {
+        guard !tunnelState.isModeChanging else {
             appendToLog("\nMode change already running. Please wait.\n")
+            return
+        }
+
+        guard confirmSystemProxyChange(mode: .global, port: port) else {
+            appendToLog("\nCancelled global proxy change.\n")
             return
         }
 
@@ -767,11 +821,29 @@ struct ContentView: View {
         ])
         return result.exitCode == 0 && !result.output.isEmpty
     }
+
+    private func confirmSystemProxyChange(mode: ActiveProxyMode, port: Int) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = mode == .global ? "Enable Global System Proxy?" : "Enable Smart System Proxy?"
+        alert.informativeText = mode == .global
+            ? "This will change macOS network settings using networksetup and route proxy-aware traffic through SOCKS 127.0.0.1:\(port). You can undo it with Disable System Proxy."
+            : "This will change macOS network settings using networksetup and enable a local PAC file. Matching direct domains bypass the proxy; other proxy-aware traffic uses 127.0.0.1:\(port). You can undo it with Disable System Proxy."
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
     
     @MainActor
     private func testUpstreamConnectivity() async {
         appendToLog("\n=== Testing Upstream Connectivity ===\n")
-        appendToLog("Testing connection to naive.example.com...\n")
+        guard let server = validatedServerString() else {
+            appendToLog("Invalid configured server. Skipping upstream connectivity test.\n")
+            return
+        }
+
+        let targetURL = "https://\(server)"
+        appendToLog("Testing TLS connection to configured server...\n")
         
         let result = runCommandResultStatic("/usr/bin/curl", [
             "-v",
@@ -779,13 +851,13 @@ struct ContentView: View {
             "10",
             "--connect-timeout",
             "5",
-            "https://naive.example.com"
+            targetURL
         ])
         
         if result.exitCode == 0 {
-            appendToLog("✓ Upstream server is reachable\n")
+            appendToLog("✓ Upstream tunnelState.server is reachable\n")
         } else {
-            appendToLog("✗ Upstream server connection failed\n")
+            appendToLog("✗ Upstream tunnelState.server connection failed\n")
             appendToLog("This may indicate:\n")
             appendToLog("- Network connectivity issues\n")
             appendToLog("- Server is down or blocking connections\n")
@@ -804,10 +876,10 @@ struct ContentView: View {
     }
     
     private func proceedWithGlobalProxy(port: Int) {
-        isModeChanging = true
+        tunnelState.isModeChanging = true
         appendToLog("\n=== Enabling Global SOCKS Proxy ===\n")
         appendToLog("Target: Wi-Fi service\n")
-        appendToLog("SOCKS server: 127.0.0.1:\(port)\n")
+        appendToLog("SOCKS tunnelState.server: 127.0.0.1:\(port)\n")
 
         Task.detached(priority: .userInitiated) {
             let result = enableGlobalProxyCommand(port: port)
@@ -815,26 +887,26 @@ struct ContentView: View {
             await MainActor.run {
                 appendToLog(result.output)
                 if result.success {
-                    activeProxyMode = .global
+                    tunnelState.activeProxyMode = .global
                     appendToLog("✓ Global proxy enabled successfully\n")
                     appendToLog("All traffic should now route through SG VPS\n")
                 } else {
                     appendToLog("✗ Failed to enable global proxy\n")
                     appendToLog("Check system permissions and network settings\n")
                 }
-                isModeChanging = false
+                tunnelState.isModeChanging = false
             }
         }
     }
 
     private func disableSystemProxy() {
-        guard !isModeChanging else {
+        guard !tunnelState.isModeChanging else {
             appendToLog("\nMode change already running. Please wait.\n")
             return
         }
 
-        let nextMode: ActiveProxyMode = isRunning ? .localOnly : .stopped
-        isModeChanging = true
+        let nextMode: ActiveProxyMode = tunnelState.isRunning ? .localOnly : .stopped
+        tunnelState.isModeChanging = true
         appendToLog("\nDisabling system proxy...\n")
 
         Task.detached(priority: .userInitiated) {
@@ -843,9 +915,9 @@ struct ContentView: View {
             await MainActor.run {
                 appendToLog(result.output)
                 if result.success {
-                    activeProxyMode = nextMode
+                    tunnelState.activeProxyMode = nextMode
                 }
-                isModeChanging = false
+                tunnelState.isModeChanging = false
             }
         }
     }
@@ -896,23 +968,29 @@ struct ContentView: View {
     }
 
     private func enableSmartProxy() {
-        guard let port = Int(localPort) else {
+        guard let safePort = validatedPortString(),
+              let port = Int(safePort) else {
             appendToLog("\nInvalid local port. Smart proxy was not enabled.\n")
             return
         }
 
-        guard !isModeChanging else {
+        guard !tunnelState.isModeChanging else {
             appendToLog("\nMode change already running. Please wait.\n")
+            return
+        }
+
+        guard confirmSystemProxyChange(mode: .smart, port: port) else {
+            appendToLog("\nCancelled smart proxy change.\n")
             return
         }
 
         do {
             let pacURL = try writePACFile(port: port)
             let pacURLString = pacURL.absoluteString
-            isModeChanging = true
+            tunnelState.isModeChanging = true
             appendToLog("\n=== Enabling Smart PAC Proxy ===\n")
             appendToLog("PAC file: \(pacURL.path)\n")
-            appendToLog("Direct domains: \(directDomains.count) configured\n")
+            appendToLog("Direct domains: \(tunnelState.directDomains.count) configured\n")
 
             Task.detached(priority: .userInitiated) {
                 let result = enableSmartProxyCommand(port: port, pacURLString: pacURLString)
@@ -920,13 +998,13 @@ struct ContentView: View {
                 await MainActor.run {
                     appendToLog(result.output)
                     if result.success {
-                        activeProxyMode = .smart
+                        tunnelState.activeProxyMode = .smart
                         appendToLog("✓ Smart proxy enabled successfully\n")
                         appendToLog("China/domains go DIRECT, other traffic via SG VPS\n")
                     } else {
                         appendToLog("✗ Failed to enable smart proxy\n")
                     }
-                    isModeChanging = false
+                    tunnelState.isModeChanging = false
                 }
             }
         } catch {
@@ -976,23 +1054,24 @@ struct ContentView: View {
         }
         """
 
-        let supportURL = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("NaiveProxyMac", isDirectory: true)
+        let supportURL = appSupportDirectoryURL()
 
         try FileManager.default.createDirectory(
             at: supportURL,
             withIntermediateDirectories: true
         )
 
-        let pacURL = supportURL.appendingPathComponent("smart-proxy.pac")
+        let pacURL = supportURL.appendingPathComponent(Self.pacFileName)
         try pac.write(to: pacURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: pacURL.path
+        )
         return pacURL
     }
 
     private func directDomainsJavaScriptArray() -> String {
-        let cleaned = directDomains
+        let cleaned = tunnelState.directDomains
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
 
@@ -1005,83 +1084,86 @@ struct ContentView: View {
     }
 
     private func loadSettings() {
+        guard !tunnelState.didLoadSettings else { return }
+        tunnelState.didLoadSettings = true
+
         loadProfiles()
 
         let savedDomains = UserDefaults.standard.stringArray(forKey: Self.directDomainsKey)
         if let savedDomains, !savedDomains.isEmpty {
-            directDomains = savedDomains
+            tunnelState.directDomains = savedDomains
         }
 
-        customBinaryPath = UserDefaults.standard.string(forKey: Self.customBinaryPathKey) ?? ""
+        tunnelState.customBinaryPath = UserDefaults.standard.string(forKey: Self.customBinaryPathKey) ?? ""
     }
 
     private func loadProfiles() {
         if let data = UserDefaults.standard.data(forKey: Self.profilesKey),
            let decoded = try? JSONDecoder().decode([ProxyProfile].self, from: data),
            !decoded.isEmpty {
-            profiles = decoded
-            selectedProfileID = UserDefaults.standard.string(forKey: Self.selectedProfileKey) ?? decoded[0].id
+            tunnelState.profiles = decoded
+            tunnelState.selectedProfileID = UserDefaults.standard.string(forKey: Self.selectedProfileKey) ?? decoded[0].id
         } else {
-            profiles = [
+            tunnelState.profiles = [
                 ProxyProfile(
                     id: ProxyProfile.defaultProfile.id,
-                    server: server,
-                    username: username,
-                    password: password,
-                    localPort: localPort
+                    server: tunnelState.server,
+                    username: tunnelState.username,
+                    password: tunnelState.password,
+                    localPort: tunnelState.localPort
                 )
             ]
-            selectedProfileID = profiles[0].id
+            tunnelState.selectedProfileID = tunnelState.profiles[0].id
             saveProfiles()
         }
 
-        if !profiles.contains(where: { $0.id == selectedProfileID }) {
-            selectedProfileID = profiles[0].id
+        if !tunnelState.profiles.contains(where: { $0.id == tunnelState.selectedProfileID }) {
+            tunnelState.selectedProfileID = tunnelState.profiles[0].id
         }
 
         applySelectedProfile()
     }
 
     private func saveProfiles() {
-        if let data = try? JSONEncoder().encode(profiles) {
+        if let data = try? JSONEncoder().encode(tunnelState.profiles) {
             UserDefaults.standard.set(data, forKey: Self.profilesKey)
         }
 
-        if let selectedProfileID {
+        if let selectedProfileID = tunnelState.selectedProfileID {
             UserDefaults.standard.set(selectedProfileID, forKey: Self.selectedProfileKey)
         }
     }
 
     private func applySelectedProfile() {
-        guard let selectedProfileID,
-              let profile = profiles.first(where: { $0.id == selectedProfileID }) else {
+        guard let selectedProfileID = tunnelState.selectedProfileID,
+              let profile = tunnelState.profiles.first(where: { $0.id == tunnelState.selectedProfileID }) else {
             return
         }
 
-        server = profile.server
-        username = profile.username
-        password = profile.password
-        localPort = profile.localPort
+        tunnelState.server = profile.server
+        tunnelState.username = profile.username
+        tunnelState.password = profile.password
+        tunnelState.localPort = profile.localPort
         saveProfiles()
     }
 
     private func syncSelectedProfile() {
-        guard let selectedProfileID,
-              let index = profiles.firstIndex(where: { $0.id == selectedProfileID }) else {
+        guard let selectedProfileID = tunnelState.selectedProfileID,
+              let index = tunnelState.profiles.firstIndex(where: { $0.id == tunnelState.selectedProfileID }) else {
             return
         }
 
         let updatedProfile = ProxyProfile(
             id: selectedProfileID,
-            server: server,
-            username: username,
-            password: password,
-            localPort: localPort
+            server: tunnelState.server,
+            username: tunnelState.username,
+            password: tunnelState.password,
+            localPort: tunnelState.localPort
         )
 
-        guard profiles[index] != updatedProfile else { return }
+        guard tunnelState.profiles[index] != updatedProfile else { return }
 
-        profiles[index] = updatedProfile
+        tunnelState.profiles[index] = updatedProfile
         saveProfiles()
     }
 
@@ -1095,30 +1177,30 @@ struct ContentView: View {
             localPort: nextPort
         )
 
-        profiles.append(profile)
-        selectedProfileID = profile.id
+        tunnelState.profiles.append(profile)
+        tunnelState.selectedProfileID = profile.id
         applySelectedProfile()
         saveProfiles()
         appendToLog("\nAdded connection profile: \(profile.server):\(profile.localPort).\n")
     }
 
     private func removeSelectedProfile() {
-        guard profiles.count > 1,
-              let currentProfileID = selectedProfileID,
-              let index = profiles.firstIndex(where: { $0.id == currentProfileID }) else {
+        guard tunnelState.profiles.count > 1,
+              let currentProfileID = tunnelState.selectedProfileID,
+              let index = tunnelState.profiles.firstIndex(where: { $0.id == currentProfileID }) else {
             return
         }
 
-        let removed = profiles.remove(at: index)
-        let nextIndex = min(index, profiles.count - 1)
-        selectedProfileID = profiles[nextIndex].id
+        let removed = tunnelState.profiles.remove(at: index)
+        let nextIndex = min(index, tunnelState.profiles.count - 1)
+        tunnelState.selectedProfileID = tunnelState.profiles[nextIndex].id
         applySelectedProfile()
         saveProfiles()
         appendToLog("\nRemoved connection profile: \(removed.server):\(removed.localPort).\n")
     }
 
     private func nextAvailablePort() -> String {
-        let usedPorts = Set(profiles.compactMap { Int($0.localPort) })
+        let usedPorts = Set(tunnelState.profiles.compactMap { Int($0.localPort) })
 
         for port in 1080...1099 {
             if !usedPorts.contains(port) {
@@ -1130,17 +1212,17 @@ struct ContentView: View {
     }
 
     private func saveDirectDomains() {
-        directDomains = directDomains
+        tunnelState.directDomains = tunnelState.directDomains
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
 
-        UserDefaults.standard.set(directDomains, forKey: Self.directDomainsKey)
-        appendToLog("\nSaved \(directDomains.count) direct domains. Restart proxy to regenerate PAC rules.\n")
+        UserDefaults.standard.set(tunnelState.directDomains, forKey: Self.directDomainsKey)
+        appendToLog("\nSaved \(tunnelState.directDomains.count) direct domains. Restart proxy to regenerate PAC rules.\n")
     }
 
     private func resetDirectDomains() {
-        directDomains = Self.defaultDirectDomains
-        UserDefaults.standard.set(directDomains, forKey: Self.directDomainsKey)
+        tunnelState.directDomains = Self.defaultDirectDomains
+        UserDefaults.standard.set(tunnelState.directDomains, forKey: Self.directDomainsKey)
         appendToLog("\nReset direct domains to defaults. Restart proxy to regenerate PAC rules.\n")
     }
 
@@ -1153,10 +1235,18 @@ struct ContentView: View {
         }
 
         do {
-            let supportURL = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            )[0].appendingPathComponent("NaiveProxyMac", isDirectory: true)
+            guard !tunnelState.isRunning else {
+                appendToLog("\nStop the proxy before replacing the binary.\n")
+                return
+            }
+
+            guard sourceURL.isFileURL,
+                  (try sourceURL.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true else {
+                appendToLog("\nInvalid binary: choose a regular executable file.\n")
+                return
+            }
+
+            let supportURL = appSupportDirectoryURL()
 
             try FileManager.default.createDirectory(
                 at: supportURL,
@@ -1175,9 +1265,9 @@ struct ContentView: View {
                 ofItemAtPath: destinationURL.path
             )
 
-            customBinaryPath = destinationURL.path
-            UserDefaults.standard.set(customBinaryPath, forKey: Self.customBinaryPathKey)
-            appendToLog("\nReplaced Naive binary: \(customBinaryPath)\nRestart proxy to use the new binary.\n")
+            tunnelState.customBinaryPath = destinationURL.path
+            UserDefaults.standard.set(tunnelState.customBinaryPath, forKey: Self.customBinaryPathKey)
+            appendToLog("\nReplaced Naive binary: \(tunnelState.customBinaryPath)\nRestart proxy to use the new binary.\n")
         } catch {
             appendToLog("\nFailed to replace Naive binary: \(error.localizedDescription)\n")
         }
@@ -1193,13 +1283,13 @@ struct ContentView: View {
     }
 
     private func runDiagnostics() {
-        let port = localPort.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isTestRunning else {
+        let port = tunnelState.localPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tunnelState.isTestRunning else {
             appendToLog("\nA test is already running. Please wait.\n")
             return
         }
 
-        isTestRunning = true
+        tunnelState.isTestRunning = true
         appendToLog("\n=== Comprehensive Diagnostics ===\n")
 
         Task.detached(priority: .userInitiated) {
@@ -1231,19 +1321,19 @@ struct ContentView: View {
                 appendToLog("Testing SOCKS proxy with curl to ipinfo.io...\n")
                 appendToLog(curlResult)
                 appendToLog("\n=== End Diagnostics ===\n")
-                isTestRunning = false
+                tunnelState.isTestRunning = false
             }
         }
     }
 
     private func runTimeoutTest(mode: ProxyTestMode) {
-        let port = localPort.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isTestRunning else {
+        let port = tunnelState.localPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tunnelState.isTestRunning else {
             appendToLog("\nA test is already running. Please wait.\n")
             return
         }
 
-        isTestRunning = true
+        tunnelState.isTestRunning = true
         appendToLog("\n--- Timeout Test: \(mode.title) ---\n")
 
         Task.detached(priority: .userInitiated) {
@@ -1270,7 +1360,7 @@ struct ContentView: View {
             await MainActor.run {
                 appendToLog(results)
                 appendToLog("\n--- End Timeout Test: \(mode.title) ---\n")
-                isTestRunning = false
+                tunnelState.isTestRunning = false
             }
         }
     }
@@ -1351,12 +1441,12 @@ private struct SidebarButtonLabel: View {
     var body: some View {
         HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(iconBackground)
                     .frame(width: 24, height: 24)
 
                 Image(systemName: systemImage)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 13, weight: .semibold))
             }
 
             Text(title)
@@ -1371,14 +1461,13 @@ private struct SidebarButtonLabel: View {
         .frame(height: 38)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(backgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(borderColor, lineWidth: 1)
         }
-        .shadow(color: shadowColor, radius: isPrimary && !isDisabled ? 8 : 0, y: 3)
         .opacity(isDisabled ? 0.62 : 1)
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var foregroundColor: Color {
@@ -1394,7 +1483,7 @@ private struct SidebarButtonLabel: View {
             return .accentColor
         }
 
-        return Color.black.opacity(isDisabled ? 0.045 : 0.075)
+        return Color(nsColor: isDisabled ? .controlBackgroundColor : .quaternaryLabelColor).opacity(isDisabled ? 0.32 : 0.14)
     }
 
     private var iconBackground: Color {
@@ -1402,7 +1491,7 @@ private struct SidebarButtonLabel: View {
             return .white.opacity(0.18)
         }
 
-        return Color.white.opacity(0.08)
+        return Color(nsColor: .controlAccentColor).opacity(isDisabled ? 0.08 : 0.12)
     }
 
     private var borderColor: Color {
@@ -1410,11 +1499,7 @@ private struct SidebarButtonLabel: View {
             return .white.opacity(0.18)
         }
 
-        return Color.white.opacity(0.08)
-    }
-
-    private var shadowColor: Color {
-        isPrimary && !isDisabled ? Color.accentColor.opacity(0.24) : .clear
+        return Color(nsColor: .separatorColor).opacity(0.24)
     }
 }
 
@@ -1429,7 +1514,6 @@ private struct ProxyProfile: Codable, Identifiable, Hashable, Sendable {
         case id
         case server
         case username
-        case password
         case localPort
     }
 
@@ -1446,7 +1530,7 @@ private struct ProxyProfile: Codable, Identifiable, Hashable, Sendable {
         id = try container.decode(String.self, forKey: .id)
         server = try container.decode(String.self, forKey: .server)
         username = try container.decode(String.self, forKey: .username)
-        password = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
+        password = ""
         localPort = try container.decode(String.self, forKey: .localPort)
     }
 
@@ -1455,7 +1539,6 @@ private struct ProxyProfile: Codable, Identifiable, Hashable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(server, forKey: .server)
         try container.encode(username, forKey: .username)
-        try container.encode(password, forKey: .password)
         try container.encode(localPort, forKey: .localPort)
     }
 
@@ -1893,24 +1976,17 @@ private struct SettingsView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color.accentColor.opacity(0.12),
-                    Color(nsColor: .windowBackgroundColor)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            Color(nsColor: .windowBackgroundColor)
             .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
                     Image(systemName: "gearshape.fill")
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
+                        .frame(width: 40, height: 40)
                         .background(Color.accentColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Settings")
@@ -1992,7 +2068,7 @@ private struct SettingsView: View {
                     .padding(.vertical, 2)
                 }
             }
-            .padding(22)
+            .padding(20)
         }
         .frame(width: 680, height: 680)
         .fileImporter(
@@ -2060,7 +2136,7 @@ private struct SettingsView: View {
                     TechStackRow(label: "Core", value: "Foundation, Process, UserDefaults")
                     TechStackRow(label: "Proxy", value: "Cool tunnel, SOCKS5, Smart PAC")
                     TechStackRow(label: "System", value: "networksetup, lsof, curl")
-                    TechStackRow(label: "UI", value: "Material cards, adaptive grid, live logs")
+                    TechStackRow(label: "UI", value: "Material cards, adaptive grid, live tunnelState.logs")
                 }
 
                 Divider()
