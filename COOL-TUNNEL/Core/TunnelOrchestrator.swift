@@ -49,10 +49,21 @@ public final class TunnelOrchestrator {
     private let settingsStore: SettingsStore
     private let keychain: KeychainStore
     private let paths: AppSupportPaths
+    private let naiveResolver: NaiveBinaryResolver
 
     private var eventTask: Task<Void, Never>?
     private var didBootstrap: Bool = false
     private let maxLogEntries: Int = 1000
+
+    /// Cached descriptor for the naive binary the app is currently
+    /// configured to spawn. Populated on bootstrap and after each
+    /// settings change so the Settings view can render the chip / arch
+    /// summary without firing extra subprocesses.
+    public private(set) var activeNaiveDescriptor: NaiveBinaryDescriptor?
+
+    /// Detected host CPU. Exposed so the Settings view can render
+    /// "This Mac: Apple Silicon" without re-querying sysctl.
+    public let hostArchitecture: HostArchitecture = .current
 
     // MARK: - Construction
 
@@ -63,7 +74,8 @@ public final class TunnelOrchestrator {
         profileStore: ProfileStore,
         settingsStore: SettingsStore,
         keychain: KeychainStore,
-        paths: AppSupportPaths
+        paths: AppSupportPaths,
+        naiveResolver: NaiveBinaryResolver = NaiveBinaryResolver()
     ) {
         self.core = core
         self.proxyController = proxyController
@@ -72,15 +84,17 @@ public final class TunnelOrchestrator {
         self.settingsStore = settingsStore
         self.keychain = keychain
         self.paths = paths
+        self.naiveResolver = naiveResolver
     }
 
     /// Builds an orchestrator wired with default dependencies sourced from
     /// the running app bundle.
     public static func bootstrap() -> TunnelOrchestrator {
-        let executableURL = Bundle.main.url(
-            forResource: "cool-tunnel-core",
-            withExtension: nil
-        ) ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/cool-tunnel-core")
+        let executableURL =
+            Bundle.main.url(
+                forResource: "cool-tunnel-core",
+                withExtension: nil
+            ) ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/cool-tunnel-core")
 
         let paths: AppSupportPaths
         do {
@@ -112,12 +126,31 @@ public final class TunnelOrchestrator {
         selectedProfileID = profileStore.loadSelectedID() ?? profiles.first?.id
         settings = settingsStore.load()
         firewallState = await firewall.currentState()
+        await refreshNaiveDescriptor()
 
         do {
             try await core.start()
             subscribeToEvents()
         } catch {
             recordError("engine failed to start: \(error)")
+        }
+    }
+
+    /// Re-inspects the active naive binary and caches the descriptor for
+    /// the Settings view. Called on bootstrap and after the user changes
+    /// the override path so the chip / arch summary stays accurate.
+    public func refreshNaiveDescriptor() async {
+        do {
+            activeNaiveDescriptor = try await naiveResolver.resolve(settings: settings)
+        } catch let error as NaiveResolverError {
+            // Surfacing the typed error in the log lets a developer see
+            // *why* resolution failed without forcing the user to open
+            // Settings — but we keep `lastError` clear so a stale
+            // descriptor failure does not block manual retries.
+            appendInfo("naive: \(error.localizedDescription)")
+            activeNaiveDescriptor = nil
+        } catch {
+            activeNaiveDescriptor = nil
         }
     }
 
@@ -219,21 +252,24 @@ public final class TunnelOrchestrator {
             try writeRestrictedFile(pacJS, to: paths.pacFile)
         }
 
-        // Spawn the bundled naive binary via the engine — but only after a
-        // signature check. Whether the binary is the one we shipped or a
-        // user-supplied override, untrusted bytes never reach the engine
-        // spawn path.
-        let binaryURL = resolveNaiveBinary()
+        // Resolve the naive binary through the dedicated resolver: it
+        // checks the host arch slice, runs `--version`, verifies the
+        // code signature, and refuses to return a descriptor that would
+        // crash on spawn. One typed error covers all four failure modes.
+        let descriptor: NaiveBinaryDescriptor
         do {
-            try await CodeSignVerifier.verifyValid(at: binaryURL)
-        } catch let error as CodeSignError {
-            throw OrchestratorError.naiveBinaryTampered(binaryURL, error)
+            descriptor = try await naiveResolver.resolve(settings: settings)
+        } catch let error as NaiveResolverError {
+            throw OrchestratorError.naiveBinaryUnusable(error)
         }
-        let started = try await core.send(.startProxy(
-            binaryPath: binaryURL.path,
-            configPath: paths.configFile.path,
-            port: port
-        ))
+        activeNaiveDescriptor = descriptor
+
+        let started = try await core.send(
+            .startProxy(
+                binaryPath: descriptor.url.path,
+                configPath: paths.configFile.path,
+                port: port
+            ))
         guard case .started = started else {
             throw OrchestratorError.unexpectedResponse
         }
@@ -329,14 +365,6 @@ public final class TunnelOrchestrator {
 
     // MARK: - Helpers
 
-    private func resolveNaiveBinary() -> URL {
-        if !settings.customNaiveBinaryPath.isEmpty {
-            return URL(fileURLWithPath: settings.customNaiveBinaryPath)
-        }
-        return Bundle.main.url(forResource: "naive", withExtension: nil)
-            ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/naive")
-    }
-
     private func appendLog(source: LogSource, text: String) {
         logEntries.append(LogEntry(source: source, text: text))
         trimLogs()
@@ -385,18 +413,19 @@ public enum OrchestratorError: Error, Sendable, Equatable {
     case noProfile
     case invalidProfile(reason: String)
     case unexpectedResponse
-    /// The configured `naive` binary failed code-sign verification. Either
-    /// the bundled binary has been tampered with, or the user-supplied
-    /// override path points at an unsigned / corrupted Mach-O.
-    case naiveBinaryTampered(URL, CodeSignError)
+    /// The configured `naive` binary cannot be used: the file is missing,
+    /// not a Mach-O, lacks a slice for the host CPU, or has a broken
+    /// code signature. The wrapped [`NaiveResolverError`] tells the user
+    /// which one — and what to do about it.
+    case naiveBinaryUnusable(NaiveResolverError)
 
     public var localizedDescription: String {
         switch self {
         case .noProfile: "No profile is selected."
         case .invalidProfile(let reason): "Invalid profile: \(reason)"
         case .unexpectedResponse: "Engine returned an unexpected response."
-        case .naiveBinaryTampered(let url, let err):
-            "naive binary at \(url.path) failed signature check: \(err.localizedDescription)"
+        case .naiveBinaryUnusable(let err):
+            "naive binary cannot be used: \(err.localizedDescription)"
         }
     }
 }

@@ -72,9 +72,7 @@ impl ProxySupervisor {
         tokio::spawn(read_lines(stdout, LogSource::Stdout, events.clone()));
         tokio::spawn(read_lines(stderr, LogSource::Stderr, events.clone()));
 
-        let _ = events
-            .send(Event::StateChanged { running: true })
-            .await;
+        let _ = events.send(Event::StateChanged { running: true }).await;
 
         let (kill_tx, kill_rx) = oneshot::channel();
         let monitor = tokio::spawn(monitor_lifecycle(child, kill_rx, events));
@@ -161,9 +159,7 @@ async fn monitor_lifecycle(
         }
         _ = child.wait() => {}
     }
-    let _ = events
-        .send(Event::StateChanged { running: false })
-        .await;
+    let _ = events.send(Event::StateChanged { running: false }).await;
 }
 
 #[cfg(test)]
@@ -171,7 +167,7 @@ async fn monitor_lifecycle(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     fn shell_path() -> PathBuf {
         PathBuf::from("/bin/sh")
@@ -217,7 +213,10 @@ mod tests {
             }
         }
         assert!(saw_log_line, "expected to receive the echoed log line");
-        assert!(saw_state_change_false, "expected a stopped state-change event");
+        assert!(
+            saw_state_change_false,
+            "expected a stopped state-change event"
+        );
         // suppress unused-variable warning for kx_tx; we deliberately let the child exit on its own.
         drop(kx_tx);
     }

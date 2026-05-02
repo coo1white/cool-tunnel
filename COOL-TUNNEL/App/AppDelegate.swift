@@ -36,7 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installCommandWHandler() {
         commandWMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { @MainActor event in
             guard event.modifierFlags.contains(.command),
-                  event.charactersIgnoringModifiers == "w" else {
+                event.charactersIgnoringModifiers == "w"
+            else {
                 return event
             }
             NSApp.keyWindow?.orderOut(nil)

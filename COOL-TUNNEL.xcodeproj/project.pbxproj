@@ -127,6 +127,7 @@
 			inputPaths = (
 				"$(SRCROOT)/core/Cargo.toml",
 				"$(SRCROOT)/core/Cargo.lock",
+				"$(SRCROOT)/scripts/build_rust_core.sh",
 			);
 			name = "Build Rust core";
 			outputFileListPaths = (
@@ -136,7 +137,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\n\nCARGO=\"\"\nfor candidate in \"$HOME/.cargo/bin/cargo\" \"/opt/homebrew/bin/cargo\" \"/usr/local/bin/cargo\"; do\n    if [ -x \"$candidate\" ]; then\n        CARGO=\"$candidate\"\n        break\n    fi\ndone\nif [ -z \"$CARGO\" ]; then\n    if command -v cargo >/dev/null 2>&1; then\n        CARGO=\"$(command -v cargo)\"\n    else\n        echo \"error: cargo not found. Install Rust via https://rustup.rs/ and rebuild.\" >&2\n        exit 1\n    fi\nfi\n\ncd \"$SRCROOT/core\"\n\ncase \"$CONFIGURATION\" in\n    Release) PROFILE=\"release\"; FLAGS=\"--release\" ;;\n    *)       PROFILE=\"debug\";   FLAGS=\"\" ;;\nesac\n\ncase \"$NATIVE_ARCH\" in\n    arm64|aarch64) RUST_TARGET=\"aarch64-apple-darwin\" ;;\n    x86_64)        RUST_TARGET=\"x86_64-apple-darwin\" ;;\n    *)             RUST_TARGET=\"aarch64-apple-darwin\" ;;\nesac\n\necho \"info: building cool-tunnel-core ($PROFILE, $RUST_TARGET)\"\n\"$CARGO\" build $FLAGS --target \"$RUST_TARGET\" --bin cool-tunnel-core\n\nDEST_DIR=\"$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\nmkdir -p \"$DEST_DIR\"\ncp \"target/$RUST_TARGET/$PROFILE/cool-tunnel-core\" \"$DEST_DIR/cool-tunnel-core\"\nchmod +x \"$DEST_DIR/cool-tunnel-core\"\n\necho \"info: cool-tunnel-core copied to $DEST_DIR\"\n";
+			shellScript = "# Thin shim — the actual build logic lives in scripts/build_rust_core.sh\n# so it can be linted with shellcheck and run from the CLI for testing.\n# Release builds produce a universal arm64+x86_64 binary; Debug builds\n# stay single-arch for fast iteration.\nexec \"$SRCROOT/scripts/build_rust_core.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -291,7 +292,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
-				MARKETING_VERSION = 0.1.3;
+				MARKETING_VERSION = 0.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive;
 				PRODUCT_NAME = "Cool tunnel";
 				REGISTER_APP_GROUPS = YES;
@@ -335,7 +336,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
-				MARKETING_VERSION = 0.1.3;
+				MARKETING_VERSION = 0.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive;
 				PRODUCT_NAME = "Cool tunnel";
 				REGISTER_APP_GROUPS = YES;

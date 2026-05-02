@@ -24,11 +24,12 @@
 //! communicates with this engine over a subprocess using newline-delimited
 //! JSON.
 
-pub mod domain;
 pub mod config;
 pub mod diagnostics;
+pub mod domain;
 pub mod error;
 pub mod monitor;
 pub mod protocol;
 pub mod redaction;
 pub mod supervisor;
+pub mod util;
