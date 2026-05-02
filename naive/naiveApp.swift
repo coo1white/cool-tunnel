@@ -13,5 +13,8 @@ struct naiveApp: App {
         WindowGroup {
             ContentView()
         }
+        .defaultSize(width: 820, height: 700)
+        .windowResizability(.contentSize)
+        .windowBackgroundDragBehavior(.enabled)
     }
 }
