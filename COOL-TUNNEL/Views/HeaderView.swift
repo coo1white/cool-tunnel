@@ -1,7 +1,9 @@
 // Views/HeaderView.swift
 //
-// Title bar: app name, status pill, and an inline firewall warning when the
-// macOS Application Firewall is enabled.
+// Title bar redesigned for the v0.1.5.4 visual refresh: app icon on
+// a pastel gradient card, animated status pill that bounces on
+// state-change, inline firewall warning. Pulls all colours from
+// `CTPalette` so the look stays consistent with the mode picker.
 
 import SwiftUI
 
@@ -18,16 +20,38 @@ public struct HeaderView: View {
 
     public var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            Image(systemName: "shippingbox.and.arrow.backward.fill")
-                .font(.system(size: 32))
-                .foregroundStyle(.tint)
+            // App icon on a pastel gradient circle. The gradient
+            // tracks the active mode so the icon itself becomes a
+            // mood indicator without a second label.
+            ZStack {
+                Circle()
+                    .fill(CTPalette.dreamGradient(for: activeMode))
+                    .frame(width: 52, height: 52)
+                    .shadow(color: CTPalette.accent(for: activeMode).opacity(0.3), radius: 8, x: 0, y: 4)
+                Image(systemName: isRunning ? "shippingbox.and.arrow.backward.fill" : "shippingbox.fill")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(.white)
+                    // macOS 26 symbol effects: bounces when the run
+                    // state flips so the user sees the state change
+                    // in their peripheral vision.
+                    .symbolEffect(.bounce, options: .speed(1.2), value: isRunning)
+                    .contentTransition(.symbolEffect(.replace))
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("COOL TUNNEL")
-                    .font(.system(.title2, design: .rounded).weight(.semibold))
+                    .font(.system(.title2, design: .rounded).weight(.bold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [CTPalette.inkBlue, CTPalette.cherryRose],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .contentTransition(.opacity)
             }
 
             Spacer()
@@ -38,44 +62,53 @@ public struct HeaderView: View {
                 firewallBadge
             }
         }
+        .padding(14)
+        .ganjiCard(cornerRadius: 22, tint: CTPalette.accent(for: activeMode))
     }
 
     private var subtitle: String {
-        isRunning ? "Active · \(activeMode.title)" : "Idle"
+        isRunning ? "Active · \(activeMode.title)" : "Idle · ready when you are"
     }
 
+    /// Status pill — pastel gradient when active, soft material when
+    /// idle. Reads the same accent the icon uses so the two surfaces
+    /// move together when the mode changes.
     private var statusPill: some View {
-        Text(activeMode.title)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(
-                Capsule().fill(pillColor.opacity(0.18))
-            )
-            .overlay(
-                Capsule().stroke(pillColor, lineWidth: 1)
-            )
-            .foregroundStyle(pillColor)
-    }
-
-    private var pillColor: Color {
-        switch activeMode {
-        case .stopped: .secondary
-        case .smart: .blue
-        case .global: .orange
-        case .localOnly: .green
+        let tint = CTPalette.accent(for: activeMode)
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(tint)
+                .frame(width: 8, height: 8)
+                .shadow(color: tint.opacity(0.6), radius: 4)
+                // Pulse the live-status dot while running so the
+                // header has a heartbeat. Flat circle when idle.
+                .symbolEffect(.pulse, options: .repeating, isActive: isRunning)
+            Text(activeMode.title)
+                .font(.caption.weight(.bold))
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background {
+            Capsule(style: .continuous).fill(tint.opacity(isRunning ? 0.22 : 0.12))
+        }
+        .overlay {
+            Capsule(style: .continuous).strokeBorder(tint.opacity(0.6), lineWidth: 0.7)
+        }
+        .foregroundStyle(tint)
+        .animation(.spring(response: 0.32, dampingFraction: 0.72), value: activeMode)
     }
 
     private var firewallBadge: some View {
-        Label(firewallState.description, systemImage: "exclamationmark.shield")
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.orange.opacity(0.12))
-            )
+        Label(firewallState.description, systemImage: "exclamationmark.shield.fill")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(CTPalette.cherryRose)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background {
+                Capsule(style: .continuous).fill(CTPalette.bunnyPink.opacity(0.20))
+            }
+            .overlay {
+                Capsule(style: .continuous).strokeBorder(CTPalette.cherryRose.opacity(0.4), lineWidth: 0.6)
+            }
     }
 }
