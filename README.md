@@ -20,11 +20,12 @@ Silicon and Intel, and stores everything locally with no telemetry.
 | | |
 | --- | --- |
 | **Native macOS** | SwiftUI + AppKit. No Electron, no Tauri WebView, no Qt. |
-| **Universal binary** | One `.app` runs natively on Apple Silicon (M1/M2/M3/M4) **and** Intel — both `arm64` and `x86_64` slices in every Mach-O. |
-| **No data collection** | Zero telemetry, zero analytics, zero remote configuration. The only network calls go to the SOCKS upstream you configure. |
-| **Local credential storage** | Passwords in the macOS Keychain (`kSecAttrAccessibleWhenUnlocked`); everything else in `UserDefaults`. Nothing leaves your machine. |
-| **Replaceable engine** | Bring your own `naive` binary in Settings — Cool Tunnel inspects code signature, host-arch slice, and `--version` before adopting it. |
-| **Verified at launch** | Single ad-hoc-signed `cool-tunnel-core` engine binary is `SecStaticCodeCheckValidity`-verified before spawning. Naive binary is verified before each proxy start. |
+| **Classic Mac aesthetic** | System 7 / Platinum-era palette + Monaco for every monospaced surface, with Liquid Glass on macOS 26+ as the modern note. |
+| **Universal binary** | One `.app` runs natively on Apple Silicon (M1/M2/M3/M4 and beyond) **and** Intel — `arm64` + `x86_64` slices in every Mach-O. |
+| **Two replaceable components** | The bundled `naive` binary **and** the `cool-tunnel-core` Rust engine each have a Test (OK / NG verdict) + Update flow in Settings. Update fetches a fresh universal build from GitHub, lipo-merges + ad-hoc signs it, and adopts it without reinstalling the app. |
+| **Ready to use out of the box** | Passwords live in `~/Library/Application Support/COOL-TUNNEL/credentials.json` (mode 0600) — no macOS Keychain prompt before the UI appears. Existing v0.1.5.4 Keychain entries migrate transparently the first time you click Start. |
+| **No data collection** | Zero telemetry, zero analytics, zero remote configuration. The only network calls go to the SOCKS upstream you configure (and the GitHub API when you press the Update button). |
+| **Verified at launch** | The Rust engine is `SecStaticCodeCheckValidity`-verified before spawning. The naive binary is verified before each proxy start. Both are inspected for host-CPU slice presence so a wrong-arch build can never hit "Bad CPU type in executable". |
 | **Free, open-source** | Apache 2.0 licensed — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE). |
 
 ---
@@ -33,14 +34,19 @@ Silicon and Intel, and stores everything locally with no telemetry.
 
 | Requirement | Detail |
 | --- | --- |
-| **OS** | macOS 12 (Monterey) or newer |
+| **OS** | macOS 14 (Sonoma) or newer |
 | **CPU** | Apple Silicon (`arm64`) or Intel (`x86_64`) — same `.app` works on both |
-| **Disk** | ~12 MB installed (universal binary) |
+| **Disk** | ~23 MB installed (universal binary) |
 | **Memory** | ~30 MB resident while the proxy is running |
-| **Network** | Outbound HTTPS to your NaiveProxy server; loopback SOCKS listener (default `127.0.0.1:1080`) |
+| **Network** | Outbound HTTPS to your NaiveProxy server; loopback SOCKS listener (default `127.0.0.1:1080`); GitHub API + releases CDN if you press Update |
 | **Privileges** | Standard user — no admin / no privileged helper / no kernel extension |
 | **Sandbox** | Not sandboxed (the app needs to spawn the bundled `naive` binary and call `networksetup`) |
 | **Apple Developer ID** | Not required to use — the app is ad-hoc signed (right-click → Open on first launch) |
+
+The macOS 14 floor covers every Apple Silicon Mac and every Intel Mac
+that can still run Sonoma — iMac 2019+, MacBook Air / Pro / mini
+2018+, Mac Studio, Mac Pro 2019+. Older Macs can't run Sonoma anyway,
+so 14.0 is the practical floor.
 
 If you're already running an upstream NaiveProxy server (Caddy + naive,
 or any compatible HTTP CONNECT endpoint), Cool Tunnel is the macOS
@@ -111,15 +117,40 @@ client side.
 
 ### Why two binaries (naive + cool-tunnel-core)?
 
-`naive` is the upstream protocol implementation — we don't fork or
-modify it, so updates are a one-line bump to
-[`COOL-TUNNEL/naive.upstream.json`](./COOL-TUNNEL/naive.upstream.json).
+The architecture intentionally separates three concerns —
+**UI**, **glue**, **anti-tracking engine** — so each can evolve and
+update independently. The same shape is meant to extend across
+platforms in the future:
 
-`cool-tunnel-core` is the surface that the Swift UI talks to: a Rust
-binary with strict types, structured errors, JSON-over-stdio, and
-domain validation. It exists to keep the Swift side thin and the
-spawn / supervise / monitor logic out of process. Both are universal
-Mach-Os and ad-hoc signed.
+|                                  | **UI**                      | **Glue (cross-platform)** | **Anti-tracking engine** |
+| -------------------------------- | --------------------------- | ------------------------- | ------------------------ |
+| **Server**                       | Filament (PHP)              | **RUST**                  | Naïve Proxy              |
+| **Client (macOS today)**         | SwiftUI                     | **RUST**                  | Naïve Proxy              |
+| **Client (future Android/iOS/Win/Linux)** | Kotlin / Swift / C++ / GTK | **RUST**             | Naïve Proxy              |
+
+The middle column is the same Rust crate everywhere — that is the
+whole point of the design. Today on macOS it's `cool-tunnel-core`
+(in [`core/`](./core)); on the server it'll be a sibling crate
+sharing the same `ct-protocol` types; future client platforms reuse
+the same protocol with a per-platform binary.
+
+For the macOS app today:
+
+- **`naive`** is the upstream protocol implementation — we don't fork
+  or modify it. Updates are one click in **Settings → Naive Binary →
+  Update** (downloads from upstream, lipo-merges arm64 + x86_64,
+  ad-hoc signs, installs into Application Support).
+- **`cool-tunnel-core`** is the Rust surface the Swift UI talks to:
+  strict types, structured errors, JSON-over-stdio, domain validation,
+  100 ms anomaly debouncer. Updates are one click in **Settings →
+  Rust Core → Update** (downloads the standalone universal asset
+  from the latest Cool Tunnel GitHub release, ad-hoc signs, installs
+  into Application Support; takes effect on next launch).
+
+Both have a **Test** button right next to Update that runs the same
+checks (lipo arch slices, `--version` liveness, `SecStaticCodeCheckValidity`
+signature) and shows a single green **OK** or red **NG** verdict
+above the per-row breakdown.
 
 ### Modes
 
@@ -296,15 +327,88 @@ docs/
   binary, call `/usr/sbin/networksetup`, and run `lsof`. Sandboxing
   is technically possible but would require a privileged helper for
   the system-proxy calls, which we deliberately avoid.
-- **No system tray / menu bar item yet.** Tracked in
-  [`docs/v0.1.5-roadmap.md`](./docs/v0.1.5-roadmap.md) as the top
-  v0.1.5+ candidate.
 - **Single upstream binary.** Cool Tunnel wraps NaiveProxy
   specifically; it is not a clash / sing-box / V2Ray client. Pick the
   right tool for your protocol.
-- **No subscription URL import** for profiles yet — manual entry
-  only. Also tracked in the roadmap.
-- **macOS only.** No Windows / Linux port planned.
+- **macOS only today.** Other platforms are on the roadmap below.
+
+---
+
+## Roadmap
+
+The full design notes live in [`docs/v0.1.5-roadmap.md`](./docs/v0.1.5-roadmap.md);
+this is the short version with status tags.
+
+### Shipped in the v0.1.5.x line
+
+- ✅ **Universal arm64 + x86_64 binary** — same `.app` for every Mac.
+- ✅ **macOS 14 (Sonoma) floor** — every Mac since 2018.
+- ✅ **One-tap mode switching** — Smart / Global / Local Only chips
+  hot-swap modes without stopping.
+- ✅ **Per-probe ms timing** in the live log for diagnostics +
+  latency tests.
+- ✅ **OK / NG verdict** on `Test` for both naive and Rust core.
+- ✅ **Replaceable naive binary** with one-click Update from
+  upstream NaiveProxy releases.
+- ✅ **Replaceable Rust core** with one-click Update from Cool
+  Tunnel GitHub releases (new in v0.1.5.8).
+- ✅ **File-backed credentials** — no Keychain prompt before the UI
+  appears, ready to use out of the box.
+- ✅ **Inline Settings panel** — no modal sheet, Cmd+W returns to
+  main view (new in v0.1.5.8).
+- ✅ **Classic Macintosh theme + Monaco** for monospaced surfaces.
+- ✅ **`PerformanceProfile`** auto-tunes animation density on
+  older Intel hardware.
+- ✅ **100 ms anomaly debouncer** with lazy pruning.
+- ✅ **Whole-project secret scan** in `security_check.sh`.
+- ✅ **Apache 2.0** licensed.
+
+### Planned for v0.1.6 / v0.1.7
+
+- ⏭️ **Menu-bar (NSStatusItem)** with quick toggles — start / stop,
+  profile picker, current state.
+- ⏭️ **Latency / IP-Geo card** in the header — see actual upstream
+  IP and ping while running.
+- ⏭️ **Settings → sidebar reorganisation** — once sections grow
+  past five.
+
+### Planned for v0.1.8 / v0.2.0
+
+- ⏭️ **Live Connections pane** — host, bytes ↑↓, duration,
+  originating process. Requires a Rust-side flow accountant via
+  `lsof` / `nettop`.
+- ⏭️ **Profile cards + subscription URL import** — auto-refresh
+  intervals, drag-to-reorder.
+- ⏭️ **Lightweight mode** — close GUI, keep proxy + menu bar
+  alive.
+
+### v0.2.0 — cross-platform
+
+The big architectural beat. The whole project is structured so the
+Rust crate (the **Glue** column above) is the same on every
+platform; UI changes per platform; engine stays naive everywhere.
+
+- 🛣️ **Server tier** — Filament (PHP) admin UI driving
+  `ct-server-core` (Rust) on the same `ct-protocol` we already use,
+  with `forwardproxy@naive` as the Caddy plugin.
+- 🛣️ **Cross-platform clients** — Kotlin (Android), Swift (iOS),
+  C++ (Windows), GTK (Linux). All share `ct-protocol` and a
+  per-platform Rust core; each platform supplies its own naive
+  build (or its OS's NaiveProxy port).
+- 🛣️ **Component-style updates everywhere** — every platform's
+  Settings exposes the same Test (OK / NG) + Update flow for both
+  the Rust core and the engine, so updates are a single button
+  click on every device.
+
+### Honourable mentions (anytime)
+
+- URL scheme handler (`cooltunnel://import?url=...`).
+- WebDAV backup of profiles + settings.
+- Custom CSS / accent colour theming.
+- Per-mode tray icons.
+
+If any of these matters most to you, file an issue with `[roadmap]`
+in the title and I'll prioritise.
 
 ---
 

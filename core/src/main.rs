@@ -51,6 +51,33 @@ const MAX_INFLIGHT_REQUESTS: usize = 32;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
+    // Short-circuit before tracing init so `--version` works on
+    // sandboxed inspections that may not have stderr available.
+    // The Swift `RustCoreResolver` greps the first line of stdout
+    // for the canonical pattern; keep that wire format stable.
+    let mut args = std::env::args().skip(1);
+    if let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("cool-tunnel-core {}", env!("CARGO_PKG_VERSION"));
+                return ExitCode::SUCCESS;
+            }
+            "--help" | "-h" => {
+                println!("cool-tunnel-core {}", env!("CARGO_PKG_VERSION"));
+                println!();
+                println!("Usage: cool-tunnel-core [--version | --help]");
+                println!();
+                println!("With no arguments, runs as a JSON-over-stdio engine for the Cool Tunnel macOS app.");
+                return ExitCode::SUCCESS;
+            }
+            _ => {
+                eprintln!("cool-tunnel-core: unknown argument {arg:?}");
+                eprintln!("try --help or --version");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     init_tracing();
     tracing::info!("cool-tunnel-core starting");
 
