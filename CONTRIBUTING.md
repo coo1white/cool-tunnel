@@ -67,7 +67,15 @@ Before sending a pull request, run:
 cd core
 cargo fmt --all -- --check
 cargo clippy --release --all-targets -- -D warnings
-cargo test --release
+cargo test --release           # unit + protocol_roundtrip + chaos
+
+# Chaos suite alone (12 scenarios — oversized frames, no-newline
+# floods, concurrent start_proxy races, malformed bursts, stdin
+# EOF mid-frame, etc.). Verifies the engine survives the failure
+# modes the v0.1.7.x audits identified or fixed. Add a new
+# scenario here whenever you fix a robustness bug, so the
+# regression can't re-ship silently.
+cargo test --test chaos --release
 
 # Swift
 cd ..
