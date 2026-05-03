@@ -7,6 +7,10 @@
 
 import SwiftUI
 
+/// Profile picker plus the editable form (server, username,
+/// password, local port). All edits flow back through the
+/// orchestrator's `selectedProfile` setter, which strips passwords
+/// for `UserDefaults` and writes them to the credential store.
 @MainActor
 public struct ConnectionFormView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator

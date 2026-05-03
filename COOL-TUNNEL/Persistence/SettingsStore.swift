@@ -54,7 +54,12 @@ public struct AppSettings: Sendable, Codable, Equatable {
 /// so partial reads remain useful when a future field is added.
 ///
 /// Marked `@unchecked Sendable` because `UserDefaults` is documented
-/// as thread-safe but does not yet conform to `Sendable` itself.
+/// thread-safe but does not yet conform to `Sendable` itself. The
+/// safety invariant for this store is unconditional: every read and
+/// write happens on the MainActor (the orchestrator owns the only
+/// instance and is itself `@MainActor`), and every `UserDefaults`
+/// call returns synchronously — there are no `await` points across
+/// which a race could appear.
 public struct SettingsStore: @unchecked Sendable {
 
     private enum Keys {

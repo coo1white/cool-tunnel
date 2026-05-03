@@ -23,6 +23,12 @@
 import AppKit
 import SwiftUI
 
+/// Inline Settings panel — direct-domains list, This-Mac hardware
+/// readout, Naive Binary section (Test + Update + OK/NG verdict),
+/// Rust Core section (same shape), behaviour toggles, and an
+/// About footer with the running app version. Driven by an
+/// `isShowing` binding from `ContentView`; Cmd+W and the Back
+/// button both flip it back to false.
 @MainActor
 public struct SettingsView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator

@@ -48,8 +48,12 @@ public enum FileCredentialError: Error, Sendable, Equatable {
 }
 
 /// File-backed implementation of [`CredentialStore`]. Marked
-/// `@unchecked Sendable` because the internal lock makes the store
-/// safe to share across actors — the compiler can't see that.
+/// `@unchecked Sendable` because the internal `NSLock` makes the
+/// store safe to share across actors — the compiler can't see
+/// that. Safety invariant: every public method takes the lock
+/// before touching the on-disk JSON table and releases it
+/// synchronously before returning, so no thread can observe
+/// torn state regardless of which actor calls in.
 public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
