@@ -214,9 +214,13 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// Stops the engine and reverts the system proxy. Called from the
-    /// SwiftUI scene's `onDisappear` hook.
+    /// Stops the engine and reverts the system proxy. Called from
+    /// `AppDelegate.applicationWillTerminate` on real app quit.
+    /// Sets `isShuttingDown = true` so the event-stream-end handler
+    /// in `subscribeToEvents` knows the upcoming silence is
+    /// expected (and not an engine crash).
     public func shutdown() async {
+        isShuttingDown = true
         eventTask?.cancel()
         eventTask = nil
         try? await proxyController.disableAll()
@@ -224,6 +228,12 @@ public final class TunnelOrchestrator {
         activeMode = .stopped
         isRunning = false
     }
+
+    /// Set true the moment the orchestrator is about to tear the
+    /// engine down on purpose. Lets the `subscribeToEvents` loop
+    /// distinguish "the user quit the app" from "the engine just
+    /// died on us" when its event stream finishes.
+    private var isShuttingDown: Bool = false
 
     // MARK: - Profile management
 
@@ -509,6 +519,22 @@ public final class TunnelOrchestrator {
             let stream = await self.core.events()
             for await event in stream {
                 self.handle(event: event)
+            }
+            // Stream ended. Two cases produce that:
+            //   1. We deliberately shut the engine down via
+            //      `shutdown()` — `isShuttingDown` is true and we
+            //      stay quiet.
+            //   2. The engine subprocess died on us — pipe broke,
+            //      cool-tunnel-core crashed, OS killed it. The user
+            //      needs to know; otherwise the live log just stops
+            //      receiving lines and they assume "nothing's
+            //      happening" while the proxy is silently dead.
+            if !self.isShuttingDown {
+                self.recordError(
+                    "Engine subprocess exited unexpectedly. The proxy is no longer running. Try clicking Start again — the next launch will respawn cool-tunnel-core."
+                )
+                self.isRunning = false
+                self.activeMode = .stopped
             }
         }
     }
