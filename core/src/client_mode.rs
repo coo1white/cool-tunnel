@@ -267,6 +267,8 @@ async fn handle_request(
     events: mpsc::Sender<Event>,
 ) {
     let id = request.id;
+    let was_start = matches!(request.kind, RequestKind::StartProxy { .. });
+    let was_stop = matches!(request.kind, RequestKind::StopProxy);
     let result = dispatch(state, request.kind, outbound.clone(), events).await;
     let frame = match result {
         Ok(payload) => Outbound::Response {
@@ -275,7 +277,28 @@ async fn handle_request(
         },
         Err(error) => Outbound::Error { id, error },
     };
+    let response_succeeded = matches!(&frame, Outbound::Response { .. });
     let _ = outbound.send(frame).await;
+    // Ru#C4 fix: emit `state_changed` AFTER the response on the
+    // same outbound channel so FIFO ordering guarantees the wire
+    // sequence is `response → event`. Previously the event was
+    // emitted from `ProxySupervisor::spawn` (for start) or
+    // `monitor_lifecycle` (for stop), traveled through a
+    // separate event channel + bridge task, and could overtake
+    // the response. The supervisor now emits *only* the
+    // natural-death event (naive crashes on its own); user-
+    // initiated start/stop transitions are emitted here.
+    if response_succeeded {
+        if was_start {
+            let _ = outbound
+                .send(Outbound::Event(Event::StateChanged { running: true }))
+                .await;
+        } else if was_stop {
+            let _ = outbound
+                .send(Outbound::Event(Event::StateChanged { running: false }))
+                .await;
+        }
+    }
 }
 
 async fn dispatch(
