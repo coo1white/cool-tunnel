@@ -9,6 +9,76 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.6] — 2026-05-03 (LTSC patch — in-app self-updater)
+
+LTSC additive feature. New "Cool Tunnel" Settings section with
+**Check for Updates** + **Update to vX.Y.Z** buttons. Mirrors
+the existing Naive Binary / Rust Core sections; clicks the
+release flow for the user — no manual drag-to-Applications, no
+terminal, no `sudo`.
+
+### What it does
+
+1. **Check** — `GET /releases/latest` from the GitHub API.
+   Compares the tag to the running app's
+   `CFBundleShortVersionString`. Renders one of:
+   *up-to-date*, *update available with release-notes link*,
+   or *failed with error message + Reset button*.
+2. **Update** — when a newer release exists:
+   - Downloads the `Cool-tunnel-vX.Y.Z.zip` asset.
+   - Downloads the matching `Cool-tunnel-vX.Y.Z.sha256`
+     manifest.
+   - Computes SHA-256 of the .zip via CryptoKit; refuses to
+     install on any mismatch.
+   - Extracts via `ditto -x -k` (preserves macOS metadata
+     including the bundle's code signature).
+   - Verifies the new app: bundle identifier matches,
+     `CFBundleShortVersionString` matches the release tag,
+     `CodeSignVerifier` accepts.
+   - Refuses to install if the running app is on a read-only
+     volume (DMG mount or quarantine staging).
+   - Writes a tiny bash relaunch helper to `/tmp` and spawns
+     it detached. The helper waits for the parent PID to
+     exit, ditto-replaces the bundle, runs `open -a` on the
+     new copy, then cleans up.
+   - The app quits.
+
+### Security posture — **closes Sw#C4 for this surface**
+
+The Sw#C4 audit finding called out that the existing
+NaiveUpdater + RustCoreUpdater download a binary, ad-hoc sign
+it, and then accept it on next launch — defeating the
+`CodeSignVerifier` check against a MITM on the GitHub asset
+URL. The audit said the real fix is "a release-SHA-256
+manifest the updaters can pin against" but flagged it as
+deferred because it required a release-process change.
+
+`scripts/package_release.sh` already publishes that manifest
+for every release — it just wasn't being consumed. The new
+AppUpdater consumes it. The MITM hole is closed for the .app
+itself; retrofitting NaiveUpdater + RustCoreUpdater stays
+queued for v0.2.0.
+
+### What it deliberately does NOT do
+
+- **Does not request admin escalation.** `/Applications` is
+  admin-group writable on default macOS installs; no `sudo` or
+  auth dialog ever fires. If the user is non-admin and the
+  app is in a non-writable location, the update fails with a
+  clear message rather than prompting.
+- **Does not auto-check on launch.** The "Check" button is
+  user-initiated only. Cool Tunnel still makes zero network
+  calls at launch unless the user clicks something.
+- **Does not auto-update.** Every step is explicit click.
+
+### Files
+
+- New: `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` (~410
+  lines) — pipeline, SHA verification, helper-script writer.
+- Modified: `COOL-TUNNEL/Views/SettingsView.swift` — new
+  "Cool Tunnel" section with the Check/Update affordance.
+- Engine and chaos suite unchanged.
+
 ## [0.1.7.5] — 2026-05-03 (LTSC patch — chaos siege)
 
 LTSC siege patch. The chaos engineering work returned three real

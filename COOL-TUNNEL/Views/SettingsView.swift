@@ -58,6 +58,9 @@ public struct SettingsView: View {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
     )
 
+    // -- App self-updater (new in v0.1.7.6)
+    @State private var appUpdater = AppUpdater()
+
     private let resolver = NaiveBinaryResolver()
     private let rustResolver = RustCoreResolver()
     private let host = HostMachine.current
@@ -149,6 +152,10 @@ public struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
+                }
+
+                Section("Cool Tunnel") {
+                    appUpdaterSection
                 }
 
                 Section("Behaviour") {
@@ -637,6 +644,121 @@ public struct SettingsView: View {
                 }
                 .disabled(isInspecting || updaterIsBusy)
             }
+        }
+    }
+
+    // MARK: - App self-updater section (new in v0.1.7.6)
+
+    /// "Cool Tunnel" Settings row — current version display +
+    /// Check / Update buttons, mirroring the Naive Binary and
+    /// Rust Core sections. Drives `AppUpdater`, which fetches
+    /// `releases/latest` from GitHub, verifies the .zip against
+    /// the SHA-256 manifest the same release publishes, ditto-
+    /// extracts, code-signature-verifies, and spawns a relaunch
+    /// helper that swaps the bundle while the app quits.
+    @ViewBuilder
+    private var appUpdaterSection: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Image(systemName: "shippingbox.fill")
+                .font(.title3)
+                .foregroundStyle(CTPalette.macBlue)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Cool Tunnel \(appVersion.marketingVersion)")
+                    .font(.body.weight(.semibold))
+                Text(appUpdaterSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            appUpdaterActionButton
+        }
+        appUpdaterStatusRow
+    }
+
+    private var appUpdaterSubtitle: String {
+        switch appUpdater.state {
+        case .idle:
+            "Checks GitHub for a newer release. SHA-256 verified, then downloads, verifies the new app, replaces this copy, and relaunches."
+        case .checking:
+            "Checking for updates…"
+        case .upToDate(let v):
+            "You're on the latest version (\(v))."
+        case .available(let release):
+            "Update available: \(release.tag) (was \(appVersion.marketingVersion))."
+        case .downloading(let p):
+            "Downloading \(Int(p * 100))%…"
+        case .verifying:
+            "Verifying SHA-256…"
+        case .extracting:
+            "Extracting and verifying signature…"
+        case .relaunching:
+            "Relaunching… The app will close in a moment."
+        case .failed(let message):
+            "Update failed: \(message)"
+        }
+    }
+
+    @ViewBuilder
+    private var appUpdaterActionButton: some View {
+        switch appUpdater.state {
+        case .checking, .downloading, .verifying, .extracting, .relaunching:
+            ProgressView().controlSize(.small)
+        case .available(let release):
+            Button("Update to \(release.tag)") {
+                Task { await appUpdater.downloadAndInstall(release) }
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel("Download and install \(release.tag)")
+        default:
+            Button("Check for Updates") {
+                Task { await appUpdater.checkForUpdates() }
+            }
+            .accessibilityLabel("Check for Cool Tunnel updates")
+        }
+    }
+
+    @ViewBuilder
+    private var appUpdaterStatusRow: some View {
+        switch appUpdater.state {
+        case .available(let release):
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(CTPalette.macBlue)
+                Text("Release notes:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Link(release.tag, destination: release.releaseNotesURL)
+                    .font(.caption)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(CTPalette.macBlue.opacity(0.10))
+            }
+        case .failed(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .help(message)
+                    .textSelection(.enabled)
+                Spacer()
+                Button("Reset") { appUpdater.reset() }
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.red.opacity(0.10))
+            }
+        default:
+            EmptyView()
         }
     }
 
