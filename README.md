@@ -63,7 +63,7 @@ click a different mode chip.
 
 1. Download the latest release from
    **[github.com/coo1white/cool-tunnel/releases][releases]**.
-   Pick **`Cool-tunnel-v0.1.7.7.dmg`** if you're not sure.
+   Pick **`Cool-tunnel-v0.1.7.8.dmg`** if you're not sure.
 2. Open the `.dmg`. A Finder window opens.
 3. Drag **Cool tunnel.app** onto the **Applications** folder
    shortcut.
