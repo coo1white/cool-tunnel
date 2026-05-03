@@ -245,9 +245,58 @@ else
     warn "could not read entitlements"
 fi
 
-# --- 9. Gatekeeper assessment (advisory) -------------------------------
+# --- 9. LTSC posture ---------------------------------------------------
+#
+# Long-Term Servicing Channel checks: catch the kind of drift that
+# silently breaks reproducibility across the support window. The
+# missing-lockfile case is a hard fail (it would make the next build
+# pull different versions); the rest are warnings with actionable
+# remediation.
 
-heading "9. Gatekeeper assessment (ad-hoc-signed apps are expected to be rejected)"
+heading "9. LTSC posture"
+
+if [[ -f "${REPO_ROOT}/core/Cargo.lock" ]]; then
+    ok "core/Cargo.lock present (deterministic Rust builds)"
+else
+    fail "core/Cargo.lock missing — Rust builds are non-deterministic without it"
+fi
+
+# Lockfile freshness — a stale lock + manifest pair means cargo will
+# silently update versions on the next build. Advisory, not fatal:
+# legitimate `cargo update` runs may leave a delta inside an LTSC
+# patch window. Surface it loudly so the maintainer notices.
+# Manifest/lockfile version-field cross-check. Cargo's own
+# freshness checks (`--locked`, `--frozen`) insist on touching the
+# registry index even with `--offline`, which makes them unreliable
+# in CI/dev sandboxes. A direct grep is enough to catch the most
+# common drift: someone bumped `version` in Cargo.toml without
+# regenerating Cargo.lock.
+if [[ -f "${REPO_ROOT}/core/Cargo.toml" && -f "${REPO_ROOT}/core/Cargo.lock" ]]; then
+    TOML_VER=$(grep -E '^version\s*=' "${REPO_ROOT}/core/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    LOCK_VER=$(awk '/^name = "cool-tunnel-core"/{getline; print}' "${REPO_ROOT}/core/Cargo.lock" | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -n "${TOML_VER}" && "${TOML_VER}" == "${LOCK_VER}" ]]; then
+        ok "Cargo.lock cool-tunnel-core ${LOCK_VER} matches Cargo.toml"
+    else
+        fail "Cargo.lock (${LOCK_VER:-?}) and Cargo.toml (${TOML_VER:-?}) disagree on cool-tunnel-core version"
+    fi
+fi
+
+if [[ -f "${REPO_ROOT}/rust-toolchain.toml" ]]; then
+    PINNED_CHANNEL=$(grep -E '^channel\s*=' "${REPO_ROOT}/rust-toolchain.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    ok "rust-toolchain.toml pins channel ${PINNED_CHANNEL:-unknown}"
+else
+    warn "rust-toolchain.toml missing — Rust version will float across machines"
+fi
+
+if [[ -f "${REPO_ROOT}/SUPPORT.md" ]]; then
+    ok "SUPPORT.md present (LTSC support policy)"
+else
+    warn "SUPPORT.md missing — LTSC commitments are undocumented"
+fi
+
+# --- 10. Gatekeeper assessment (advisory) ------------------------------
+
+heading "10. Gatekeeper assessment (ad-hoc-signed apps are expected to be rejected)"
 if SPCTL_OUT=$(spctl --assess --type execute --verbose=4 "${APP}" 2>&1); then
     ok "spctl: ${SPCTL_OUT}"
 else

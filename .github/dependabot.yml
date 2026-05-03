@@ -1,0 +1,42 @@
+# .github/dependabot.yml
+#
+# LTSC dependency update policy.
+#
+# Posture: weekly PRs that we explicitly review, NOT auto-merge.
+# Inside an LTSC line we accept only patch + minor security
+# updates; major bumps are deferred to the next LTSC line and
+# tracked separately in CHANGELOG.md.
+#
+# `core/Cargo.toml` is the only first-party manifest. The `actions/`
+# entry covers third-party GitHub Actions in `.github/workflows/`,
+# which become a supply-chain surface as soon as any are added.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /core
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: scope
+    # Inside an LTSC line we ignore major bumps — they're a
+    # next-LTSC-line decision, not a patch-stream decision.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
