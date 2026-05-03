@@ -9,6 +9,81 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.5] — 2026-05-03 (LTSC patch — chaos siege)
+
+LTSC siege patch. The chaos engineering work returned three real
+fixes plus four new siege-grade tests that hold the engine to a
+stricter wire-ordering contract under burst.
+
+### Engine fix — Ru#C4 wire ordering (no longer deferred)
+
+The engine previously emitted `Event::StateChanged { running: true }`
+from inside `ProxySupervisor::spawn`, *before* `start_proxy`
+returned the `Started { pid }` response. The two flowed through
+different channels (event_tx + event_bridge vs outbound_tx) and
+the event could overtake the response on the wire. Same shape
+on the stop side: `monitor_lifecycle` emitted
+`StateChanged { running: false }` regardless of who triggered
+the kill.
+
+Fixed by moving the user-initiated transition events into
+`handle_request`, emitted on the same outbound channel as the
+response, AFTER the response writes. FIFO ordering on the
+channel now guarantees `response → state_changed event`.
+`monitor_lifecycle` retains the natural-death event (naive
+crashes on its own — there's no associated response to order
+against). Wire shapes unchanged; only the ordering contract
+tightens.
+
+Verified by new siege test `siege_wire_ordering_holds_under_burst`
+which fires 10 start/stop cycles back-to-back and asserts the
+ordering invariant on every transition.
+
+### Credential storage fixes — focused audit
+
+- **MigratingCredentialStore.password promotion bug.** The
+  legacy-to-primary promotion path used two independent
+  `try?` calls, so a failed primary write followed by a
+  successful legacy delete would lose the password entirely.
+  Now uses do/catch: legacy delete only runs if the primary
+  write succeeded. Worst case is now an extra Keychain prompt
+  on the next read, not data loss.
+- **FileCredentialStore NSLock reentrancy footgun.** The
+  empty-password branch in `setPassword` used to call
+  `deletePassword`, which takes the lock again. NSLock isn't
+  reentrant — the only reason this didn't deadlock today was
+  the empty-check ran *before* taking the lock. Refactored to
+  inline the delete logic under the held lock so a future
+  maintainer reordering the empty-check below `lock.lock()`
+  cannot produce a deadlock by mistake.
+
+### Chaos test suite extended (12 → 16 scenarios)
+
+Four new siege scenarios added to `core/tests/chaos.rs`:
+
+| # | Scenario | Guards against |
+|---|---|---|
+| 13 | Concurrent request burst with random 1–100 ms inter-recv delays | Slow-consumer back-pressure regressions |
+| 14 | 100 start/stop cycles with random 1–30 ms jitter | FD/resource leaks across spawn cycles |
+| 15 | Random-delay race start→stop (30 cycles, 1–50 ms span) | Lock-across-spawn (Ru#C2) regression under randomized timing |
+| 16 | Wire ordering under burst (10 start/stop cycles) | Ru#C4 regression — events outrunning responses |
+
+Inline xorshift64 PRNG (no `rand` dep added). Total chaos suite
+runtime: ~3 s on a modern Mac.
+
+### Items deliberately not delivered
+
+- **Memory-pressure simulation.** Requires OS-level controls
+  (jetsam, memory_pressure framework) outside LTSC scope.
+  Engine memory is bounded structurally: `MAX_FRAME_BYTES`,
+  `EVENT_BUFFER`, `OUTBOUND_BUFFER`, log-buffer trim, debouncer
+  prune. No leak path identified.
+- **AES-256-GCM crypto audit.** No such code exists in the
+  project — credential format is base64-of-plaintext + 0600
+  POSIX mode + Keychain fallback. Encryption-at-rest stays on
+  the v0.2.0 deferred list (would be on-disk format change,
+  contract-locked under LTSC).
+
 ## Unreleased — chaos test infra (no binary change)
 
 LTSC test-infrastructure addition. `core/tests/chaos.rs` —

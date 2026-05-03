@@ -93,14 +93,21 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
     }
 
     public func setPassword(_ password: String, forProfileID id: String) throws {
-        if password.isEmpty {
-            try deletePassword(forProfileID: id)
-            return
-        }
+        // Take the lock first, then dispatch on emptiness while
+        // holding it. Inlining the delete path avoids the
+        // re-entrant `deletePassword` call the previous
+        // implementation made — `NSLock` is NOT reentrant, so a
+        // future maintainer reordering the empty-check below the
+        // `lock.lock()` would have produced an instant deadlock.
+        // The inline form is deadlock-proof by construction.
         lock.lock()
         defer { lock.unlock() }
         var table = try loadLocked()
-        table[id] = Data(password.utf8).base64EncodedString()
+        if password.isEmpty {
+            guard table.removeValue(forKey: id) != nil else { return }
+        } else {
+            table[id] = Data(password.utf8).base64EncodedString()
+        }
         try saveLocked(table)
     }
 
