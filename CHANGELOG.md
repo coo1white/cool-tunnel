@@ -5,19 +5,20 @@ roughly-semver: bumps in the third digit are features; bumps in
 the fourth digit are pre-release polish on the same line.
 
 The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
-**v0.1.6** is the first stable release.
+**v0.1.6** is the first stable release; **v0.1.7** is the first
+release on the Long-Term Servicing Channel line — see
+[SUPPORT.md](./SUPPORT.md) for the support contract.
 
-## [0.1.6] — 2026-05-03 (stable, **LTSC**)
+## [0.1.7] — 2026-05-03 (**LTSC**)
 
-First stable release **and the first release on the Long-Term
-Servicing Channel** line. The LTSC posture is documented in
-[SUPPORT.md](./SUPPORT.md): public surface (UI flows, CLI flags,
-engine protocol, on-disk paths) is locked for the lifetime of the
-v0.1.6 line; only patch + minor security fixes and upstream
-NaiveProxy updates land in-line. Major changes wait for the next
-LTSC line.
+First release on the **Long-Term Servicing Channel**. The LTSC
+posture is documented in [SUPPORT.md](./SUPPORT.md): public
+surface (UI flows, CLI flags, engine protocol, on-disk paths) is
+locked for the lifetime of the v0.1.7 line; only patch + minor
+security fixes and upstream NaiveProxy updates land in-line.
+Major changes wait for the next LTSC line.
 
-LTSC infrastructure shipped as part of v0.1.6:
+LTSC infrastructure introduced in v0.1.7:
 
 - `rust-toolchain.toml` pins the build to Rust 1.80.0 — bumps
   happen at LTSC boundaries, never silently across machines.
@@ -35,10 +36,26 @@ LTSC infrastructure shipped as part of v0.1.6:
   for support tickets — first line stays
   `cool-tunnel-core <semver>` so the Swift resolver still parses
   it.
-- `scripts/security_check.sh` adds a section 9 LTSC-posture audit
-  (lockfile present + fresh, toolchain pin, SUPPORT.md).
+- `scripts/security_check.sh` gains a section 9 LTSC-posture
+  audit (lockfile present, Cargo.toml ↔ Cargo.lock version-field
+  cross-check, toolchain pin, SUPPORT.md).
 
-Everything from the v0.1.5.x line, plus:
+Plus the v0.1.6 hotfix round-3 fix that didn't ship in-line:
+
+- `SoftButtonStyle` (Stop / Diag / Latency / Settings) now
+  carries the same `.lineLimit(1) + .fixedSize(horizontal: true)`
+  guard as `ModeChipStyle`. "Settings" no longer wraps to
+  "Set- / tings" on narrower window widths.
+
+## [0.1.6] — 2026-05-03 (stable)
+
+First stable release. Hotfix re-released twice in-line on the
+v0.1.6 tag with: log-console / connection-form border alignment
+to the v0.1.5.7 platinum theme, mode-chip text wrap fix
+(`.lineLimit(1) + .fixedSize`), direct mode switching with one
+"switched from X to Y" log line, mode-aware card tints across
+all four panes, and bundled NaiveProxy bumped to
+v148.0.7778.96-2. Everything from the v0.1.5.x line, plus:
 
 - Engine subprocess crash now surfaces a clear error in the live
   log instead of a silent stop.

@@ -1,6 +1,6 @@
 # Support policy
 
-Cool Tunnel **v0.1.6** is the first release on the **Long-Term
+Cool Tunnel **v0.1.7** is the first release on the **Long-Term
 Servicing Channel (LTSC)** line. The LTSC posture is a deliberate
 trade-off:
 
@@ -14,7 +14,7 @@ trade-off:
   `core/Cargo.toml`.
 - **Long-supported.** Security fixes and upstream NaiveProxy
   updates land on the active LTSC line for **at least 18 months
-  from initial release** (i.e. v0.1.6 is supported through at
+  from initial release** (i.e. v0.1.7 is supported through at
   least 2027-11).
 
 This document is the contract.
@@ -55,7 +55,7 @@ The `.app` is a universal Mach-O for all four shipped artefacts.
 ## What counts as a breaking change
 
 LTSC patches **never** introduce any of these inside a release
-line (e.g. v0.1.6 → v0.1.6.x):
+line (e.g. v0.1.7 → v0.1.7.x):
 
 1. Renaming, removing, or changing the semantics of any CLI flag
    on `cool-tunnel-core`.
@@ -77,7 +77,7 @@ adjustments, NaiveProxy upstream bumps that don't change protocol)
 [CHANGELOG.md](./CHANGELOG.md).
 
 The next time any of items 1–7 changes, the release line bumps
-(e.g. v0.1.6 → v0.2.0) and the new line declares its own LTSC
+(e.g. v0.1.7 → v0.2.0) and the new line declares its own LTSC
 window.
 
 ---
@@ -96,13 +96,13 @@ include the second line — it embeds the build SHA and date so we
 can match your binary to a commit:
 
 ```
-cool-tunnel-core 0.1.6
+cool-tunnel-core 0.1.7
 build:    abc1234 2026-05-03 (release)
 ```
 
 ---
 
-## Update policy inside the v0.1.6 LTSC line
+## Update policy inside the v0.1.7 LTSC line
 
 | Change type | Lands in patch | Bumps line |
 | --- | --- | --- |
@@ -121,7 +121,7 @@ build:    abc1234 2026-05-03 (release)
 
 ## End of life
 
-When the v0.1.6 LTSC line ends, this file is updated to point at
+When the v0.1.7 LTSC line ends, this file is updated to point at
 the new active LTSC line. We do not silently abandon LTSC lines
 — a final patch on the old line tells users where to upgrade,
 and the GitHub release page is annotated accordingly.
