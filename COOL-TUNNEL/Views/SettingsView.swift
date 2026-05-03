@@ -251,20 +251,35 @@ public struct SettingsView: View {
 
     /// Live readout for whichever binary is currently selected. New
     /// in v0.1.5.6: an OK / NG verdict line above the row breakdown
-    /// and an Update button next to Test.
+    /// and an Update button next to Test. v0.1.5.8 audit: the busy
+    /// flag is now set **synchronously** in the button action
+    /// before the Task is spawned, so a rapid double-click can't
+    /// race the .disabled re-render and queue a second inspection
+    /// or update.
     @ViewBuilder
     private var naiveBinarySummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button(isInspecting ? "Testing…" : "Test") {
-                    Task { await runInspection() }
+                    // Synchronous re-entry guard. Even if SwiftUI
+                    // hasn't yet re-rendered the disabled state, we
+                    // catch a fast second tap here.
+                    guard !isInspecting && !updaterIsBusy else { return }
+                    isInspecting = true
+                    Task { await runInspectionWork() }
                 }
                 .disabled(isInspecting || updaterIsBusy)
 
                 Button(updaterButtonTitle) {
+                    // Updater itself has a state-machine guard, but
+                    // we mirror the synchronous-flag pattern for
+                    // consistency and to keep the button label
+                    // ("Update" → "Resolving…") in lock-step with
+                    // the click.
+                    guard !updaterIsBusy && !isInspecting else { return }
                     Task { await runUpdate() }
                 }
-                .disabled(updaterIsBusy)
+                .disabled(updaterIsBusy || isInspecting)
 
                 Spacer()
 
@@ -507,9 +522,25 @@ public struct SettingsView: View {
         return (true, "Ready to use · \(archDesc) · \(descriptor.version ?? "")")
     }
 
-    /// Runs `inspect` for whichever path the draft currently points at.
+    /// Backwards-compat shim: callers that don't go through the
+    /// button (the initial `.task`, the post-Choose adopt path,
+    /// the post-Update re-inspection) still flip the busy flag the
+    /// old way. The button itself sets the flag synchronously
+    /// before spawning, so this guard is only ever entered with
+    /// `isInspecting == true` from those entry points OR with
+    /// `false` and we want to respect that.
     private func runInspection() async {
-        isInspecting = true
+        if !isInspecting {
+            isInspecting = true
+        }
+        await runInspectionWork()
+    }
+
+    /// Performs the inspection itself, assuming the caller has
+    /// already set `isInspecting = true` synchronously. Always
+    /// resets the flag in `defer` so any early-return path leaves
+    /// the UI clean.
+    private func runInspectionWork() async {
         defer { isInspecting = false }
 
         let url: URL
@@ -536,16 +567,17 @@ public struct SettingsView: View {
     /// Drives the updater pipeline and, on success, adopts the
     /// installed binary as the custom path so the orchestrator picks
     /// it up. Re-runs inspection automatically so the verdict line
-    /// reflects the freshly-downloaded version without the user
-    /// having to click Test again.
+    /// reflects the post-update binary without the user having to
+    /// click Test again.
     private func runUpdate() async {
         guard let installedURL = await updater.update() else {
             return  // Failure is surfaced via `updater.state` already.
         }
         draft.customNaiveBinaryPath = installedURL.path
-        // Re-run the inspection so the verdict + per-row readout
-        // reflect the post-update binary.
-        await runInspection()
+        // Owned re-inspection — set the flag synchronously here so
+        // the button stays disabled across the post-update probe.
+        isInspecting = true
+        await runInspectionWork()
     }
 
     @ViewBuilder
@@ -564,13 +596,19 @@ public struct SettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Disable Choose during inspection / update — same
+            // rationale as the Rust Core picker: avoid stacking an
+            // NSOpenPanel modal on top of in-flight probe work.
             Button("Choose…") { chooseNaiveBinary() }
+                .disabled(isInspecting || updaterIsBusy)
 
             if !draft.customNaiveBinaryPath.isEmpty {
                 Button("Reset") {
+                    guard !isInspecting && !updaterIsBusy else { return }
                     draft.customNaiveBinaryPath = ""
                     binaryPickerError = nil
                 }
+                .disabled(isInspecting || updaterIsBusy)
             }
         }
     }
@@ -697,33 +735,47 @@ public struct SettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Disable Choose during inspection / update so the user
+            // can't queue an NSOpenPanel modal on top of in-flight
+            // probe work — would land a stale path in the draft if
+            // the panel resolves before the inspection does.
             Button("Choose…") { chooseRustCore() }
+                .disabled(isRustInspecting || rustUpdaterIsBusy)
 
             if !draft.customRustCorePath.isEmpty {
                 Button("Reset") {
+                    guard !isRustInspecting && !rustUpdaterIsBusy else { return }
                     draft.customRustCorePath = ""
                     rustPickerError = nil
-                    Task { await runRustInspection() }
+                    isRustInspecting = true
+                    Task { await runRustInspectionWork() }
                 }
+                .disabled(isRustInspecting || rustUpdaterIsBusy)
             }
         }
     }
 
     /// Live readout for the Rust core: arch slices, version, code
-    /// signature, OK/NG verdict, plus Test + Update buttons.
+    /// signature, OK/NG verdict, plus Test + Update buttons. Same
+    /// synchronous-busy-flag pattern as the naive section above —
+    /// see the comment over `naiveBinarySummary` for the audit
+    /// rationale.
     @ViewBuilder
     private var rustCoreSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button(isRustInspecting ? "Testing…" : "Test") {
-                    Task { await runRustInspection() }
+                    guard !isRustInspecting && !rustUpdaterIsBusy else { return }
+                    isRustInspecting = true
+                    Task { await runRustInspectionWork() }
                 }
                 .disabled(isRustInspecting || rustUpdaterIsBusy)
 
                 Button(rustUpdaterButtonTitle) {
+                    guard !rustUpdaterIsBusy && !isRustInspecting else { return }
                     Task { await runRustUpdate() }
                 }
-                .disabled(rustUpdaterIsBusy)
+                .disabled(rustUpdaterIsBusy || isRustInspecting)
 
                 Spacer()
 
@@ -940,8 +992,18 @@ public struct SettingsView: View {
         return (true, "Ready to use · \(archDesc) · \(descriptor.version ?? "")")
     }
 
+    /// Same shim as the naive side: callers from non-button entry
+    /// points (initial `.task`, post-Choose adopt path, post-Update
+    /// re-inspection) flip the busy flag here. The button itself
+    /// already set the flag synchronously.
     private func runRustInspection() async {
-        isRustInspecting = true
+        if !isRustInspecting {
+            isRustInspecting = true
+        }
+        await runRustInspectionWork()
+    }
+
+    private func runRustInspectionWork() async {
         defer { isRustInspecting = false }
         let url: URL
         let origin: RustCoreDescriptor.Origin
@@ -967,7 +1029,10 @@ public struct SettingsView: View {
     private func runRustUpdate() async {
         guard let installedURL = await rustUpdater.update() else { return }
         draft.customRustCorePath = installedURL.path
-        await runRustInspection()
+        // Owned re-inspection: set the flag synchronously so the
+        // button stays disabled across the post-update probe.
+        isRustInspecting = true
+        await runRustInspectionWork()
     }
 
     private func chooseRustCore() {
