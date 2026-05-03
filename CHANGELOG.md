@@ -9,6 +9,83 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.1] — 2026-05-03 (LTSC patch)
+
+LTSC in-line patch — UI/UX audit pass. Public surface
+unchanged. Engine binary version stays `0.1.7` (cargo doesn't
+accept four-segment versions); the .app `MARKETING_VERSION` is
+`0.1.7.1`. Naive bundled version unchanged.
+
+A 45-finding multi-pass audit identified visible drift between
+the v0.1.7 ship and the v0.1.5.7 platinum-theme intent. This
+patch closes the user-visible items:
+
+**Critical:**
+
+- Inline Settings panel `.background` no longer combines a
+  rounded rect with `.ignoresSafeArea` — switched to a flat
+  `Rectangle()`, which fixes a visible square corner that
+  appeared during the slide-in animation.
+- `CoolTunnelApp` window resize: `.contentSize` paired with
+  `maxWidth: .infinity` let users drag the window to absurd
+  dimensions; switched to `.automatic`, and made
+  `defaultSize` (820×820) match `idealHeight` so first launch
+  doesn't snap.
+- Connection-form labels are now `.lineLimit(1) +
+  .frame(minWidth: 130) + .fixedSize` so localized labels
+  ("Lokaler Anschluss") don't truncate without warning.
+- Settings → Direct Domains list now scrolls inside a
+  `.frame(maxHeight: 220)` so a hundred-domain smart-mode list
+  doesn't push the Naive Binary / Rust Core sections off
+  screen.
+- Firewall badge background changed from `bunnyPink` (Maltese
+  palette holdover) to `cherryRose.opacity(0.12)` so it reads
+  as one alert colour.
+
+**High:**
+
+- Header card `cornerRadius` 10 → 8 (matches the rest of the
+  design system).
+- Settings naive-section inner-card radii unified at 6pt
+  (matches the rust-section convention; was 8pt drift).
+- Latency menu border swapped from `lilac` to `borderInk`,
+  padding aligned with `SoftButtonStyle` (12/7), label gets
+  the `.lineLimit(1) + .fixedSize` guard. Disabled "Local
+  route" entry added with explanatory tooltip so users don't
+  think the menu is incomplete.
+- Profile picker frame widened to `minWidth 160 / maxWidth
+  320` + `.help(displayName)` so long server names stay
+  identifiable.
+- About footer text: `Apache 2.0 · Maltese theme · macOS 12+`
+  → `Apache 2.0 · Classic Mac theme · macOS 14+` (was
+  shipping a stale macOS-floor claim and the pre-platinum
+  theme name).
+- Updater message + path summary rows get `.help(message)` +
+  `.textSelection(.enabled)` so support tickets can quote the
+  full string instead of the truncated one.
+- Header subtitle gets `.lineLimit(1)`; title gradient second
+  stop changed from hardcoded `bodyInk` to `.primary` so it
+  remains legible in dark mode.
+- Control-panel `Divider` swapped for an explicit borderInk
+  hairline so opacity matches the rest of the design system.
+
+**Medium:**
+
+- `LogConsoleView` empty-state pulse and the auto-scroll
+  animation are now both gated by `PerformanceProfile` so
+  older Intel hardware doesn't burn GPU on continuous effects.
+- `SettingsView` chip-detection icon and About pawprint use
+  `CTPalette.macBlue` instead of system `.tint` (which was
+  rendering as Apple aqua and clashing with the System 7
+  palette).
+- Direct-domain remove button gets a 22×22 hit target,
+  `.help`, and `.accessibilityLabel` for VoiceOver.
+
+The full audit report is in the v0.1.7.1 commit message; the
+remaining 30+ MEDIUM/LOW findings (dark-mode dynamic palette
+colours, full design-token system, naive/rust section
+deduplication) defer to the next minor bump.
+
 ## [0.1.7] — 2026-05-03 (**LTSC**)
 
 First release on the **Long-Term Servicing Channel**. The LTSC

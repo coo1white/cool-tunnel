@@ -37,7 +37,13 @@ public struct ConnectionFormView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(maxWidth: 220)
+                // Wider window allows long server names ("provider-
+                // pop-east-1.example.co.uk") to render without
+                // mid-string truncation. The 320 ceiling stops a
+                // very long single profile name from pushing the
+                // Add/Remove buttons off the right edge.
+                .frame(minWidth: 160, idealWidth: 220, maxWidth: 320)
+                .help(orchestrator.selectedProfile.map(displayName(for:)) ?? "")
 
                 Spacer()
 
@@ -141,7 +147,9 @@ public struct ConnectionFormView: View {
                 .labelStyle(.titleAndIcon)
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .trailing)
+                .lineLimit(1)
+                .frame(minWidth: 130, alignment: .trailing)
+                .fixedSize(horizontal: true, vertical: false)
             TextField(placeholder, text: binding(for: keyPath))
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 10)
@@ -166,7 +174,9 @@ public struct ConnectionFormView: View {
                 .labelStyle(.titleAndIcon)
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .trailing)
+                .lineLimit(1)
+                .frame(minWidth: 130, alignment: .trailing)
+                .fixedSize(horizontal: true, vertical: false)
             SecureField("•••••••", text: binding(for: keyPath))
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 10)
