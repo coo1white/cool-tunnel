@@ -47,7 +47,6 @@ public final class TunnelOrchestrator {
     private let firewall: FirewallProbe
     private let profileStore: ProfileStore
     private let settingsStore: SettingsStore
-    private let keychain: KeychainStore
     private let paths: AppSupportPaths
     private let naiveResolver: NaiveBinaryResolver
 
@@ -80,7 +79,6 @@ public final class TunnelOrchestrator {
         firewall: FirewallProbe,
         profileStore: ProfileStore,
         settingsStore: SettingsStore,
-        keychain: KeychainStore,
         paths: AppSupportPaths,
         naiveResolver: NaiveBinaryResolver = NaiveBinaryResolver()
     ) {
@@ -89,7 +87,6 @@ public final class TunnelOrchestrator {
         self.firewall = firewall
         self.profileStore = profileStore
         self.settingsStore = settingsStore
-        self.keychain = keychain
         self.paths = paths
         self.naiveResolver = naiveResolver
     }
@@ -110,14 +107,26 @@ public final class TunnelOrchestrator {
             fatalError("unable to create application support directory: \(error)")
         }
 
-        let keychain = KeychainStore()
+        // v0.1.5.5: passwords moved off the macOS Keychain by default.
+        // The file-backed store writes to ~/Library/Application Support/
+        // COOL-TUNNEL/credentials.json with mode 0600 — same protection
+        // posture as Keychain on a single-user Mac, but no system
+        // password prompt fires when the app launches under a fresh
+        // ad-hoc-signed binary hash. The Keychain stays wired as the
+        // *legacy* leg of `MigratingCredentialStore` so users upgrading
+        // from v0.1.5.4 keep their saved passwords; the migration only
+        // runs on a user-initiated Start, never at boot.
+        let fileStore = FileCredentialStore.defaultStore(paths: paths)
+        let credentials = MigratingCredentialStore(
+            primary: fileStore,
+            legacy: KeychainStore()
+        )
         return TunnelOrchestrator(
             core: CoreClient(executableURL: executableURL),
             proxyController: SystemProxyController(),
             firewall: FirewallProbe(),
-            profileStore: ProfileStore(keychain: keychain),
+            profileStore: ProfileStore(credentials: credentials),
             settingsStore: SettingsStore(),
-            keychain: keychain,
             paths: paths
         )
     }
@@ -235,10 +244,12 @@ public final class TunnelOrchestrator {
         selectedProfileID = profiles.first?.id
         profileStore.save(profiles: profiles)
         profileStore.save(selectedID: selectedProfileID)
-        // Delete the password for the removed profile so a stale Keychain
-        // entry does not linger if the user later creates a new profile
-        // with the same id (e.g. another "default").
-        try? keychain.deletePassword(forProfileID: id)
+        // Delete the credential entry for the removed profile so a
+        // stale entry does not linger if the user later creates a new
+        // profile with the same id (e.g. another "default"). Goes
+        // through the migrating store so the legacy Keychain copy is
+        // cleaned up too.
+        profileStore.deletePassword(forProfileID: id)
     }
 
     public func persistSettings() {
@@ -282,12 +293,25 @@ public final class TunnelOrchestrator {
     /// and applies the requested system-proxy configuration.
     public func start(mode: ProxyMode) async throws {
         guard mode != .stopped else { return }
-        guard let profile = selectedProfile else {
+        guard var profile = selectedProfile else {
             throw OrchestratorError.noProfile
         }
         // Clear stale error from any previous failed attempt — a successful
         // start should not leave the user staring at last week's failure.
         lastError = nil
+
+        // Hydrate the password from the credential store on demand.
+        // `loadProfiles()` deliberately leaves passwords empty so app
+        // launch never triggers a credential-store access; we pull
+        // here, after the user has already committed to starting,
+        // which is the contextually-sensible place for any prompt the
+        // migrating store may surface for upgraders.
+        if profile.password.isEmpty {
+            let stored = profileStore.password(forProfileID: profile.id)
+            if !stored.isEmpty {
+                profile.password = stored
+            }
+        }
 
         // Validate via engine. The engine's `Profile` deserializer enforces
         // every rule the Swift form previously did inline.

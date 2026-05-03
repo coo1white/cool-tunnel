@@ -179,14 +179,11 @@ SECRET_PATTERNS=(
     # does *not* match — only real plaintext credentials trip this.
     'basic_auth[[:space:]]+[A-Za-z0-9_.-]+[[:space:]]+[A-Za-z0-9._/+=-]{6,}'
 )
-SECRET_GLOBS=(
-    "${REPO_ROOT}/COOL-TUNNEL"
-    "${REPO_ROOT}/core/src"
-    "${REPO_ROOT}/scripts"
-    "${REPO_ROOT}/NaiveProxy_Server_Setup.md"
-    "${REPO_ROOT}/Disclaimer.md"
-    "${REPO_ROOT}/README.md"
-)
+# v0.1.5.5: scan the *entire* project folder, not just the Swift /
+# Rust / scripts subdirectories. Catches anything dropped at the
+# repo root, in `docs/`, in test fixtures, etc. The exclusion list
+# below keeps build artefacts and the git directory out of scope.
+SECRET_GLOBS=("${REPO_ROOT}")
 SCAN_OUTPUT=""
 for pattern in "${SECRET_PATTERNS[@]}"; do
     if matches=$(grep -REn --binary-files=without-match \
