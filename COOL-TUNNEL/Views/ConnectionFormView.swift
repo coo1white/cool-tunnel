@@ -62,7 +62,7 @@ public struct ConnectionFormView: View {
             }
         }
         .padding(16)
-        .ganjiCard(cornerRadius: 20, tint: CTPalette.skyBlue)
+        .pupCard(cornerRadius: 20, tint: CTPalette.skyBlue)
     }
 
     private var form: some View {
