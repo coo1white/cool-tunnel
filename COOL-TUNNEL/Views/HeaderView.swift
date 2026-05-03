@@ -72,17 +72,19 @@ public struct HeaderView: View {
 
     /// Status pill — pastel gradient when active, soft material when
     /// idle. Reads the same accent the icon uses so the two surfaces
-    /// move together when the mode changes.
+    /// move together when the mode changes. The repeating pulse on
+    /// the dot is gated by `PerformanceProfile` so older Intel Macs
+    /// don't burn GPU on a continuously-animating heartbeat.
     private var statusPill: some View {
         let tint = CTPalette.accent(for: activeMode)
+        let allowPulse = PerformanceProfile.current.repeatingSymbolEffectsAllowed
+        let scale = PerformanceProfile.current.animationScale
         return HStack(spacing: 6) {
             Circle()
                 .fill(tint)
                 .frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 4)
-                // Pulse the live-status dot while running so the
-                // header has a heartbeat. Flat circle when idle.
-                .symbolEffect(.pulse, options: .repeating, isActive: isRunning)
+                .symbolEffect(.pulse, options: .repeating, isActive: isRunning && allowPulse)
             Text(activeMode.title)
                 .font(.caption.weight(.bold))
         }
@@ -95,7 +97,7 @@ public struct HeaderView: View {
             Capsule(style: .continuous).strokeBorder(tint.opacity(0.6), lineWidth: 0.7)
         }
         .foregroundStyle(tint)
-        .animation(.spring(response: 0.32, dampingFraction: 0.72), value: activeMode)
+        .animation(.spring(response: 0.32 * scale, dampingFraction: 0.72), value: activeMode)
     }
 
     private var firewallBadge: some View {

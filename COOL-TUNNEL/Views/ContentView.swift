@@ -38,14 +38,32 @@ public struct ContentView: View {
             // Mode-aware pastel wash: stays subtle in idle, leans
             // into the chosen mode colour while the proxy is running.
             // The window itself becomes a mood ring.
+            //
+            // On the `.light` performance tier (older Intel Macs)
+            // we drop the gradient overlay and the cross-fade
+            // animation — the static cream tint stays so the cards
+            // still feel framed, but the compositor doesn't have to
+            // re-blend a full-window gradient on every state change.
             ZStack {
                 CTPalette.cream.opacity(0.4)
-                CTPalette.dreamGradient(for: orchestrator.activeMode)
-                    .opacity(orchestrator.isRunning ? 0.18 : 0.08)
+                if PerformanceProfile.current.animatedWindowBackgroundAllowed {
+                    CTPalette.dreamGradient(for: orchestrator.activeMode)
+                        .opacity(orchestrator.isRunning ? 0.18 : 0.08)
+                }
             }
             .ignoresSafeArea()
-            .animation(.easeInOut(duration: 0.6), value: orchestrator.activeMode)
-            .animation(.easeInOut(duration: 0.6), value: orchestrator.isRunning)
+            .animation(
+                PerformanceProfile.current.animatedWindowBackgroundAllowed
+                    ? .easeInOut(duration: 0.6 * PerformanceProfile.current.animationScale)
+                    : nil,
+                value: orchestrator.activeMode
+            )
+            .animation(
+                PerformanceProfile.current.animatedWindowBackgroundAllowed
+                    ? .easeInOut(duration: 0.6 * PerformanceProfile.current.animationScale)
+                    : nil,
+                value: orchestrator.isRunning
+            )
         }
         .sheet(isPresented: $isShowingSettings) {
             SettingsView()
