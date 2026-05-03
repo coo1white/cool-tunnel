@@ -1,7 +1,24 @@
 // Views/SettingsView.swift
 //
-// Modal sheet that edits the user's `AppSettings`: direct-domain list,
-// custom binary path, and the "skip confirmations" toggle.
+// Modal sheet that edits the user's `AppSettings`. v0.1.5.6:
+//
+//   - "This Mac" panel now shows full machine detail (CPU brand,
+//     P/E core counts, memory) via `HostMachine`, not just the
+//     coarse arm64/x86_64 enum.
+//   - Naive Binary section now shows a clear OK / NG verdict
+//     after Test runs (green ✅ "Ready to use" or red ❌ with the
+//     specific failure reason) so the user doesn't have to read
+//     each row to figure out if the binary is good.
+//   - New "Update" button next to Test downloads the latest upstream
+//     NaiveProxy build (arm64 + x64), lipo-merges them, ad-hoc
+//     signs, drops the result into Application Support, and adopts
+//     it as the custom binary path.
+//   - Footer shows the running app version (CFBundleShortVersionString
+//     + build number) so the user can quote it in support tickets
+//     without digging through Get Info.
+//
+// Visual language stays Maltese-themed (continued from v0.1.5.4).
+// No layout colours change.
 
 import AppKit
 import SwiftUI
@@ -14,13 +31,21 @@ public struct SettingsView: View {
     @State private var draft: AppSettings = .default
     @State private var newDomain: String = ""
     @State private var binaryPickerError: String?
-    /// Result of the most recent `Test` button press. `nil` until the
-    /// user clicks Test, populated thereafter so the panel can show a
+    /// Result of the most recent Test press. `nil` until the user
+    /// clicks Test, populated thereafter so the panel can show a
     /// fresh signature/arch/version readout for the candidate path.
     @State private var inspection: NaiveBinaryDescriptor?
     @State private var isInspecting: Bool = false
+    /// Live state of any in-flight `naive` update. `@State` means the
+    /// view re-renders as the updater publishes progress.
+    @State private var updater = NaiveUpdater(
+        supportDirectory: (try? AppSupportPaths())?.supportDirectory
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+    )
 
     private let resolver = NaiveBinaryResolver()
+    private let host = HostMachine.current
+    private let appVersion = AppVersion.current
 
     public init() {}
 
@@ -66,7 +91,7 @@ public struct SettingsView: View {
                             .foregroundStyle(.red)
                     } else {
                         Text(
-                            "The selected binary is verified for a valid code signature, the right CPU slice, and a working --version response before each launch."
+                            "Test runs a full code-signature + host-CPU-slice + --version check. Update downloads the latest NaiveProxy from upstream and lipo-merges arm64 + x86_64 into a single universal binary."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -76,65 +101,85 @@ public struct SettingsView: View {
                 Section("Behaviour") {
                     Toggle("Skip proxy mode confirmations", isOn: $draft.skipProxyConfirmations)
                 }
+
+                Section("About") {
+                    versionFooter
+                }
             }
             .formStyle(.grouped)
         }
         .padding(16)
-        .frame(width: 560, height: 640)
+        .frame(width: 600, height: 760)
         .onAppear {
             draft = orchestrator.settings
             // Mirror the orchestrator's cached descriptor so the panel
             // shows real data the first time it opens, before the user
-            // touches the Test button.
+            // touches Test.
             inspection = orchestrator.activeNaiveDescriptor
         }
         .task {
-            // Bootstrap deliberately skips naive verification to keep the
-            // launch path to a single auth check (cool-tunnel-core only).
-            // The Settings view is the natural place to pay that cost
-            // lazily — by the time the user is here they're about to
-            // either configure the binary or just look at it. Running
-            // the inspection in a `.task` (cancelled on view dismiss)
-            // means we never block presentation of the sheet.
+            // Lazy first inspection — see the long comment in the
+            // bootstrap path docs for why the launch flow stays clean
+            // and inspection happens here instead.
             if orchestrator.activeNaiveDescriptor == nil {
                 await orchestrator.refreshNaiveDescriptor()
                 inspection = orchestrator.activeNaiveDescriptor
             }
         }
+        .onDisappear { updater.reset() }
     }
 
-    // MARK: - Chip detection row
+    // MARK: - Chip detection — rich machine detail
 
-    /// Renders "This Mac: Apple Silicon (arm64)" and a subtitle that
-    /// nudges Intel users to download a universal naive build if they
-    /// later swap the binary.
+    /// Renders "This Mac" with everything the user likely wants to
+    /// see when triaging a "naive won't spawn" issue: brand string,
+    /// performance + efficiency cores, memory, model identifier.
     @ViewBuilder
     private var chipDetectionRow: some View {
-        let host = orchestrator.hostArchitecture
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Image(systemName: host == .appleSilicon ? "cpu" : "desktopcomputer")
-                    Text(host.displayName)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: host.architecture == .appleSilicon ? "cpu" : "desktopcomputer")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(host.architecture.displayName)
                         .font(.body.weight(.semibold))
-                    Text("(\(host.machOArchName))")
-                        .font(.system(.body, design: .monospaced))
+                    Text("(\(host.architecture.machOArchName))")
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
-                Text(chipDetectionSubtitle(for: host))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer()
             }
-            Spacer()
+            machineRow(label: "CPU", value: host.cpuSummary)
+            machineRow(label: "Memory", value: host.memorySummary)
+            if !host.modelIdentifier.isEmpty {
+                machineRow(label: "Model", value: host.modelIdentifier, monospaced: true)
+            }
+            Text(chipDetectionSubtitle(for: host.architecture))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+        }
+    }
+
+    private func machineRow(label: String, value: String, monospaced: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 70, alignment: .leading)
+            Text(value)
+                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private func chipDetectionSubtitle(for host: HostArchitecture) -> String {
         switch host {
         case .appleSilicon:
-            return "If you replace the bundled naive, pick an arm64 or universal build."
+            return "Replace the bundled naive with an arm64 or universal build."
         case .intel:
-            return "If you replace the bundled naive, pick an x86_64 or universal build."
+            return "Replace the bundled naive with an x86_64 or universal build."
         case .unknown:
             return "Could not determine CPU architecture; spawning may fail."
         }
@@ -142,20 +187,25 @@ public struct SettingsView: View {
 
     // MARK: - Naive binary summary
 
-    /// Live readout for whichever binary is currently selected: arch
-    /// slices, version, code-signature state, and a Test button to
-    /// re-inspect after the user changes the path. The same view powers
-    /// both the bundled and user-supplied cases so the two flows stay
-    /// visually consistent.
+    /// Live readout for whichever binary is currently selected. New
+    /// in v0.1.5.6: an OK / NG verdict line above the row breakdown
+    /// and an Update button next to Test.
     @ViewBuilder
     private var naiveBinarySummary: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
                 Button(isInspecting ? "Testing…" : "Test") {
                     Task { await runInspection() }
                 }
-                .disabled(isInspecting)
+                .disabled(isInspecting || updaterIsBusy)
+
+                Button(updaterButtonTitle) {
+                    Task { await runUpdate() }
+                }
+                .disabled(updaterIsBusy)
+
                 Spacer()
+
                 if let descriptor = inspection {
                     Text(descriptor.origin == .bundled ? "Bundled" : "Custom")
                         .font(.caption)
@@ -163,6 +213,12 @@ public struct SettingsView: View {
                         .padding(.vertical, 2)
                         .background(.quaternary, in: .capsule)
                 }
+            }
+
+            verdictRow
+
+            if updaterIsBusy || updaterMessage != nil {
+                updaterRow
             }
 
             if let descriptor = inspection {
@@ -186,6 +242,135 @@ public struct SettingsView: View {
         }
     }
 
+    /// One-line OK / NG headline. Computed from the descriptor so
+    /// the user sees a clear pass/fail tag *before* scanning the
+    /// individual rows.
+    @ViewBuilder
+    private var verdictRow: some View {
+        if isInspecting {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Testing…")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        } else if let descriptor = inspection {
+            let verdict = naiveVerdict(for: descriptor)
+            HStack(spacing: 6) {
+                Image(systemName: verdict.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
+                Text(verdict.ok ? "OK" : "NG")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text(verdict.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill((verdict.ok ? Color.green : Color.red).opacity(0.10))
+            }
+        } else if let pickerError = binaryPickerError {
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.octagon.fill").foregroundStyle(Color.red)
+                Text("NG")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.red)
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text(pickerError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.red.opacity(0.10))
+            }
+        } else {
+            EmptyView()
+        }
+    }
+
+    /// Live progress strip for the updater. Shows a determinate or
+    /// indeterminate progress view depending on which pipeline step
+    /// is running, plus the textual stage name.
+    @ViewBuilder
+    private var updaterRow: some View {
+        HStack(spacing: 8) {
+            Group {
+                switch updater.state {
+                case .downloading(let p) where p > 0:
+                    ProgressView(value: p).controlSize(.small)
+                case .succeeded, .failed, .idle:
+                    EmptyView()
+                default:
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(width: 80)
+            if let message = updaterMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(updaterMessageColor)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.quaternary.opacity(0.5))
+        }
+    }
+
+    private var updaterIsBusy: Bool {
+        switch updater.state {
+        case .resolvingTag, .downloading, .extracting, .merging, .installing: true
+        default: false
+        }
+    }
+
+    private var updaterButtonTitle: String {
+        switch updater.state {
+        case .resolvingTag: "Resolving…"
+        case .downloading: "Downloading…"
+        case .extracting: "Extracting…"
+        case .merging: "Merging…"
+        case .installing: "Installing…"
+        case .succeeded: "Update again"
+        default: "Update"
+        }
+    }
+
+    private var updaterMessage: String? {
+        switch updater.state {
+        case .idle: nil
+        case .resolvingTag: "Resolving latest upstream NaiveProxy tag…"
+        case .downloading(let p) where p > 0: "Downloading… \(Int(p * 100))%"
+        case .downloading: "Downloading arm64 + x86_64 builds…"
+        case .extracting: "Extracting tarballs…"
+        case .merging: "lipo-merging arm64 + x86_64 → universal…"
+        case .installing: "Installing into Application Support…"
+        case .succeeded(let tag, _): "Updated to \(tag) — click Test to verify."
+        case .failed(let message): "Update failed: \(message)"
+        }
+    }
+
+    private var updaterMessageColor: Color {
+        switch updater.state {
+        case .succeeded: .green
+        case .failed: .red
+        default: .secondary
+        }
+    }
+
     private func summaryRow(label: String, value: String, monospaced: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
@@ -201,7 +386,7 @@ public struct SettingsView: View {
     }
 
     private func hostSliceRow(descriptor: NaiveBinaryDescriptor) -> some View {
-        let host = orchestrator.hostArchitecture
+        let host = HostArchitecture.current
         let ok = descriptor.supportsHostArchitecture
         return HStack(alignment: .firstTextBaseline) {
             Text("Host slice")
@@ -209,16 +394,13 @@ public struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .leading)
             Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ok ? .green : .red)
+                .foregroundStyle(ok ? Color.green : Color.red)
             Text(
                 ok
                     ? "\(host.machOArchName) slice present"
                     : "missing \(host.machOArchName) slice — proxy will fail to spawn"
             )
             .font(.caption)
-            // Ternary needs both branches to share a concrete type; the
-            // hierarchical `.secondary` and the colour `.red` come from
-            // different style families, so we anchor both on `Color`.
             .foregroundStyle(ok ? Color.secondary : Color.red)
         }
     }
@@ -234,16 +416,36 @@ public struct SettingsView: View {
                     ? "checkmark.seal.fill"
                     : "xmark.seal.fill"
             )
-            .foregroundStyle(descriptor.isCodeSignatureValid ? .green : .red)
+            .foregroundStyle(descriptor.isCodeSignatureValid ? Color.green : Color.red)
             Text(descriptor.isCodeSignatureValid ? "valid" : "invalid or missing")
                 .font(.caption)
                 .foregroundStyle(descriptor.isCodeSignatureValid ? Color.secondary : Color.red)
         }
     }
 
+    /// Boils the descriptor down to one OK / NG headline + a brief
+    /// reason. The Test button populates this; the Settings UI shows
+    /// it above the per-row breakdown so the user can grok the
+    /// outcome at a glance.
+    private func naiveVerdict(for descriptor: NaiveBinaryDescriptor) -> (ok: Bool, message: String) {
+        if !descriptor.supportsHostArchitecture {
+            return (
+                false,
+                "Missing \(HostArchitecture.current.machOArchName) slice — proxy will fail to spawn."
+            )
+        }
+        if !descriptor.isCodeSignatureValid {
+            return (false, "Code signature is invalid or missing.")
+        }
+        if descriptor.version == nil {
+            return (false, "Binary did not respond to --version.")
+        }
+        let archDesc =
+            descriptor.isUniversal ? "universal" : descriptor.architectures.sorted().joined(separator: ", ")
+        return (true, "Ready to use · \(archDesc) · \(descriptor.version ?? "")")
+    }
+
     /// Runs `inspect` for whichever path the draft currently points at.
-    /// Used by both the Test button and after the user picks a new
-    /// custom binary.
     private func runInspection() async {
         isInspecting = true
         defer { isInspecting = false }
@@ -267,6 +469,21 @@ public struct SettingsView: View {
             binaryPickerError = error.localizedDescription
             inspection = nil
         }
+    }
+
+    /// Drives the updater pipeline and, on success, adopts the
+    /// installed binary as the custom path so the orchestrator picks
+    /// it up. Re-runs inspection automatically so the verdict line
+    /// reflects the freshly-downloaded version without the user
+    /// having to click Test again.
+    private func runUpdate() async {
+        guard let installedURL = await updater.update() else {
+            return  // Failure is surfaced via `updater.state` already.
+        }
+        draft.customNaiveBinaryPath = installedURL.path
+        // Re-run the inspection so the verdict + per-row readout
+        // reflect the post-update binary.
+        await runInspection()
     }
 
     @ViewBuilder
@@ -293,6 +510,26 @@ public struct SettingsView: View {
                     binaryPickerError = nil
                 }
             }
+        }
+    }
+
+    // MARK: - Version footer
+
+    /// "About" row at the bottom of the Settings sheet — version +
+    /// build number + a one-line aesthetic credit so the user can
+    /// quote the exact build in any support thread.
+    private var versionFooter: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(appVersion.displayString)
+                    .font(.callout.weight(.medium))
+                Text("Apache 2.0 · Maltese theme · macOS 12+")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "pawprint.fill")
+                .foregroundStyle(.tint)
         }
     }
 
@@ -325,10 +562,8 @@ public struct SettingsView: View {
         newDomain = ""
     }
 
-    /// Opens an `NSOpenPanel`, validates the selected file's code signature
-    /// up front, and only accepts paths that pass. This collapses the
-    /// previous free-text TextField — which let any string land in
-    /// UserDefaults — into a positive choice gated by a signature check.
+    /// Opens an `NSOpenPanel`, validates the selected file's code
+    /// signature up front, and only accepts paths that pass.
     private func chooseNaiveBinary() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -348,18 +583,14 @@ public struct SettingsView: View {
     }
 
     /// Inspect via the resolver: it checks signature, host arch, and
-    /// version in one pass and surfaces a typed error if any of those
-    /// would prevent the proxy from spawning. We adopt the path even if
-    /// only the signature is valid (the host-arch warning is shown
-    /// inline so the user can pick a different file).
+    /// version in one pass and surfaces a typed error if any of
+    /// those would prevent the proxy from spawning.
     private func verifyAndAdopt(url: URL) async {
         isInspecting = true
         defer { isInspecting = false }
         do {
             let descriptor = try await resolver.inspect(url: url, origin: .userSupplied)
             inspection = descriptor
-            // Refuse to adopt a binary with a broken signature outright;
-            // the orchestrator would reject it at spawn time anyway.
             if !descriptor.isCodeSignatureValid {
                 binaryPickerError = "Rejected: code signature is invalid or missing."
                 return
@@ -378,8 +609,6 @@ public struct SettingsView: View {
     private func commit() {
         orchestrator.settings = draft
         orchestrator.persistSettings()
-        // The active descriptor depends on `customNaiveBinaryPath`; refresh
-        // so the next time Settings opens we show the post-commit state.
         Task { await orchestrator.refreshNaiveDescriptor() }
         dismiss()
     }
