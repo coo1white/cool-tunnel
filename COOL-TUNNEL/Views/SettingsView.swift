@@ -32,6 +32,14 @@ import SwiftUI
 @MainActor
 public struct SettingsView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Mode-aware alpha for the green/red/blue/red pill
+    /// backgrounds across the verdict + updater rows. v0.1.7.7
+    /// shipped with a flat 0.10 that vanished on dark; this
+    /// reaches `CTSurface.statusPillAlpha` so light stays
+    /// 0.10 and dark gets 0.22.
+    private var pillAlpha: Double { CTSurface.statusPillAlpha(colorScheme) }
 
     /// Two-way binding to ContentView's `isShowingSettings`. Flipping
     /// to `false` swaps the panel back out for the main view.
@@ -100,6 +108,15 @@ public struct SettingsView: View {
                     HStack {
                         TextField("example.com", text: $newDomain)
                             .textFieldStyle(.roundedBorder)
+                            // Pressing Return inside the
+                            // TextField now adds the domain
+                            // instead of falling through to the
+                            // Done button's `.defaultAction`
+                            // shortcut (which would dismiss
+                            // Settings without adding the
+                            // typed value — a real workflow
+                            // trap).
+                            .onSubmit { addDomain() }
                         Button("Add") { addDomain() }
                             .disabled(newDomain.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
@@ -209,6 +226,16 @@ public struct SettingsView: View {
         .onDisappear {
             updater.reset()
             rustUpdater.reset()
+            // Reset the app self-updater too. v0.1.7.6 forgot
+            // this, so a `.failed` or `.upToDate` state
+            // persisted across Settings open/close cycles —
+            // until the next time the user opened Settings
+            // they'd see the stale message before re-clicking
+            // Check. `reset()` is a no-op while in-flight, so
+            // a mid-download state survives the dismiss
+            // (orphan-download issue still defer to v0.2 for
+            // a real cancel + lifecycle-promotion fix).
+            appUpdater.reset()
         }
     }
 
@@ -373,7 +400,7 @@ public struct SettingsView: View {
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill((verdict.ok ? Color.green : Color.red).opacity(0.10))
+                    .fill((verdict.ok ? Color.green : Color.red).opacity(pillAlpha))
             }
         } else if let pickerError = binaryPickerError {
             HStack(spacing: 6) {
@@ -392,7 +419,7 @@ public struct SettingsView: View {
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.red.opacity(0.10))
+                    .fill(Color.red.opacity(pillAlpha))
             }
         } else {
             EmptyView()
@@ -671,6 +698,12 @@ public struct SettingsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .accessibilityLabel("App appearance")
+            // Without this VoiceOver announces only the label
+            // ("App appearance, picker") and never says which
+            // segment is selected. The value name pairs the
+            // picker readout with the same string the visible
+            // subtitle uses.
+            .accessibilityValue(draft.appearanceMode.displayName)
             .onChange(of: draft.appearanceMode) { _, newValue in
                 // Push to the orchestrator immediately so the
                 // app re-renders with the new scheme. The full
@@ -707,22 +740,45 @@ public struct SettingsView: View {
     /// helper that swaps the bundle while the app quits.
     @ViewBuilder
     private var appUpdaterSection: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Image(systemName: "shippingbox.fill")
-                .font(.title3)
-                .foregroundStyle(CTPalette.macBlue)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Cool Tunnel \(appVersion.marketingVersion)")
-                    .font(.body.weight(.semibold))
-                Text(appUpdaterSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+        // Wrap in a single VStack so the title row and the
+        // optional status row read as ONE Form-section row
+        // rather than two separate ones with Form's intra-row
+        // padding between them. Mirrors the structure the
+        // appearancePicker uses below.
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Image(systemName: "shippingbox.fill")
+                    .font(.title3)
+                    .foregroundStyle(CTPalette.macBlue)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Cool Tunnel \(appVersion.marketingVersion)")
+                        .font(.body.weight(.semibold))
+                    Text(appUpdaterSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        // Cap the title-row width so a long
+                        // subtitle can't push the action button
+                        // off the right edge at the 780pt min
+                        // window width.
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                appUpdaterActionButton
             }
-            Spacer()
-            appUpdaterActionButton
+            appUpdaterStatusRow
         }
-        appUpdaterStatusRow
+    }
+
+    private var appUpdaterAccessibilityProgressLabel: String {
+        switch appUpdater.state {
+        case .checking: "Checking for updates"
+        case .downloading: "Downloading update"
+        case .verifying: "Verifying download integrity"
+        case .extracting: "Extracting update"
+        case .relaunching: "Relaunching the app"
+        default: "Update in progress"
+        }
     }
 
     private var appUpdaterSubtitle: String {
@@ -734,9 +790,15 @@ public struct SettingsView: View {
         case .upToDate(let v):
             "You're on the latest version (\(v))."
         case .available(let release):
-            "Update available: \(release.tag) (was \(appVersion.marketingVersion))."
-        case .downloading(let p):
-            "Downloading \(Int(p * 100))%…"
+            // "you're on" reads cleaner than the previous "(was
+            // X)" — past tense suggested the user had already
+            // upgraded.
+            "Update available: \(release.tag) — you're on \(appVersion.marketingVersion)."
+        case .downloading:
+            // `URLSession.shared.download(from:)` does not report
+            // byte-level progress, so the `p` value never moves
+            // off 0.0 — showing it would lie. Honest text instead.
+            "Downloading… (typically a few seconds on broadband)"
         case .verifying:
             "Verifying SHA-256…"
         case .extracting:
@@ -752,15 +814,35 @@ public struct SettingsView: View {
     private var appUpdaterActionButton: some View {
         switch appUpdater.state {
         case .checking, .downloading, .verifying, .extracting, .relaunching:
-            ProgressView().controlSize(.small)
+            // Inline label so VoiceOver announces what's running
+            // instead of "progress indicator". Tied to the
+            // current phase via the subtitle row below.
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel(appUpdaterAccessibilityProgressLabel)
         case .available(let release):
             Button("Update to \(release.tag)") {
+                // Synchronous re-entry guard: a fast double-tap
+                // before the state machine moves to .downloading
+                // would otherwise queue two `downloadAndInstall`
+                // Tasks. Mirror the naive/rust pattern of
+                // setting the busy state inline before spawning.
+                guard !appUpdater.isInFlight else { return }
+                appUpdater.markEnteringDownload()
                 Task { await appUpdater.downloadAndInstall(release) }
             }
             .buttonStyle(.borderedProminent)
+            .layoutPriority(1)  // keep the button visible at min window width
             .accessibilityLabel("Download and install \(release.tag)")
         default:
             Button("Check for Updates") {
+                // Same sync guard as above — without it, 10 rapid
+                // taps spawn 10 Tasks that each call `checkForUpdates`,
+                // each fires its own re-entry guard *after* the
+                // first completes, but the user gets zero
+                // intervening UI feedback.
+                guard !appUpdater.isInFlight else { return }
+                appUpdater.markEnteringCheck()
                 Task { await appUpdater.checkForUpdates() }
             }
             .accessibilityLabel("Check for Cool Tunnel updates")
@@ -772,39 +854,60 @@ public struct SettingsView: View {
         switch appUpdater.state {
         case .available(let release):
             HStack(spacing: 6) {
-                Image(systemName: "info.circle.fill")
+                Image(systemName: "doc.text.fill")
                     .foregroundStyle(CTPalette.macBlue)
-                Text("Release notes:")
-                    .font(.caption)
+                // Self-describing single Link — VoiceOver hears
+                // one element ("View release notes for v0.1.7.9,
+                // link") rather than two disconnected ones.
+                Link(
+                    "View release notes for \(release.tag)",
+                    destination: release.releaseNotesURL
+                )
+                .font(.caption)
+                .underline(true)
+                .accessibilityLabel("View release notes for \(release.tag), opens in browser")
+                Spacer()
+                Image(systemName: "arrow.up.right")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
-                Link(release.tag, destination: release.releaseNotesURL)
-                    .font(.caption)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(CTPalette.macBlue.opacity(0.10))
+                    .fill(CTPalette.macBlue.opacity(pillAlpha))
             }
         case .failed(let message):
-            HStack(spacing: 6) {
+            // `alignment: .top` so on multi-line messages the
+            // icon + Dismiss button stay aligned with the first
+            // line of text rather than drifting to the vertical
+            // centre. `lineLimit(3)` + `fixedSize(vertical:)`
+            // lets the message expand within the row without
+            // the parent layout snapping it back to a single
+            // line.
+            HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "xmark.octagon.fill")
                     .foregroundStyle(.red)
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .help(message)
                     .textSelection(.enabled)
-                Spacer()
-                Button("Reset") { appUpdater.reset() }
+                // "Dismiss" is the actual semantic — clears the
+                // error so the Check button can render again.
+                // "Reset" suggested undoing user changes which
+                // is misleading.
+                Button("Dismiss") { appUpdater.reset() }
                     .controlSize(.small)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.red.opacity(0.10))
+                    .fill(Color.red.opacity(pillAlpha))
             }
         default:
             EmptyView()
@@ -1070,7 +1173,7 @@ public struct SettingsView: View {
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill((verdict.ok ? Color.green : Color.red).opacity(0.10))
+                    .fill((verdict.ok ? Color.green : Color.red).opacity(pillAlpha))
             }
         } else if let pickerError = rustPickerError {
             HStack(spacing: 6) {
@@ -1089,7 +1192,7 @@ public struct SettingsView: View {
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.red.opacity(0.10))
+                    .fill(Color.red.opacity(pillAlpha))
             }
         } else {
             EmptyView()
