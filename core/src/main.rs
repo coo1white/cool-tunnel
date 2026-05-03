@@ -273,7 +273,12 @@ async fn handle_request(
     events: mpsc::Sender<Event>,
 ) {
     let id = request.id;
-    let result = dispatch(state, request.kind, events).await;
+    // Pass `outbound` into dispatch so request handlers that emit
+    // streaming progress (diagnostics, latency) can put their events
+    // on the same channel as the eventual response — that guarantees
+    // ordered delivery on stdout. The separate `events` channel goes
+    // through `event_bridge` and would otherwise race the response.
+    let result = dispatch(state, request.kind, outbound.clone(), events).await;
     let frame = match result {
         Ok(payload) => Outbound::Response {
             id,
@@ -287,6 +292,7 @@ async fn handle_request(
 async fn dispatch(
     state: Arc<Mutex<EngineState>>,
     kind: RequestKind,
+    outbound: mpsc::Sender<Outbound>,
     events: mpsc::Sender<Event>,
 ) -> Result<ResponsePayload, ErrorPayload> {
     match kind {
@@ -355,10 +361,9 @@ async fn dispatch(
             let port = current_port(&state).await.ok_or_else(|| {
                 ErrorPayload::new("not_running", "diagnostics require a running proxy")
             })?;
-            // Pass the engine-wide events channel so each probe can
-            // emit a `DiagnosticProgress` with timing as it completes.
-            // The Swift orchestrator turns those into live log lines.
-            let report = run_diagnostics(port, &events)
+            // `outbound` rather than `events` so the per-probe progress
+            // frames cannot race the closing response on stdout.
+            let report = run_diagnostics(port, &outbound)
                 .await
                 .map_err(|err| ErrorPayload::new("diagnostic_failed", err.to_string()))?;
             Ok(ResponsePayload::Diagnostic(report))
@@ -367,7 +372,7 @@ async fn dispatch(
             let port = current_port(&state).await.ok_or_else(|| {
                 ErrorPayload::new("not_running", "latency test requires a running proxy")
             })?;
-            let report = run_latency(mode, port, &events)
+            let report = run_latency(mode, port, &outbound)
                 .await
                 .map_err(|err| ErrorPayload::new("diagnostic_failed", err.to_string()))?;
             Ok(ResponsePayload::Latency(report))
