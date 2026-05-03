@@ -1,6 +1,14 @@
 # NaiveProxy Server Setup on Debian
 
-This guide shows how to build a working NaiveProxy + Caddy server on Debian.
+This guide shows how to build a working NaiveProxy + Caddy server on
+Debian.
+
+> ⚠️ **Replace every `<USERNAME>` and `<PASSWORD>` placeholder below
+> with strong, unique values that you generate fresh.** Pick a long
+> random password (e.g. `openssl rand -base64 24`); never copy a
+> literal example password from a guide — including this one — into
+> production. Earlier revisions of this file shipped a real password
+> by mistake; if you used those values verbatim, rotate them now.
 
 ## Prerequisites
 
@@ -25,10 +33,10 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
     order forward_proxy before file_server
 }
 
-:443, naive.example.com {
+:443, proxy.example.com {
     tls your@email.com
     forward_proxy {
-        basic_auth nick ***REMOVED***
+        basic_auth <USERNAME> <PASSWORD>
         hide_ip
         hide_via
         probe_resistance
@@ -88,10 +96,10 @@ cat > Caddyfile <<'EOF'
     order forward_proxy before file_server
 }
 
-:443, naive.example.com {
+:443, proxy.example.com {
     tls your@email.com
     forward_proxy {
-        basic_auth nick ***REMOVED***
+        basic_auth <USERNAME> <PASSWORD>
         hide_ip
         hide_via
         probe_resistance
@@ -160,13 +168,13 @@ docker compose up -d
 
 ### Test HTTPS directly
 ```bash
-curl -v https://naive.example.com
+curl -v https://proxy.example.com
 ```
 Expected: `OK`
 
 ### Test proxy directly from server
 ```bash
-curl -v --proxy "https://nick:***REMOVED***@naive.example.com:443" https://ipinfo.io
+curl -v --proxy "https://<USERNAME>:<PASSWORD>@proxy.example.com:443" https://ipinfo.io
 ```
 Expected: Shows server IP
 
