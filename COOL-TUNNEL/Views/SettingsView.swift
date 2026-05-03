@@ -1,24 +1,24 @@
 // Views/SettingsView.swift
 //
-// Modal sheet that edits the user's `AppSettings`. v0.1.5.6:
+// Inline Settings panel for the v0.1.5.8 layout. Replaces the
+// modal sheet that earlier versions presented — Settings now lives
+// inside the same window as the main view, swapped in via
+// `ContentView`'s `isShowingSettings` flag with a slide animation.
 //
-//   - "This Mac" panel now shows full machine detail (CPU brand,
-//     P/E core counts, memory) via `HostMachine`, not just the
-//     coarse arm64/x86_64 enum.
-//   - Naive Binary section now shows a clear OK / NG verdict
-//     after Test runs (green ✅ "Ready to use" or red ❌ with the
-//     specific failure reason) so the user doesn't have to read
-//     each row to figure out if the binary is good.
-//   - New "Update" button next to Test downloads the latest upstream
-//     NaiveProxy build (arm64 + x64), lipo-merges them, ad-hoc
-//     signs, drops the result into Application Support, and adopts
-//     it as the custom binary path.
-//   - Footer shows the running app version (CFBundleShortVersionString
-//     + build number) so the user can quote it in support tickets
-//     without digging through Get Info.
+// Cmd+W and the Back button both flip `isShowing` back to false,
+// returning the user to the main view without dismissing the
+// window itself (the AppDelegate's hide-on-Cmd+W handling is
+// shadowed by the Back button's keyboard shortcut while this view
+// is in the responder chain).
 //
-// Visual language stays Maltese-themed (continued from v0.1.5.4).
-// No layout colours change.
+// Sections, top to bottom:
+//
+//   - Direct Domains
+//   - This Mac (rich machine detail)
+//   - Naive Binary  (Test + Update + OK/NG verdict)
+//   - Rust Core    (Test + Update + OK/NG verdict, new in v0.1.5.8)
+//   - Behaviour
+//   - About        (app version footer)
 
 import AppKit
 import SwiftUI
@@ -26,34 +26,62 @@ import SwiftUI
 @MainActor
 public struct SettingsView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
-    @Environment(\.dismiss) private var dismiss
+
+    /// Two-way binding to ContentView's `isShowingSettings`. Flipping
+    /// to `false` swaps the panel back out for the main view.
+    @Binding public var isShowing: Bool
 
     @State private var draft: AppSettings = .default
     @State private var newDomain: String = ""
+
+    // -- Naive Binary state
     @State private var binaryPickerError: String?
-    /// Result of the most recent Test press. `nil` until the user
-    /// clicks Test, populated thereafter so the panel can show a
-    /// fresh signature/arch/version readout for the candidate path.
     @State private var inspection: NaiveBinaryDescriptor?
     @State private var isInspecting: Bool = false
-    /// Live state of any in-flight `naive` update. `@State` means the
-    /// view re-renders as the updater publishes progress.
     @State private var updater = NaiveUpdater(
         supportDirectory: (try? AppSupportPaths())?.supportDirectory
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
     )
 
+    // -- Rust Core state (new in v0.1.5.8)
+    @State private var rustInspection: RustCoreDescriptor?
+    @State private var isRustInspecting: Bool = false
+    @State private var rustPickerError: String?
+    @State private var rustUpdater = RustCoreUpdater(
+        supportDirectory: (try? AppSupportPaths())?.supportDirectory
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+    )
+
     private let resolver = NaiveBinaryResolver()
+    private let rustResolver = RustCoreResolver()
     private let host = HostMachine.current
     private let appVersion = AppVersion.current
 
-    public init() {}
+    public init(isShowing: Binding<Bool>) {
+        self._isShowing = isShowing
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Settings").font(.title2.weight(.semibold))
+                Button {
+                    commit()
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                // Cmd+W closes the Settings panel (returns to the
+                // main view) instead of hiding the whole window.
+                // The shortcut takes effect because this button is
+                // the responder while Settings is shown.
+                .keyboardShortcut("w", modifiers: .command)
+
                 Spacer()
+
+                Text("Settings").font(.title2.weight(.semibold))
+
+                Spacer()
+
                 Button("Done") { commit() }
                     .keyboardShortcut(.defaultAction)
             }
@@ -98,6 +126,25 @@ public struct SettingsView: View {
                     }
                 }
 
+                Section("Rust Core (engine)") {
+                    rustCorePicker
+                    rustCoreSummary
+                    if let error = rustPickerError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text(
+                            "The cool-tunnel-core engine spawns at app launch. "
+                                + "Update downloads the latest universal binary "
+                                + "from the Cool Tunnel GitHub release; the new "
+                                + "core takes effect on the next launch."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Behaviour") {
                     Toggle("Skip proxy mode confirmations", isOn: $draft.skipProxyConfirmations)
                 }
@@ -109,7 +156,14 @@ public struct SettingsView: View {
             .formStyle(.grouped)
         }
         .padding(16)
-        .frame(width: 600, height: 760)
+        .background {
+            // Opaque card behind the inline Settings so the
+            // mode-aware window background underneath doesn't
+            // bleed through and clash with the Form chrome.
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(CTPalette.platinum.opacity(0.6))
+                .ignoresSafeArea()
+        }
         .onAppear {
             draft = orchestrator.settings
             // Mirror the orchestrator's cached descriptor so the panel
@@ -125,8 +179,16 @@ public struct SettingsView: View {
                 await orchestrator.refreshNaiveDescriptor()
                 inspection = orchestrator.activeNaiveDescriptor
             }
+            // Initial inspection of the active Rust core too, so the
+            // verdict line shows real data without a click.
+            if rustInspection == nil {
+                await runRustInspection()
+            }
         }
-        .onDisappear { updater.reset() }
+        .onDisappear {
+            updater.reset()
+            rustUpdater.reset()
+        }
     }
 
     // MARK: - Chip detection — rich machine detail
@@ -610,6 +672,339 @@ public struct SettingsView: View {
         orchestrator.settings = draft
         orchestrator.persistSettings()
         Task { await orchestrator.refreshNaiveDescriptor() }
-        dismiss()
+        // Inline panel: flip the binding instead of calling
+        // `dismiss()`. The parent view animates the swap.
+        isShowing = false
+    }
+
+    // MARK: - Rust Core section
+
+    /// Path picker + Reset for the Rust core. Mirrors the naive
+    /// picker so the two sections read as siblings.
+    @ViewBuilder
+    private var rustCorePicker: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Group {
+                if draft.customRustCorePath.isEmpty {
+                    Text("Bundled (default)")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(draft.customRustCorePath)
+                        .font(CTTypography.mono)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Choose…") { chooseRustCore() }
+
+            if !draft.customRustCorePath.isEmpty {
+                Button("Reset") {
+                    draft.customRustCorePath = ""
+                    rustPickerError = nil
+                    Task { await runRustInspection() }
+                }
+            }
+        }
+    }
+
+    /// Live readout for the Rust core: arch slices, version, code
+    /// signature, OK/NG verdict, plus Test + Update buttons.
+    @ViewBuilder
+    private var rustCoreSummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(isRustInspecting ? "Testing…" : "Test") {
+                    Task { await runRustInspection() }
+                }
+                .disabled(isRustInspecting || rustUpdaterIsBusy)
+
+                Button(rustUpdaterButtonTitle) {
+                    Task { await runRustUpdate() }
+                }
+                .disabled(rustUpdaterIsBusy)
+
+                Spacer()
+
+                if let descriptor = rustInspection {
+                    Text(descriptor.origin == .bundled ? "Bundled" : "Custom")
+                        .font(.caption)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: .capsule)
+                }
+            }
+
+            rustVerdictRow
+
+            if rustUpdaterIsBusy || rustUpdaterMessage != nil {
+                rustUpdaterRow
+            }
+
+            if let descriptor = rustInspection {
+                summaryRow(label: "Path", value: descriptor.url.path, monospaced: true)
+                summaryRow(
+                    label: "Architectures",
+                    value: descriptor.architectures.sorted().joined(separator: ", "),
+                    monospaced: true
+                )
+                summaryRow(
+                    label: "Version",
+                    value: descriptor.version ?? "(no --version output)"
+                )
+                rustHostSliceRow(descriptor: descriptor)
+                rustSignatureRow(descriptor: descriptor)
+            } else {
+                Text("Not inspected yet — click Test to validate the active engine.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rustVerdictRow: some View {
+        if isRustInspecting {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Testing…")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        } else if let descriptor = rustInspection {
+            let verdict = rustVerdict(for: descriptor)
+            HStack(spacing: 6) {
+                Image(systemName: verdict.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
+                Text(verdict.ok ? "OK" : "NG")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text(verdict.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill((verdict.ok ? Color.green : Color.red).opacity(0.10))
+            }
+        } else if let pickerError = rustPickerError {
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.octagon.fill").foregroundStyle(Color.red)
+                Text("NG")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.red)
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text(pickerError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.red.opacity(0.10))
+            }
+        } else {
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var rustUpdaterRow: some View {
+        HStack(spacing: 8) {
+            Group {
+                switch rustUpdater.state {
+                case .downloading(let p) where p > 0:
+                    ProgressView(value: p).controlSize(.small)
+                case .succeeded, .failed, .idle:
+                    EmptyView()
+                default:
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(width: 80)
+            if let message = rustUpdaterMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(rustUpdaterMessageColor)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(.quaternary.opacity(0.5))
+        }
+    }
+
+    private var rustUpdaterIsBusy: Bool {
+        switch rustUpdater.state {
+        case .resolvingRelease, .downloading, .installing: true
+        default: false
+        }
+    }
+
+    private var rustUpdaterButtonTitle: String {
+        switch rustUpdater.state {
+        case .resolvingRelease: "Resolving…"
+        case .downloading: "Downloading…"
+        case .installing: "Installing…"
+        case .succeeded: "Update again"
+        default: "Update"
+        }
+    }
+
+    private var rustUpdaterMessage: String? {
+        switch rustUpdater.state {
+        case .idle: nil
+        case .resolvingRelease: "Resolving latest cool-tunnel release…"
+        case .downloading(let p) where p > 0: "Downloading… \(Int(p * 100))%"
+        case .downloading: "Downloading universal cool-tunnel-core…"
+        case .installing: "Installing into Application Support…"
+        case .succeeded(let tag, _):
+            "Updated to \(tag) — restart Cool Tunnel to use the new engine."
+        case .failed(let message): "Update failed: \(message)"
+        }
+    }
+
+    private var rustUpdaterMessageColor: Color {
+        switch rustUpdater.state {
+        case .succeeded: .green
+        case .failed: .red
+        default: .secondary
+        }
+    }
+
+    private func rustHostSliceRow(descriptor: RustCoreDescriptor) -> some View {
+        let host = HostArchitecture.current
+        let ok = descriptor.supportsHostArchitecture
+        return HStack(alignment: .firstTextBaseline) {
+            Text("Host slice")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(ok ? Color.green : Color.red)
+            Text(
+                ok
+                    ? "\(host.machOArchName) slice present"
+                    : "missing \(host.machOArchName) slice — engine will fail to spawn"
+            )
+            .font(.caption)
+            .foregroundStyle(ok ? Color.secondary : Color.red)
+        }
+    }
+
+    private func rustSignatureRow(descriptor: RustCoreDescriptor) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Signature")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+            Image(
+                systemName: descriptor.isCodeSignatureValid
+                    ? "checkmark.seal.fill" : "xmark.seal.fill"
+            )
+            .foregroundStyle(descriptor.isCodeSignatureValid ? Color.green : Color.red)
+            Text(descriptor.isCodeSignatureValid ? "valid" : "invalid or missing")
+                .font(.caption)
+                .foregroundStyle(descriptor.isCodeSignatureValid ? Color.secondary : Color.red)
+        }
+    }
+
+    private func rustVerdict(for descriptor: RustCoreDescriptor) -> (ok: Bool, message: String) {
+        if !descriptor.supportsHostArchitecture {
+            return (
+                false,
+                "Missing \(HostArchitecture.current.machOArchName) slice — engine will fail to spawn."
+            )
+        }
+        if !descriptor.isCodeSignatureValid {
+            return (false, "Code signature is invalid or missing.")
+        }
+        if descriptor.version == nil {
+            return (false, "Engine did not respond to --version.")
+        }
+        let archDesc =
+            descriptor.isUniversal
+            ? "universal"
+            : descriptor.architectures.sorted().joined(separator: ", ")
+        return (true, "Ready to use · \(archDesc) · \(descriptor.version ?? "")")
+    }
+
+    private func runRustInspection() async {
+        isRustInspecting = true
+        defer { isRustInspecting = false }
+        let url: URL
+        let origin: RustCoreDescriptor.Origin
+        if draft.customRustCorePath.isEmpty {
+            url = RustCoreResolver.bundledURL()
+            origin = .bundled
+        } else {
+            url = URL(fileURLWithPath: draft.customRustCorePath)
+            origin = .userSupplied
+        }
+        do {
+            rustInspection = try await rustResolver.inspect(url: url, origin: origin)
+            rustPickerError = nil
+        } catch let error as RustCoreResolverError {
+            rustPickerError = error.localizedDescription
+            rustInspection = nil
+        } catch {
+            rustPickerError = error.localizedDescription
+            rustInspection = nil
+        }
+    }
+
+    private func runRustUpdate() async {
+        guard let installedURL = await rustUpdater.update() else { return }
+        draft.customRustCorePath = installedURL.path
+        await runRustInspection()
+    }
+
+    private func chooseRustCore() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.title = "Select cool-tunnel-core binary"
+        panel.message = "The selected file must be a code-signed Mach-O executable."
+        panel.prompt = "Use"
+        panel.treatsFilePackagesAsDirectories = true
+        if !draft.customRustCorePath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: draft.customRustCorePath)
+                .deletingLastPathComponent()
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await verifyAndAdoptRust(url: url) }
+    }
+
+    private func verifyAndAdoptRust(url: URL) async {
+        isRustInspecting = true
+        defer { isRustInspecting = false }
+        do {
+            let descriptor = try await rustResolver.inspect(url: url, origin: .userSupplied)
+            rustInspection = descriptor
+            if !descriptor.isCodeSignatureValid {
+                rustPickerError = "Rejected: code signature is invalid or missing."
+                return
+            }
+            draft.customRustCorePath = url.path
+            rustPickerError = nil
+        } catch let error as RustCoreResolverError {
+            rustPickerError = "Rejected: \(error.localizedDescription)"
+            rustInspection = nil
+        } catch {
+            rustPickerError = "Rejected: \(error.localizedDescription)"
+            rustInspection = nil
+        }
     }
 }

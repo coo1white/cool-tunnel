@@ -1,9 +1,11 @@
 // Views/ContentView.swift
 //
-// Composition root: lays out the four panels and wires them all to
-// the shared `TunnelOrchestrator` from the environment. v0.1.5.4
-// adds a mode-aware pastel window background so the four cards float
-// on a colour that matches the active proxy mode.
+// Composition root: lays out the four main panels and wires them
+// to the shared `TunnelOrchestrator` from the environment. v0.1.5.8
+// changes Settings from a modal sheet into an **inline panel** —
+// tapping the gear swaps the four-panel stack for the Settings
+// view inside the same window, with a Back button (Cmd+W also
+// works) that returns to the main view.
 //
 // Each subview owns its own slice of behaviour; this file does no
 // business logic.
@@ -17,6 +19,30 @@ public struct ContentView: View {
     public init() {}
 
     public var body: some View {
+        ZStack {
+            // Always render the main stack underneath. When Settings
+            // is shown it sits on top with its own opaque background;
+            // doing it this way keeps the window background animation
+            // continuous instead of restarting on every panel swap.
+            mainStack
+                .opacity(isShowingSettings ? 0 : 1)
+                .allowsHitTesting(!isShowingSettings)
+
+            if isShowingSettings {
+                // Inline Settings panel. Cmd+W and the Back button
+                // both flip `isShowingSettings = false`; the
+                // AppDelegate's window-hide handling on Cmd+W is
+                // shadowed by the Back button's keyboard shortcut
+                // while this view is in the responder chain.
+                SettingsView(isShowing: $isShowingSettings)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: isShowingSettings)
+        .background { windowBackground }
+    }
+
+    private var mainStack: some View {
         VStack(spacing: 14) {
             HeaderView(
                 isRunning: orchestrator.isRunning,
@@ -34,40 +60,38 @@ public struct ContentView: View {
                 .frame(minHeight: 240)
         }
         .padding(20)
-        .background {
-            // Mode-aware pastel wash: stays subtle in idle, leans
-            // into the chosen mode colour while the proxy is running.
-            // The window itself becomes a mood ring.
-            //
-            // On the `.light` performance tier (older Intel Macs)
-            // we drop the gradient overlay and the cross-fade
-            // animation — the static cream tint stays so the cards
-            // still feel framed, but the compositor doesn't have to
-            // re-blend a full-window gradient on every state change.
-            ZStack {
-                CTPalette.cream.opacity(0.4)
-                if PerformanceProfile.current.animatedWindowBackgroundAllowed {
-                    CTPalette.dreamGradient(for: orchestrator.activeMode)
-                        .opacity(orchestrator.isRunning ? 0.18 : 0.08)
-                }
+    }
+
+    /// Mode-aware pastel wash: stays subtle in idle, leans into the
+    /// chosen mode colour while the proxy is running. The window
+    /// itself becomes a mood ring.
+    ///
+    /// On the `.light` performance tier (older Intel Macs) we drop
+    /// the gradient overlay and the cross-fade animation — the
+    /// static cream tint stays so the cards still feel framed, but
+    /// the compositor doesn't have to re-blend a full-window
+    /// gradient on every state change.
+    private var windowBackground: some View {
+        ZStack {
+            CTPalette.cream.opacity(0.4)
+            if PerformanceProfile.current.animatedWindowBackgroundAllowed {
+                CTPalette.dreamGradient(for: orchestrator.activeMode)
+                    .opacity(orchestrator.isRunning ? 0.18 : 0.08)
             }
-            .ignoresSafeArea()
-            .animation(
-                PerformanceProfile.current.animatedWindowBackgroundAllowed
-                    ? .easeInOut(duration: 0.6 * PerformanceProfile.current.animationScale)
-                    : nil,
-                value: orchestrator.activeMode
-            )
-            .animation(
-                PerformanceProfile.current.animatedWindowBackgroundAllowed
-                    ? .easeInOut(duration: 0.6 * PerformanceProfile.current.animationScale)
-                    : nil,
-                value: orchestrator.isRunning
-            )
         }
-        .sheet(isPresented: $isShowingSettings) {
-            SettingsView()
-        }
+        .ignoresSafeArea()
+        .animation(
+            PerformanceProfile.current.animatedWindowBackgroundAllowed
+                ? .easeInOut(duration: 0.6 * PerformanceProfile.current.animationScale)
+                : nil,
+            value: orchestrator.activeMode
+        )
+        .animation(
+            PerformanceProfile.current.animatedWindowBackgroundAllowed
+                ? .easeInOut(duration: 0.6 * PerformanceProfile.current.animationScale)
+                : nil,
+            value: orchestrator.isRunning
+        )
     }
 }
 
