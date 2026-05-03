@@ -10,9 +10,10 @@
 // - `events` for an async sequence of unsolicited engine events
 
 import Foundation
+import os
 
-/// Errors raised by the `CoreClient` itself (as opposed to errors received
-/// over the wire, which surface as `ErrorPayload`).
+/// Errors raised by `CoreClient` itself, distinct from errors received
+/// over the wire (which surface as `ErrorPayload`).
 public enum CoreClientError: Error, Sendable, Equatable {
     /// `start()` was called while the engine was already running.
     case alreadyRunning
@@ -179,13 +180,28 @@ public actor CoreClient {
             let frame = try decoder.decode(CoreOutbound.self, from: data)
             dispatch(frame)
         } catch {
-            // Malformed frame — log and continue. We never want a single bad
-            // line to bring the client down.
-            #if DEBUG
-            print("CoreClient: failed to decode frame: \(error) — \(line)")
-            #endif
+            // Malformed frame — log and continue. We never want a
+            // single bad line to bring the client down. v0.1.5.9
+            // audit fix: routes through `os.Logger` (always-on,
+            // structured, redacted-by-default) instead of a
+            // DEBUG-gated `print()` that disappeared in Release. A
+            // malformed frame is diagnostic, not noisy — surfacing
+            // it in `log show --predicate 'subsystem == ...'`
+            // beats hoping a developer happened to be in DEBUG.
+            Self.logger.error(
+                "failed to decode frame: \(String(describing: error), privacy: .public)"
+            )
         }
     }
+
+    /// Subsystem-scoped logger for the JSON-over-stdio frame pump.
+    /// `os.Logger` is the modern (macOS 11+) replacement for both
+    /// `print` and `os_log`; it streams into Console.app and
+    /// `log show` with structured predicates.
+    private static let logger = Logger(
+        subsystem: "space.coolwhite.cooltunnel",
+        category: "CoreClient"
+    )
 
     private func dispatch(_ frame: CoreOutbound) {
         switch frame {

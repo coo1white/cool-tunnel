@@ -8,6 +8,10 @@
 
 import SwiftUI
 
+/// Live engine log: streams `LogEntry` values from the orchestrator
+/// with auto-scroll, monospaced rendering (Monaco), and stderr lines
+/// tinted cherry-rose. Empty state shows a friendly "waiting for
+/// the first log line" placeholder instead of a blank rectangle.
 public struct LogConsoleView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
 

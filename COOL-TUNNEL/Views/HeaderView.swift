@@ -7,6 +7,10 @@
 
 import SwiftUI
 
+/// Top card showing the app icon, name, current proxy mode, and
+/// any firewall warning. Inputs are plain values rather than the
+/// full orchestrator so the view stays cheap to re-render and
+/// trivially previewable.
 public struct HeaderView: View {
     public let isRunning: Bool
     public let activeMode: ProxyMode

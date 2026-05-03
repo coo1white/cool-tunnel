@@ -170,7 +170,15 @@ public final class NaiveUpdater {
     /// because the upstream sometimes flips that endpoint to
     /// pre-release tags.
     private static func resolveLatestStableTag() async throws -> String {
-        let apiURL = URL(string: "https://api.github.com/repos/klzgrad/naiveproxy/releases?per_page=20")!
+        // Compile-time constant URL — `URL(string:)` returns nil only
+        // for malformed input, which a hardcoded API path can never be.
+        // Using `URL(static:)`-style guard avoids the bare `!` that
+        // the v0.1.5.9 audit flagged as masking future force-unwrap
+        // additions during refactoring.
+        guard let apiURL = URL(string: "https://api.github.com/repos/klzgrad/naiveproxy/releases?per_page=20")
+        else {
+            throw UpdaterError.message("internal error: invalid hardcoded GitHub API URL")
+        }
         var request = URLRequest(url: apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-Updater", forHTTPHeaderField: "User-Agent")

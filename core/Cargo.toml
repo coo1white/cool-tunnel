@@ -3,8 +3,14 @@ name = "cool-tunnel-core"
 version = "0.1.5"
 edition = "2021"
 rust-version = "1.80"
-description = "Core engine for the COOL-TUNNEL macOS proxy client"
+description = "Cross-platform Rust engine for Cool Tunnel — JSON-over-stdio client and HTTP server modes"
 license = "Apache-2.0"
+repository = "https://github.com/coo1white/cool-tunnel"
+homepage = "https://github.com/coo1white/cool-tunnel"
+documentation = "https://github.com/coo1white/cool-tunnel/tree/main/core"
+readme = "../README.md"
+keywords = ["proxy", "naive", "tunnel", "macos", "censorship"]
+categories = ["command-line-utilities", "network-programming"]
 publish = false
 
 [lib]

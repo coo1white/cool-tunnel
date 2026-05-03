@@ -22,6 +22,11 @@
 
 import SwiftUI
 
+/// Single-row controls: three radio-style mode chips (Smart /
+/// Global / Local) plus Stop, Diag, Latency, and Settings.
+/// Tapping a chip while the proxy is running calls
+/// `TunnelOrchestrator.switchMode(to:)` to hot-swap modes
+/// without a stop / start dance.
 public struct ControlPanelView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
     @Binding public var isShowingSettings: Bool
