@@ -39,50 +39,100 @@
 // for the palette swap; the `CTTypography` namespace is new and
 // the views opt into it row by row.
 
+import AppKit
 import SwiftUI
 
 // MARK: - Palette
 
-/// Classic Mac–leaning palette. Background neutrals come from the
-/// System 7 / Platinum theme; accent splashes come from the
+/// Classic Mac–leaning palette. Background neutrals come from
+/// the System 7 / Platinum theme; accent splashes come from the
 /// previous Maltese palette but desaturated so they sit on the
 /// platinum frame without shouting.
+///
+/// **v0.1.7.7 dark-mode pass.** Every token is now a *dynamic*
+/// `Color` that resolves to a light or dark variant via
+/// `NSColor(name:dynamicProvider:)`. The view layer is unchanged
+/// — same names, same call sites — but the resolved RGB values
+/// adapt to the current `NSAppearance`. Light variants match
+/// what shipped through v0.1.7.6; dark variants are tuned for
+/// the same System 7 / Platinum mood with inverted luminance
+/// and slightly brighter accents to compensate for the dark
+/// surround.
 public enum CTPalette {
-    // Platinum neutrals — these are the most-used colours and
-    // dominate the window now that we've stepped back from the
-    // pastel-everywhere look.
+    // Platinum neutrals — most-used colours, dominate the window.
 
-    /// Warm off-white card surface. Reads as "paper" against the
-    /// platinum window background.
-    public static let paper = Color(red: 0.98, green: 0.97, blue: 0.95)
+    /// Warm off-white card surface in light; warm dark surface
+    /// in dark. Reads as "paper" against the window background.
+    public static let paper = dynamic(
+        light: NSColor(red: 0.98, green: 0.97, blue: 0.95, alpha: 1),
+        dark: NSColor(red: 0.16, green: 0.15, blue: 0.13, alpha: 1)
+    )
+
     /// Window background — slightly cooler than paper. Classic
-    /// Mac "platinum" hue.
-    public static let platinum = Color(red: 0.93, green: 0.93, blue: 0.91)
-    /// Border / divider — dark enough to be visible without
-    /// being heavy. One value across the design system so every
-    /// pane reads as part of the same drawing.
-    public static let borderInk = Color(red: 0.42, green: 0.42, blue: 0.45)
-    /// Body-text neutral. Slightly warmer than pure black so it
-    /// matches the paper surface temperature.
-    public static let bodyInk = Color(red: 0.13, green: 0.13, blue: 0.16)
+    /// Mac "platinum" in light; deep warm near-black in dark.
+    public static let platinum = dynamic(
+        light: NSColor(red: 0.93, green: 0.93, blue: 0.91, alpha: 1),
+        dark: NSColor(red: 0.10, green: 0.10, blue: 0.09, alpha: 1)
+    )
 
-    // Modern-twist accents — kept from the Maltese palette but
-    // desaturated about 25% so the platinum frame reads cleanly.
+    /// Border / divider — visible but not heavy. One value
+    /// across the design system so every pane reads as part of
+    /// the same drawing. Lifted in dark mode to stay readable
+    /// against the deeper background.
+    public static let borderInk = dynamic(
+        light: NSColor(red: 0.42, green: 0.42, blue: 0.45, alpha: 1),
+        dark: NSColor(red: 0.55, green: 0.55, blue: 0.58, alpha: 1)
+    )
+
+    /// Body-text neutral. Warmer than pure black/white so it
+    /// matches the paper surface temperature in either mode.
+    public static let bodyInk = dynamic(
+        light: NSColor(red: 0.13, green: 0.13, blue: 0.16, alpha: 1),
+        dark: NSColor(red: 0.92, green: 0.92, blue: 0.90, alpha: 1)
+    )
+
+    // Modern-twist accents — desaturated for the platinum frame.
 
     /// Classic Mac blue — closer to System 7's highlight than to
     /// modern Apple blue. Header text gradient + smart-mode chip.
-    public static let macBlue = Color(red: 0.20, green: 0.36, blue: 0.66)
+    /// Brighter dark variant compensates for the dark surround.
+    public static let macBlue = dynamic(
+        light: NSColor(red: 0.20, green: 0.36, blue: 0.66, alpha: 1),
+        dark: NSColor(red: 0.46, green: 0.66, blue: 0.96, alpha: 1)
+    )
+
     /// Lighter classic blue for hover / inactive accents.
-    public static let macBlueSoft = Color(red: 0.62, green: 0.74, blue: 0.92)
+    public static let macBlueSoft = dynamic(
+        light: NSColor(red: 0.62, green: 0.74, blue: 0.92, alpha: 1),
+        dark: NSColor(red: 0.32, green: 0.45, blue: 0.70, alpha: 1)
+    )
+
     /// Desaturated rose — global-mode chip, run-state glow,
-    /// firewall warning.
-    public static let cherryRose = Color(red: 0.85, green: 0.36, blue: 0.50)
-    /// Soft pink — for the firewall badge background.
-    public static let bunnyPink = Color(red: 0.96, green: 0.78, blue: 0.86)
+    /// firewall warning. Stays vivid in both modes.
+    public static let cherryRose = dynamic(
+        light: NSColor(red: 0.85, green: 0.36, blue: 0.50, alpha: 1),
+        dark: NSColor(red: 0.96, green: 0.52, blue: 0.66, alpha: 1)
+    )
+
+    /// Soft pink — for the firewall badge background. Dimmed
+    /// dark variant keeps the badge from glowing.
+    public static let bunnyPink = dynamic(
+        light: NSColor(red: 0.96, green: 0.78, blue: 0.86, alpha: 1),
+        dark: NSColor(red: 0.40, green: 0.20, blue: 0.27, alpha: 1)
+    )
+
     /// Lavender for the log-console card tint.
-    public static let lilac = Color(red: 0.78, green: 0.74, blue: 0.92)
+    public static let lilac = dynamic(
+        light: NSColor(red: 0.78, green: 0.74, blue: 0.92, alpha: 1),
+        dark: NSColor(red: 0.45, green: 0.40, blue: 0.62, alpha: 1)
+    )
+
     /// Mint for local-only mode and "all clear" states.
-    public static let mint = Color(red: 0.65, green: 0.85, blue: 0.78)
+    public static let mint = dynamic(
+        light: NSColor(red: 0.65, green: 0.85, blue: 0.78, alpha: 1),
+        dark: NSColor(red: 0.40, green: 0.65, blue: 0.55, alpha: 1)
+    )
+
     /// Cream — kept for backwards reference; mapped to `paper`.
     public static let cream = paper
     /// Deeper blue for headings and active text — alias to
@@ -92,6 +142,19 @@ public enum CTPalette {
     /// from the v0.1.5.4 Maltese palette so the connection-form
     /// card keeps its blue cast without a per-view sweep.
     public static let skyBlue = macBlueSoft
+
+    /// Wrap a light/dark `NSColor` pair into a dynamic SwiftUI
+    /// `Color`. macOS resolves the dynamic provider against the
+    /// view's effective appearance at draw time, so the colour
+    /// updates the moment the user toggles light/dark or
+    /// switches the System appearance — no view-tree
+    /// invalidation needed.
+    private static func dynamic(light: NSColor, dark: NSColor) -> Color {
+        Color(NSColor(name: nil) { appearance in
+            let resolved = appearance.bestMatch(from: [.aqua, .darkAqua])
+            return resolved == .darkAqua ? dark : light
+        })
+    }
 
     /// Mode-aware accent — pulls one colour per [`ProxyMode`] so
     /// each view doesn't have to repeat the switch.
