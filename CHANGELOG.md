@@ -9,6 +9,63 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.8] — 2026-05-03 (LTSC patch — updater bugfix)
+
+LTSC patch. Two real bugs surfaced when the v0.1.7.7
+in-app updater was first used in production:
+
+### Bug 1 (release process) — `.sha256` manifest missing from GitHub releases
+
+`scripts/package_release.sh` has been generating a
+`Cool-tunnel-vX.Y.Z.sha256` integrity manifest for every
+release since v0.1.4, but my `gh release create` commands
+never included that file. So the manifest existed in
+`dist/` locally but never made it onto the GitHub release
+page. The v0.1.7.6 in-app updater (which depends on the
+manifest for SHA-256 pinning) had no way to verify any
+release, including the same one it was running on.
+
+**Fixed:**
+- Backfilled the missing `.sha256` manifests onto v0.1.7.5,
+  v0.1.7.6, v0.1.7.7 release pages.
+- `scripts/package_release.sh` now prints the canonical
+  `gh release create` command at the end of every package
+  run, with all five required assets pre-filled, so future
+  publishes copy-paste the right thing instead of typing
+  it from memory.
+
+### Bug 2 (updater UX) — "up to date" reported as failure
+
+The in-app updater fetched the latest release and validated
+that both `.zip` and `.sha256` assets existed BEFORE
+comparing the latest version to the running version. So a
+release missing the manifest threw "Update failed: missing
+manifest" even when the user was already on the latest
+version (no install would happen anyway). The right
+behaviour is to compare versions first and only require
+the manifest when there's actually something to install.
+
+**Fixed:** `AppUpdater.fetchLatestRelease` split into
+`fetchLatestReleaseMetadata` (cheap, returns the bare
+release info) + `validateInstallAssets` (returns the
+fully-validated `AvailableRelease`). The `checkForUpdates`
+flow now calls metadata first, compares versions, and only
+calls `validateInstallAssets` when an upgrade is actually
+on offer. Same-version-as-running shows "You're on the
+latest version" cleanly.
+
+### Files
+
+- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` —
+  metadata/validation split; `checkForUpdates` reordered.
+- `scripts/package_release.sh` — emits the canonical
+  publish command at the end.
+
+### Engine + chaos suite
+
+Unchanged. UI + release-process patch only. All 126 tests
+still pass.
+
 ## [0.1.7.7] — 2026-05-03 (LTSC patch — light/dark mode)
 
 LTSC additive feature. Closes the **Sw#24 deferred audit item**

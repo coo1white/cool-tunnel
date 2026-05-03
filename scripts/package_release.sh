@@ -127,5 +127,27 @@ echo ""
 echo "sha256 manifest:"
 sed 's/^/    /' "${MANIFEST}"
 
+# Print the canonical `gh release create` command with ALL FIVE
+# release assets pre-filled. v0.1.7.7 shipped without uploading
+# the .sha256 manifest because that command was typed by hand
+# from memory, leaving the in-app updater unable to verify
+# (resolved in v0.1.7.8). Copy-pasting this command guarantees
+# the manifest goes up alongside the binaries.
+echo ""
+echo "next step — publish to GitHub with ALL FIVE assets:"
+echo ""
+echo "  gh release create v${VERSION} \\"
+echo "    ${DMG} \\"
+echo "    ${PKG} \\"
+echo "    ${ZIP} \\"
+echo "    ${CORE} \\"
+echo "    ${MANIFEST} \\"
+echo "    --title \"v${VERSION} — <title>\" \\"
+echo "    --notes-file <path-to-notes.md> \\"
+echo "    --latest"
+echo ""
+echo "the .sha256 manifest is REQUIRED — the in-app updater"
+echo "refuses to install a release that lacks it."
+
 # Clean up the dmg staging directory — it served its purpose.
 rm -rf "${STAGE}"
