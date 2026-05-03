@@ -47,9 +47,12 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// the response before sending the next), so the hard cap exists
 /// only to bound memory if a future caller pipelines: 32 ×
 /// `MAX_FRAME_BYTES` ≈ 32 MiB worst-case in-flight buffer plus 32
-/// `JoinHandle` allocations. The semaphore drops new requests
-/// rather than queuing, so a bursty caller sees `Outbound::Error`
-/// immediately instead of unbounded memory growth.
+/// `JoinHandle` allocations. Acquired via `acquire_owned().await`
+/// — bursts beyond 32 *queue* rather than fail-fast; the eventual
+/// throughput is bounded by the slowest dispatcher arm. (An
+/// earlier doc-comment claimed "drop new requests" — that
+/// behaviour would require `try_acquire_owned` and an explicit
+/// `Outbound::Error` reply on rejection, which we don't do today.)
 const MAX_INFLIGHT_REQUESTS: usize = 32;
 
 /// Engine-wide mutable state. Wrapped in a [`Mutex`] and shared
@@ -76,20 +79,32 @@ pub async fn run() -> std::io::Result<()> {
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut frame = Vec::with_capacity(8 * 1024);
 
+    // `outbound_tx.send` returning Err means the receiver
+    // (`stdout_writer`) is gone — Swift dropped the pipe, the
+    // process is shutting down. Propagate as `break` rather than
+    // silently `let _ = …`-ing the error: the previous code would
+    // keep reading frames forever after the writer died, allocating
+    // and discarding work, masking real shutdown.
+    macro_rules! emit_or_break {
+        ($frame:expr) => {
+            if outbound_tx.send($frame).await.is_err() {
+                break;
+            }
+        };
+    }
+
     loop {
         frame.clear();
         match read_capped_line(&mut reader, &mut frame, MAX_FRAME_BYTES).await? {
             FrameOutcome::Eof => break,
             FrameOutcome::TooLarge => {
-                let _ = outbound_tx
-                    .send(Outbound::Error {
-                        id: 0,
-                        error: ErrorPayload::new(
-                            "frame_too_large",
-                            format!("request frame exceeded {MAX_FRAME_BYTES} bytes"),
-                        ),
-                    })
-                    .await;
+                emit_or_break!(Outbound::Error {
+                    id: 0,
+                    error: ErrorPayload::new(
+                        "frame_too_large",
+                        format!("request frame exceeded {MAX_FRAME_BYTES} bytes"),
+                    ),
+                });
                 continue;
             }
             FrameOutcome::Frame => {}
@@ -98,12 +113,10 @@ pub async fn run() -> std::io::Result<()> {
         let frame_str = match std::str::from_utf8(&frame) {
             Ok(s) => s.trim(),
             Err(err) => {
-                let _ = outbound_tx
-                    .send(Outbound::Error {
-                        id: 0,
-                        error: ErrorPayload::new("malformed_request", err.to_string()),
-                    })
-                    .await;
+                emit_or_break!(Outbound::Error {
+                    id: 0,
+                    error: ErrorPayload::new("malformed_request", err.to_string()),
+                });
                 continue;
             }
         };
@@ -119,12 +132,10 @@ pub async fn run() -> std::io::Result<()> {
         let value: serde_json::Value = match serde_json::from_str(frame_str) {
             Ok(v) => v,
             Err(err) => {
-                let _ = outbound_tx
-                    .send(Outbound::Error {
-                        id: 0,
-                        error: ErrorPayload::new("malformed_request", err.to_string()),
-                    })
-                    .await;
+                emit_or_break!(Outbound::Error {
+                    id: 0,
+                    error: ErrorPayload::new("malformed_request", err.to_string()),
+                });
                 continue;
             }
         };
@@ -136,12 +147,10 @@ pub async fn run() -> std::io::Result<()> {
         match serde_json::from_value::<Request>(value) {
             Ok(request) => {
                 if matches!(request.kind, RequestKind::Shutdown) {
-                    let _ = outbound_tx
-                        .send(Outbound::Response {
-                            id,
-                            result: ResponsePayload::Ack,
-                        })
-                        .await;
+                    emit_or_break!(Outbound::Response {
+                        id,
+                        result: ResponsePayload::Ack,
+                    });
                     break;
                 }
 
@@ -157,12 +166,10 @@ pub async fn run() -> std::io::Result<()> {
                 });
             }
             Err(err) => {
-                let _ = outbound_tx
-                    .send(Outbound::Error {
-                        id,
-                        error: ErrorPayload::new("invalid_request", err.to_string()),
-                    })
-                    .await;
+                emit_or_break!(Outbound::Error {
+                    id,
+                    error: ErrorPayload::new("invalid_request", err.to_string()),
+                });
             }
         }
     }
@@ -192,6 +199,15 @@ where
     use tokio::io::AsyncBufReadExt as _;
     buffer.clear();
     let mut over = false;
+    // Hard cap on bytes discarded while in oversized-frame
+    // resync mode. Without this, a misbehaving (or hostile)
+    // parent feeding a multi-GB blob with no newline would burn
+    // CPU forever in the consume loop. 16× MAX_FRAME_BYTES is
+    // generous enough to swallow any legitimate overshoot
+    // (truncated multi-MB curl-stderr blob, etc.) while still
+    // bounding the worst case.
+    let discard_cap = max.saturating_mul(16);
+    let mut discarded: usize = 0;
 
     loop {
         let chunk = reader.fill_buf().await?;
@@ -221,6 +237,20 @@ where
         if !over && buffer.len() + len > max {
             over = true;
             buffer.clear();
+        }
+        if over {
+            discarded = discarded.saturating_add(len);
+            if discarded > discard_cap {
+                // Treat protocol-level desync as I/O failure so
+                // the outer `client_mode::run` exits the read
+                // loop and drains. Better to fail-fast than to
+                // spin forever on a stream that will never
+                // produce a `\n`.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stdin protocol desync: oversized-frame discard exceeded cap",
+                ));
+            }
         }
         if !over {
             buffer.extend_from_slice(chunk);
@@ -394,6 +424,19 @@ async fn monitor_loop(
 
     loop {
         ticker.tick().await;
+        // Exit the monitor as soon as the supervised PID is gone.
+        // Without this check, a `naive` that dies on its own
+        // (network stack collapse, panic, OOM) leaves the monitor
+        // probing the stale PID forever — until next StopProxy. On
+        // macOS PIDs roll over (max 99,998), so within a long
+        // session another process can take the same PID and the
+        // engine starts emitting anomalies derived from someone
+        // else's lsof output. That's a confused-deputy signal and
+        // a real CVE-class hazard for a security monitor.
+        if !pid_alive(pid).await {
+            tracing::info!(pid, "supervised process gone; monitor_loop exiting");
+            return;
+        }
         match monitor::run(pid, port).await {
             Ok(snapshot) => {
                 if let Some(anomaly) = snapshot.anomaly {
@@ -419,6 +462,25 @@ async fn monitor_loop(
             }
         }
     }
+}
+
+/// Returns `true` if a process with `pid` exists.
+///
+/// Implemented as `/bin/kill -0 <pid>` because the crate forbids
+/// `unsafe_code` and the stdlib has no safe equivalent. The
+/// monitor only ticks every 5 s, so the per-tick spawn cost is
+/// negligible. Any non-zero exit (no such process, EPERM, etc.)
+/// is treated as "gone" — the monitor's job is to stop probing
+/// for an unowned PID, and EPERM means the PID was reused by
+/// another user, which is also a valid "stop probing" signal.
+async fn pid_alive(pid: u32) -> bool {
+    let status = tokio::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    matches!(status, Ok(s) if s.success())
 }
 
 async fn stdout_writer(mut rx: mpsc::Receiver<Outbound>) {

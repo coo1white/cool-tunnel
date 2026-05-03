@@ -263,26 +263,23 @@ public struct NaiveBinaryResolver: Sendable {
         executable: URL,
         arguments: [String]
     ) async -> String? {
-        await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = arguments
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-            do {
-                try process.run()
-            } catch {
-                return nil
-            }
-            process.waitUntilExit()
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-            let combined = stdout.isEmpty ? stderr : stdout
-            return combined
-        }.value
+        // Routed through `Subprocess.run` so a wedged `lipo` /
+        // `naive --version` cannot freeze inspection. 10-second
+        // timeout: `lipo -info` and `naive --version` both
+        // typically return in <100ms; 10s is generous slack for
+        // disk slowness without keeping the user waiting on a
+        // stuck binary.
+        let result: SubprocessResult
+        do {
+            result = try await Subprocess.run(
+                executable: executable,
+                arguments: arguments,
+                timeout: 10
+            )
+        } catch {
+            return nil
+        }
+        let combined = result.stdout.isEmpty ? result.stderr : result.stdout
+        return combined
     }
 }

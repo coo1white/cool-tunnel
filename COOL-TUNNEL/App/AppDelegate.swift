@@ -76,11 +76,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let orchestrator else {
             return .terminateNow
         }
+        // Two parallel tasks race to send `reply(toApplicationShouldTerminate:)`:
+        // (1) the real shutdown task; (2) a 5-second watchdog. Whichever
+        // wins, AppKit gets one reply. Without the watchdog any future
+        // shutdown-step hang (signal-blocked syscall, network-stack
+        // teardown, system-proxy revert blocked on a wedged
+        // `networksetup`) would park the app in "terminating…" forever
+        // with the engine + system proxy still alive — far worse than
+        // a 5 s wait followed by a slightly-dirty exit.
+        let replied = NSAppTerminateReplyOnce()
         Task { @MainActor in
-            await orchestrator.shutdown()
-            NSApp.reply(toApplicationShouldTerminate: true)
+            do {
+                await orchestrator.shutdown()
+            }
+            replied.fire()
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            replied.fire()
         }
         return .terminateLater
+    }
+
+    /// Single-shot reply gate. AppKit treats a second
+    /// `reply(toApplicationShouldTerminate:)` as undefined behaviour
+    /// (some macOS versions assert); this keeps the contract.
+    /// MainActor-isolated so both racer Tasks already serialise on
+    /// it via Swift's actor model, no extra lock needed.
+    @MainActor
+    private final class NSAppTerminateReplyOnce {
+        private var fired = false
+        func fire() {
+            guard !fired else { return }
+            fired = true
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
     }
 
     /// Returns the Window-scene main window. Filters out any

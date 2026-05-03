@@ -224,26 +224,19 @@ public struct RustCoreResolver: Sendable {
     }
 
     private static func runProcess(executable: URL, arguments: [String]) async -> String? {
-        await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = arguments
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-            do {
-                try process.run()
-            } catch {
-                return nil
-            }
-            process.waitUntilExit()
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-            let combined = stdout.isEmpty ? stderr : stdout
-            return combined
-        }.value
+        // See NaiveBinaryResolver.runProcess for the rationale —
+        // same flow, same 10-second timeout for the same reason.
+        let result: SubprocessResult
+        do {
+            result = try await Subprocess.run(
+                executable: executable,
+                arguments: arguments,
+                timeout: 10
+            )
+        } catch {
+            return nil
+        }
+        let combined = result.stdout.isEmpty ? result.stderr : result.stdout
+        return combined
     }
 }
