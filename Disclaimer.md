@@ -38,10 +38,10 @@ and agree that:
 
 ## No warranty
 
-This software is distributed under the **GNU Affero General Public License,
-Version 3** (see [LICENSE](./LICENSE)). It is provided **without any
-warranty** — express or implied — including without limitation the warranties
-of merchantability, fitness for a particular purpose, and non-infringement.
+This software is distributed under the **Apache License, Version 2.0**
+(see [LICENSE](./LICENSE)). It is provided **without any warranty** —
+express or implied — including without limitation the warranties of
+merchantability, fitness for a particular purpose, and non-infringement.
 
 ## No liability
 
@@ -62,8 +62,10 @@ remote service except the SOCKS upstream you configure yourself.
 
 COOL TUNNEL bundles a precompiled `naive` Mach-O binary built from
 [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy), which is
-distributed under the BSD-3-Clause license. Users redistributing COOL TUNNEL
-must comply with that license in addition to AGPL-3.0.
+distributed under the BSD-3-Clause license. Users redistributing COOL
+TUNNEL must comply with that license in addition to Apache-2.0. The
+[NOTICE](./NOTICE) file at the repository root lists every bundled
+component and its licence — keep it intact in any redistribution.
 
 ## Reporting security issues
 
