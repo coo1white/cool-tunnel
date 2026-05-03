@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::domain::{Port, ProxyTestMode};
-use crate::protocol::{DiagnosticReport, Event, LatencyReport, ProbeResult};
+use crate::protocol::{DiagnosticReport, Event, LatencyReport, Outbound, ProbeResult};
 
 pub use metrics::{parse_write_out, secs_to_ms};
 pub use probe::{run_probe, ProbeOptions};
@@ -47,29 +47,34 @@ pub enum DiagnosticError {
 /// The result list is intentionally small; richer diagnostics are run via
 /// [`run_latency`].
 ///
-/// Emits a [`Event::DiagnosticProgress`] for the probe so the live log
-/// window can render `✓ upstream_via_socks (47ms)` in real time rather
-/// than waiting for the response payload.
+/// Emits an [`Event::DiagnosticProgress`] for the probe so the live log
+/// window can render `✓ upstream_via_socks (47ms)` in real time. The
+/// progress event is sent on the **same channel as the response** to
+/// guarantee the user sees per-probe lines before the closing summary
+/// — emitting on the separate `events` channel races against the
+/// response and can land out of order on stdout.
 ///
 /// # Errors
 ///
 /// Returns [`DiagnosticError::Io`] if `curl` cannot be spawned.
 pub async fn run_diagnostics(
     port: Port,
-    events: &mpsc::Sender<Event>,
+    outbound: &mpsc::Sender<Outbound>,
 ) -> Result<DiagnosticReport, DiagnosticError> {
-    let probes = vec![probe_through_proxy(port, events).await?];
+    let probes = vec![probe_through_proxy(port, outbound).await?];
     Ok(DiagnosticReport { probes })
 }
 
 /// Runs a latency report for the requested mode.
 ///
-/// The first target is probed without a proxy (to compare baseline DNS/TCP
-/// timings). Remaining targets are probed via the local SOCKS listener.
+/// The first target is probed **without** a proxy (a direct hit on the
+/// upstream) to give a baseline DNS/TCP timing the user can compare
+/// against the via-proxy probes. Remaining targets are probed via the
+/// local SOCKS listener.
 ///
-/// Emits one [`Event::DiagnosticProgress`] per probe with the probe URL
-/// as the step name and the wall-clock elapsed time. The Swift side
-/// renders these as `✓ https://… (123ms)` in the live log.
+/// Per-probe progress events are emitted on `outbound` (not `events`)
+/// so they cannot race ahead of or behind the response payload — see
+/// [`run_diagnostics`] for the rationale.
 ///
 /// # Errors
 ///
@@ -77,7 +82,7 @@ pub async fn run_diagnostics(
 pub async fn run_latency(
     mode: ProxyTestMode,
     port: Port,
-    events: &mpsc::Sender<Event>,
+    outbound: &mpsc::Sender<Outbound>,
 ) -> Result<LatencyReport, DiagnosticError> {
     let targets: &[&str] = match mode {
         ProxyTestMode::Smart => SMART_TARGETS,
@@ -99,24 +104,16 @@ pub async fn run_latency(
         let sample = run_probe(&opts).await?;
         let elapsed_ms = ms_to_u64(started.elapsed().as_secs_f64() * 1000.0);
         let step_label = if idx == 0 {
-            // The first probe is the no-proxy baseline; label it so the
-            // UI log makes the comparison obvious without the user having
-            // to know the target ordering.
-            format!("baseline {url}")
+            // The first probe is the direct/no-proxy baseline. Make
+            // that explicit in the label — "baseline" alone would let
+            // a user think both runs of the same URL go through the
+            // proxy. The label is the only place the UI surfaces the
+            // distinction.
+            format!("baseline (direct, no proxy) {url}")
         } else {
             format!("via proxy {url}")
         };
-        // `try_send` would lose events under back-pressure; we use the
-        // fully awaited `send` so the live log keeps order even if the
-        // consumer falls behind. Failure means the channel has closed
-        // (engine shutting down), in which case it is safe to drop.
-        let _ = events
-            .send(Event::DiagnosticProgress {
-                step: step_label,
-                ok: sample.ok,
-                elapsed_ms,
-            })
-            .await;
+        emit_progress(outbound, step_label, sample.ok, elapsed_ms).await;
         samples.push(sample);
     }
     Ok(LatencyReport { samples })
@@ -124,7 +121,7 @@ pub async fn run_latency(
 
 async fn probe_through_proxy(
     port: Port,
-    events: &mpsc::Sender<Event>,
+    outbound: &mpsc::Sender<Outbound>,
 ) -> Result<ProbeResult, DiagnosticError> {
     let opts = ProbeOptions {
         url: "https://ipinfo.io/ip".to_owned(),
@@ -135,19 +132,34 @@ async fn probe_through_proxy(
     let started = Instant::now();
     let sample = run_probe(&opts).await?;
     let elapsed_ms = ms_to_u64(started.elapsed().as_secs_f64() * 1000.0);
-    let _ = events
-        .send(Event::DiagnosticProgress {
-            step: "upstream_via_socks".to_owned(),
-            ok: sample.ok,
-            elapsed_ms,
-        })
-        .await;
+    emit_progress(
+        outbound,
+        "upstream_via_socks".to_owned(),
+        sample.ok,
+        elapsed_ms,
+    )
+    .await;
     Ok(ProbeResult {
         name: "upstream_via_socks".to_owned(),
         ok: sample.ok,
         detail: sample.notes.clone(),
         duration_ms: ms_to_u64(sample.elapsed_ms),
     })
+}
+
+/// Wraps a `DiagnosticProgress` event in `Outbound::Event` and pushes
+/// it down the response channel. We deliberately use the awaited
+/// `send` (not `try_send`) so the log line is never silently dropped
+/// under back-pressure; failure means stdout has closed and the
+/// engine is shutting down anyway.
+async fn emit_progress(outbound: &mpsc::Sender<Outbound>, step: String, ok: bool, elapsed_ms: u64) {
+    let _ = outbound
+        .send(Outbound::Event(Event::DiagnosticProgress {
+            step,
+            ok,
+            elapsed_ms,
+        }))
+        .await;
 }
 
 /// Rounds a non-negative milliseconds value to `u64`, saturating on overflow

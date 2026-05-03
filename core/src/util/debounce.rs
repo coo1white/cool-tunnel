@@ -84,8 +84,13 @@ where
         self.last_admitted.clear();
     }
 
-    /// How many keys are currently being tracked. Used by the stress
-    /// test to assert the map does not leak unboundedly.
+    /// How many keys are currently being tracked. The map grows by one
+    /// per *distinct* key admitted; it does not shrink between
+    /// admissions. In production the only call site uses
+    /// [`crate::protocol::AnomalyReason`] as the key, which has a
+    /// fixed five variants — so the map is bounded at five entries.
+    /// Call [`reset`] to clear it (e.g. on supervisor restart).
+    /// Tested by the stress suite below to confirm the bound holds.
     #[must_use]
     pub fn tracked_keys(&self) -> usize {
         self.last_admitted.len()
