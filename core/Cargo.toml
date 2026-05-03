@@ -4,7 +4,7 @@ version = "0.1.5"
 edition = "2021"
 rust-version = "1.80"
 description = "Core engine for the COOL-TUNNEL macOS proxy client"
-license = "AGPL-3.0-or-later"
+license = "Apache-2.0"
 publish = false
 
 [lib]

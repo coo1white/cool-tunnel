@@ -187,18 +187,33 @@ fi
 
 # --- 7. License + disclaimer present -----------------------------------
 
-heading "7. AGPL-3.0 license & disclaimer"
+heading "7. Apache-2.0 license, NOTICE, and disclaimer"
 
 if [[ -f "${REPO_ROOT}/LICENSE" ]]; then
     ok "LICENSE present at repo root"
 else
-    fail "LICENSE missing — required by AGPL-3.0 distribution terms"
+    fail "LICENSE missing — required by Apache-2.0 distribution terms"
 fi
 
-if grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" "${REPO_ROOT}/LICENSE" 2>/dev/null; then
-    ok "LICENSE contains AGPL-3.0 header"
+# Apache 2.0 is identified by its distinctive "Apache License" /
+# "Version 2.0" header pair on the first two lines. Looser than a
+# byte-exact match (which would break on whitespace tweaks) but
+# tight enough to catch a license swap.
+if grep -q "Apache License" "${REPO_ROOT}/LICENSE" 2>/dev/null \
+    && grep -q "Version 2.0" "${REPO_ROOT}/LICENSE" 2>/dev/null; then
+    ok "LICENSE contains Apache-2.0 header"
 else
-    fail "LICENSE does not look like AGPL-3.0"
+    fail "LICENSE does not look like Apache-2.0"
+fi
+
+# NOTICE is required when redistributing under Apache-2.0 if the
+# upstream included one — and it's good practice to keep our own
+# copyright + bundled-component attribution there. Treated as a
+# hard fail because we *did* author one.
+if [[ -f "${REPO_ROOT}/NOTICE" ]]; then
+    ok "NOTICE present at repo root"
+else
+    fail "NOTICE missing — required by Apache-2.0 § 4(d) for our bundled-software attribution"
 fi
 
 if [[ -f "${REPO_ROOT}/Disclaimer.md" ]]; then
