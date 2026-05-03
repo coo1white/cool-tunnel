@@ -91,12 +91,19 @@ async fn shutdown_signal() {
 /// real socket. `Router` is already `#[must_use]`, so callers can't
 /// silently drop the routes.
 pub fn router() -> Router {
+    // Hard cap on JSON body size: 64 KiB is far above any
+    // legitimate `Profile` (a few hundred bytes), generous enough
+    // for a domain list with a thousand entries, and a tight
+    // ceiling against a slowloris / oversized-body attack.
+    // Default `Json<T>` extractor cap is 2 MiB which is far
+    // larger than anything we actually accept.
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
         .route("/naive/validate", post(naive_validate))
         .route("/naive/config", post(naive_config))
         .route("/naive/pac", post(naive_pac))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
 }
 
 // MARK: - Handlers

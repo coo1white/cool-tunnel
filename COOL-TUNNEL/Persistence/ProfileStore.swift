@@ -61,8 +61,22 @@ public struct ProfileStore: @unchecked Sendable {
         }
 
         var hydrated: [Profile] = []
+        var seenIDs: Set<String> = []
         var needsRewrite = false
         for var profile in stored {
+            // Defensive: drop entries with empty id and dedupe by id.
+            // A corrupted UserDefaults plist (TimeMachine restore
+            // race, manual `defaults import` mistake) could leave
+            // duplicate or empty ids; without this the
+            // `selectedProfile` getter returns whichever appears
+            // `first`, and `removeSelectedProfile` would delete
+            // every match in one keystroke.
+            if profile.id.isEmpty || seenIDs.contains(profile.id) {
+                needsRewrite = true
+                continue
+            }
+            seenIDs.insert(profile.id)
+
             let storedSecret = profile.password
             if !storedSecret.isEmpty {
                 // Legacy plaintext password lurking in UserDefaults.
@@ -77,7 +91,20 @@ public struct ProfileStore: @unchecked Sendable {
             // orchestrator hydrates from the credential store at
             // start time.
             profile.password = ""
+            // Trim whitespace at the persistence boundary so a
+            // user pasting `nick ` from a chat app doesn't end up
+            // failing engine validation with no obvious cause.
+            profile.server = profile.server.trimmingCharacters(in: .whitespacesAndNewlines)
+            profile.username = profile.username.trimmingCharacters(in: .whitespacesAndNewlines)
+            profile.localPort = profile.localPort.trimmingCharacters(in: .whitespacesAndNewlines)
             hydrated.append(profile)
+        }
+        // If dedupe ate every profile, fall back to the bundled
+        // default rather than returning an empty list which the
+        // UI doesn't expect.
+        if hydrated.isEmpty {
+            hydrated = [.default]
+            needsRewrite = true
         }
 
         if needsRewrite {

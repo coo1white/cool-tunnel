@@ -9,6 +9,161 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.3] — 2026-05-03 (LTSC patch)
+
+LTSC in-line patch — robustness audit pass. Two parallel audits
+(Swift + Rust) returned 103 findings; this patch closes the
+high-confidence correctness/security fixes plus quick-win
+hygiene. The bigger items (release-SHA-manifest infra to close
+the updater codesign gap, channel-split for control-plane vs
+log-line traffic, EngineSession enum-state) are deferred to
+v0.2.0 because they touch shared infrastructure or change the
+release-publishing process.
+
+**Correctness — Swift:**
+
+- AppDelegate `applicationShouldTerminate` now races shutdown
+  against a 5-second watchdog; whichever finishes first calls
+  `reply(toApplicationShouldTerminate:)`. Without the watchdog
+  any future shutdown-step hang (signal-blocked syscall, wedged
+  `networksetup`) parked the app in "terminating…" forever with
+  the engine + system proxy still alive.
+- `CoreClient.send` enforces a 120-second per-request deadline.
+  Every continuation in `pending` has a sibling timeout Task
+  that resumes it with `requestTimeout` if the engine fails to
+  reply. Previously a hung engine froze the UI indefinitely
+  with no recovery short of Force Quit.
+- `bootstrapIfNeeded` retains its didBootstrap-on-success
+  semantic from v0.1.7.2 (no regression).
+- `TunnelOrchestrator.stop()` early-returns when already stopped
+  — spam-clicking Stop no longer iterates `networksetup` twice
+  per active service or surfaces "stop failed: not_running" to
+  the UI.
+- `clearLogs()` now also clears `lastError`. The error pill
+  no longer survives a "Clear logs" tap.
+- `listeningOutsideLoopback` auto-stop is single-flighted —
+  burst-of-anomalies no longer queues duplicate `stop()` Tasks
+  racing on `activeMode`.
+- `ProfileStore.loadProfiles` deduplicates by id, drops
+  empty-id entries, trims whitespace from server/username/port
+  fields. A corrupted UserDefaults blob (TimeMachine restore
+  race, manual `defaults import` mistake) no longer produces
+  duplicate profiles where `removeSelectedProfile` deletes
+  every match in one keystroke.
+- New `Subprocess.run` helper drains stdout/stderr concurrently
+  while the child runs, with hard timeout escalation
+  (terminate → interrupt → SIGKILL). Replaces three boot-path
+  callers (FirewallProbe, NaiveBinaryResolver,
+  RustCoreResolver) that each suffered from the classic
+  pipe-fills-then-deadlocks bug if the subprocess wrote >64 KB
+  to stderr.
+
+**Security — Swift:**
+
+- `RestrictedFile.write` no longer chmods *after* rename. The
+  v0.1.5.5 promise of 0600 on `credentials.json` had a real
+  race window: `Data.write(.atomic)` writes a temp file with
+  default umask (0644) then renames; if the process crashed or
+  hit ENOSPC between rename and chmod, the credential file
+  persisted at 0644. New flow opens the temp file with
+  `O_CREAT|O_EXCL|0600`, writes, fsyncs, renames atomically.
+  No window where the file is on disk world-readable.
+- `NaiveUpdater` validates the upstream tag against
+  `^v?\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?$` before interpolating
+  it into the GitHub asset URL. A future upstream tag
+  containing `..`, spaces, `?`, `#`, or `/` would have
+  produced a URL pointing outside the intended release
+  directory.
+
+**Correctness — Rust:**
+
+- `ProxySupervisor::stop()` now passes `&mut handle` to
+  `tokio::time::timeout` so on the 2-second drain expiry the
+  handle can still be `abort()`ed and awaited. The previous
+  implementation moved the handle into `timeout`, leaking the
+  task indefinitely (still awaiting `child.wait()`); the inner
+  `Child` was never dropped, so `kill_on_drop(true)` never
+  fired, so a subsequent `start_proxy` could spawn a *second*
+  `naive` against the still-alive previous PID.
+- `monitor_loop` exits as soon as the supervised PID is gone
+  (checked each tick via `/bin/kill -0`). Previously the loop
+  kept probing the stale PID forever; on macOS PIDs roll over
+  (max 99,998), so a long session could see another process
+  take the same PID and the engine would emit anomalies
+  derived from someone else's lsof output — a confused-deputy
+  hazard for a security monitor.
+- `monitor::run` (lsof probe) wrapped with a 4-second Tokio
+  timeout. A wedged `lsof` can no longer freeze the monitor
+  loop.
+- `lsof` exit=1 with empty stderr is now treated as "no
+  matching open files" (a perfectly normal state for a `naive`
+  that hasn't accepted a connection yet) instead of
+  `MonitorError::NonZeroExit`. Stops the spurious
+  `tracing::warn!` line on every probe of an idle proxy.
+- `run_probe` (curl) wrapped with `kill_on_drop(true)` and an
+  outer Tokio timeout (`max_time + 5s`). Cancelled diagnostic
+  Tasks no longer leak curl processes; a curl wedged in
+  libc's getaddrinfo is reaped.
+- `read_capped_line` enforces a hard cap on bytes discarded in
+  oversized-frame resync mode (`16 × MAX_FRAME_BYTES`). A
+  multi-GB blob with no newline can no longer burn CPU forever
+  in the consume loop; protocol-level desync now fail-fast as
+  `InvalidData`.
+- `client_mode::run` now breaks out of the read loop when an
+  error-frame send fails (writer is gone → engine is shutting
+  down → stop reading). Previously the engine kept consuming
+  inputs forever, masking real shutdown.
+- `ProxySupervisor::read_lines` now logs the IO error before
+  returning instead of swallowing with `Err(_)`. Mid-session
+  log silence is the most likely cause of "where did my logs
+  go?" — operators get a real signal to debug from.
+
+**Hygiene — Rust:**
+
+- `init_tracing` uses `try_init` instead of `init` so a future
+  test that drives both client and server modes doesn't panic
+  on the second call.
+- Dead intra-doc reference to the deleted `ANOMALY_DEBOUNCE`
+  constant cleaned up; `Debouncer::default()` is the canonical
+  source of the 100 ms window.
+- `MAX_INFLIGHT_REQUESTS` doc-vs-code mismatch fixed: doc
+  previously claimed "drop on burst" but the code uses
+  `acquire_owned().await` (queue). Doc rewritten to match
+  reality; the actual drop behaviour is left as a
+  defer-to-next-minor since it's a behaviour change.
+- `axum::serve` body limit lowered from the 2 MiB default to
+  64 KiB via `DefaultBodyLimit::max`. A profile is a few
+  hundred bytes; tightening the ceiling shrinks the
+  oversized-body attack surface.
+
+**Deferred to v0.2.0:**
+
+- Sw#C4: Updaters defeat the codesign gate (download → ad-hoc
+  sign → next-launch verify passes the just-signed binary).
+  Real fix needs a release-SHA-256 manifest the updaters can
+  pin against; that's a release-process change beyond LTSC
+  scope. **Until then, the existing CodeSignVerifier check
+  catches arbitrary unsigned binaries but does not catch a
+  MITM on the GitHub asset URL.**
+- Sw#H2/H3: 3 of 6 subprocess callers migrated to
+  `Subprocess.run`; the updater-side helpers retain bespoke
+  flows. Migrate in v0.2.
+- Sw#H11: bootstrap-failure visibility through subsequent
+  user-initiated Start.
+- Ru#C2: `start_proxy` cancellation-safety + anomaly-debouncer
+  reset race.
+- Ru#C4: EngineSession enum-state to make the three lifecycle
+  fields (supervisor / monitor_handle / active_port) refactor-
+  proof.
+- Ru#H6: zombie-handler cleanup on writer death.
+- Ru#H7: split control-plane vs log channels (anomalies and
+  state-changes today share a 256-buffer mpsc with high-volume
+  log lines).
+- Ru#H8: tower-based concurrency limit + per-request timeout
+  (would add `tower` dep).
+- All wire-format / on-disk-format changes per
+  [SUPPORT.md](./SUPPORT.md).
+
 ## [0.1.7.2] — 2026-05-03 (LTSC patch)
 
 LTSC in-line patch — module-design audit pass. 113 audit

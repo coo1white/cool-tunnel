@@ -155,8 +155,8 @@ where
     }
 }
 
-/// `Default` is a 100 ms window — matches the production
-/// [`crate::ANOMALY_DEBOUNCE`] constant in `main.rs`. Lets callers
+/// `Default` is a 100 ms window — the canonical anomaly-debounce
+/// duration used by `client_mode::EngineState::default()`. Lets callers
 /// write `Debouncer::default()` for the common case and
 /// `Debouncer::new(other)` for everything else.
 impl<K> Default for Debouncer<K>

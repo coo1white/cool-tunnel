@@ -114,20 +114,30 @@ impl ProxySupervisor {
         // task; the only thing we lose is the trailing
         // `StateChanged { running: false }` event, which the
         // engine can also synthesize from supervisor disposal.
-        if let Some(handle) = self.monitor.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
-                Ok(_) => {}
-                Err(_) => {
-                    tracing::warn!(
-                        pid = self.pid,
-                        "monitor_lifecycle did not drain within 2s; aborting"
-                    );
-                    // The JoinHandle was moved into `timeout`; we
-                    // can't abort it here. The task is detached;
-                    // `kill_on_drop(true)` on the underlying
-                    // `Child` (now owned by the task) reaps the
-                    // process when the task is finally dropped.
-                }
+        if let Some(mut handle) = self.monitor.take() {
+            // Pass `&mut handle` to `timeout` so ownership stays
+            // local — on the timeout branch we still hold the
+            // handle and can `abort()` it explicitly. The previous
+            // implementation moved the handle into `timeout`, so
+            // on expiry it leaked: the task kept awaiting
+            // `child.wait()` indefinitely and the `Child`
+            // (with `kill_on_drop`) was never dropped because
+            // the task that owned it never returned. A subsequent
+            // `start_proxy` could spawn a *second* `naive` against
+            // the still-alive previous PID.
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    pid = self.pid,
+                    "monitor_lifecycle did not drain within 2s; aborting"
+                );
+                handle.abort();
+                // Drain the abort so the inner `Child` drops and
+                // `kill_on_drop(true)` actually reaps the naive
+                // subprocess.
+                let _ = handle.await;
             }
         }
         Ok(())
@@ -166,7 +176,15 @@ where
                     return;
                 }
             }
-            Ok(None) | Err(_) => return,
+            Ok(None) => return,
+            Err(err) => {
+                // Log the IO error before dropping it. Loss of a
+                // log stream is the most likely cause of mid-
+                // session log silence; without the warn the
+                // operator has no signal to debug from.
+                tracing::warn!(?source, error = %err, "log stream ended with error");
+                return;
+            }
         }
     }
 }
