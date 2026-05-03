@@ -149,7 +149,9 @@ public final class RustCoreUpdater {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw RustUpdaterError.message("GitHub API returned an unexpected response")
+            throw RustUpdaterError.message(
+                "Couldn't reach GitHub to look up the latest Cool Tunnel release. Check your internet connection and try again."
+            )
         }
 
         struct Asset: Decodable {
@@ -177,13 +179,17 @@ public final class RustCoreUpdater {
                 return (release.tagName, asset.browserDownloadURL)
             }
         }
-        throw RustUpdaterError.message("no cool-tunnel-core asset found in recent releases")
+        throw RustUpdaterError.message(
+            "No engine binary in the recent Cool Tunnel releases. The bundled engine still works; Update will retry next time."
+        )
     }
 
     private static func download(url: URL, to destination: URL) async throws -> URL {
         let (tempURL, response) = try await URLSession.shared.download(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw RustUpdaterError.message("download failed for \(url.lastPathComponent)")
+            throw RustUpdaterError.message(
+                "Couldn't download the engine binary. Check your internet connection and try Update again."
+            )
         }
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
