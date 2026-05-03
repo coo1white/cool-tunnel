@@ -35,28 +35,29 @@ public struct FirewallProbe: Sendable {
     /// Reads `--getglobalstate`. Returns [`FirewallState.unknown`] when the
     /// process can't be spawned or its output is unrecognised.
     public func currentState() async -> FirewallState {
-        await Task.detached(priority: .utility) {
-            let process = Process()
-            let stdout = Pipe()
-            process.executableURL = socketFilterURL
-            process.arguments = ["--getglobalstate"]
-            process.standardOutput = stdout
-            process.standardError = Pipe()
-            do {
-                try process.run()
-            } catch {
-                return .unknown
-            }
-            process.waitUntilExit()
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?.lowercased() ?? ""
-            if output.contains("disabled") {
-                return .disabled
-            }
-            if output.contains("enabled") {
-                return .enabled
-            }
+        // Wrapped in `Subprocess.run` so a wedged
+        // `socketfilterfw` (which can happen on managed Macs with
+        // certain MDM extensions) cannot freeze app boot. The
+        // 5-second timeout is well above the typical sub-100 ms
+        // response and short enough to keep the launch sequence
+        // responsive.
+        let result: SubprocessResult
+        do {
+            result = try await Subprocess.run(
+                executable: socketFilterURL,
+                arguments: ["--getglobalstate"],
+                timeout: 5
+            )
+        } catch {
             return .unknown
-        }.value
+        }
+        let output = result.stdout.lowercased()
+        if output.contains("disabled") {
+            return .disabled
+        }
+        if output.contains("enabled") {
+            return .enabled
+        }
+        return .unknown
     }
 }

@@ -54,9 +54,28 @@ pub async fn run_probe(opts: &ProbeOptions) -> std::io::Result<LatencySample> {
     }
 
     cmd.arg("-w").arg(WRITE_OUT_FORMAT).arg(&opts.url);
+    // Reap the curl child if the diagnostic Task is cancelled
+    // — without this, every cancelled probe leaks a curl process
+    // until the kernel finally closes its sockets.
+    cmd.kill_on_drop(true);
 
     let started = tokio::time::Instant::now();
-    let output = cmd.output().await?;
+    // Outer Tokio-side timeout in case curl itself wedges in
+    // libc's getaddrinfo or similar — `--max-time` only governs
+    // the request itself once curl is in its event loop.
+    // Add 5 seconds of slack so curl's normal slow-path finishes
+    // first; only truly-stuck processes hit our outer ceiling.
+    let outer_deadline =
+        std::time::Duration::from_secs(u64::from(opts.max_time_secs).saturating_add(5));
+    let output = match tokio::time::timeout(outer_deadline, cmd.output()).await {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "curl did not return within the outer deadline",
+            ));
+        }
+    };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
