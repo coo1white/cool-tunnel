@@ -163,10 +163,14 @@ public struct SettingsView: View {
         }
         .padding(16)
         .background {
-            // Opaque card behind the inline Settings so the
-            // mode-aware window background underneath doesn't
-            // bleed through and clash with the Form chrome.
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            // Flat fill (not a RoundedRectangle) — combining a
+            // rounded shape with `.ignoresSafeArea()` would extend
+            // the rounded corners off-screen, leaving a visible
+            // square edge where the radius lives outside the
+            // visible region. The Settings panel reads as a
+            // full-window slide-in, so a flat background is what
+            // the layout actually wants.
+            Rectangle()
                 .fill(CTPalette.platinum.opacity(0.6))
                 .ignoresSafeArea()
         }
@@ -208,7 +212,10 @@ public struct SettingsView: View {
             HStack(spacing: 8) {
                 Image(systemName: host.architecture == .appleSilicon ? "cpu" : "desktopcomputer")
                     .font(.title3)
-                    .foregroundStyle(.tint)
+                    // Curated palette colour, not the system tint —
+                    // the latter renders as Apple aqua and clashes
+                    // with the System 7-leaning palette.
+                    .foregroundStyle(CTPalette.macBlue)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(host.architecture.displayName)
                         .font(.body.weight(.semibold))
@@ -354,7 +361,7 @@ public struct SettingsView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill((verdict.ok ? Color.green : Color.red).opacity(0.10))
             }
         } else if let pickerError = binaryPickerError {
@@ -373,7 +380,7 @@ public struct SettingsView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Color.red.opacity(0.10))
             }
         } else {
@@ -403,12 +410,19 @@ public struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(updaterMessageColor)
                     .lineLimit(2)
+                    // Long failure messages (URLs, hashes, server
+                    // errors) get truncated by `lineLimit(2)`. The
+                    // hover tooltip + selectable text gives users
+                    // a way to read or copy the full string for
+                    // support tickets.
+                    .help(message)
+                    .textSelection(.enabled)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(.quaternary.opacity(0.5))
         }
     }
@@ -465,6 +479,13 @@ public struct SettingsView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Hover tooltip + selection so users can read or
+                // copy a long path/version even when it's
+                // middle-truncated. Diagnostic info — exactly
+                // what's hidden by truncation is what the user
+                // wants when they're in Settings.
+                .help(value)
+                .textSelection(.enabled)
         }
     }
 
@@ -629,33 +650,63 @@ public struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(appVersion.displayString)
                     .font(.callout.weight(.medium))
-                Text("Apache 2.0 · Maltese theme · macOS 12+")
+                // Footer text reflects the actual current state:
+                // Apache 2.0 licence, classic Macintosh theme (the
+                // codebase used to be the "Maltese" theme before
+                // the v0.1.5.7 platinum retune), and the real
+                // deployment-target floor of macOS 14 (was
+                // claiming "12+" since before the floor was raised
+                // for performance work).
+                Text("Apache 2.0 · Classic Mac theme · macOS 14+")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             Image(systemName: "pawprint.fill")
-                .foregroundStyle(.tint)
+                // Use the curated Mac blue token, not the system
+                // tint which renders as Apple aqua and clashes
+                // with the System 7-leaning palette.
+                .foregroundStyle(CTPalette.macBlue)
         }
     }
 
     private var domainList: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(draft.directDomains, id: \.self) { domain in
-                HStack {
-                    Text(domain)
-                        .font(CTTypography.mono)
-                    Spacer()
-                    Button(role: .destructive) {
-                        draft.directDomains.removeAll { $0 == domain }
-                    } label: {
-                        Image(systemName: "minus.circle")
+        // Cap the inline list height so very long direct-domain
+        // lists (smart-mode users with hundreds of entries) don't
+        // push every section below — Naive Binary, Rust Core,
+        // About — off-screen. The inner ScrollView keeps the
+        // entries reachable while the surrounding Form keeps the
+        // section structure stable.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(draft.directDomains, id: \.self) { domain in
+                    HStack {
+                        Text(domain)
+                            .font(CTTypography.mono)
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button(role: .destructive) {
+                            draft.directDomains.removeAll { $0 == domain }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                                // Pad to a 24×24 hit target so
+                                // the destructive action is
+                                // reachable on trackpad / touch
+                                // input — the bare 16pt SF Symbol
+                                // was below comfortable click
+                                // accuracy.
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove \(domain)")
+                        .accessibilityLabel("Remove \(domain)")
                     }
-                    .buttonStyle(.plain)
+                    .padding(.vertical, 2)
                 }
-                .padding(.vertical, 2)
             }
         }
+        .frame(maxHeight: 220)
     }
 
     private func addDomain() {
@@ -893,6 +944,11 @@ public struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(rustUpdaterMessageColor)
                     .lineLimit(2)
+                    // Same hover-and-select treatment as the naive
+                    // updater message — long failure strings stay
+                    // copyable for support tickets.
+                    .help(message)
+                    .textSelection(.enabled)
             }
         }
         .padding(.horizontal, 8)

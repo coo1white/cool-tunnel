@@ -38,7 +38,13 @@ public struct ControlPanelView: View {
     public var body: some View {
         HStack(spacing: 12) {
             modePicker
-            Divider().frame(height: 28).opacity(0.3)
+            // Hairline using the same borderInk family as the rest
+            // of the design system, instead of the system Divider's
+            // adaptive grey at low opacity. Reads as part of the
+            // platinum theme rather than chrome.
+            Capsule()
+                .fill(CTPalette.borderInk.opacity(0.35))
+                .frame(width: 1, height: 22)
             stopButton
             diagnosticsButton
             latencyMenu
@@ -180,18 +186,38 @@ public struct ControlPanelView: View {
             Button("Global route") {
                 Task { await orchestrator.runLatencyTest(mode: .global) }
             }
+            // Local mode bypasses the proxy, so there is no
+            // "via-proxy" latency to measure. Show the option so
+            // users don't think it's missing — disabled with a
+            // tooltip explains it in one line.
+            Button("Local route (bypasses proxy)") {}
+                .disabled(true)
+                .help("Local mode runs naive on 127.0.0.1 without changing the system proxy — there is no proxied path to measure.")
         } label: {
             Label("Latency", systemImage: "speedometer")
+                // Same single-line guard as ModeChipStyle /
+                // SoftButtonStyle so a localized "Latency" label
+                // never wraps mid-row.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .menuStyle(.borderlessButton)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        // Padding tightened from 14/9 to 12/7 so the menu sits at
+        // the same height as the surrounding SoftButtonStyle
+        // buttons (Stop / Diag / Settings); the row no longer
+        // jumps height when the menu opens.
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
         .background {
             Capsule(style: .continuous).fill(.ultraThinMaterial)
         }
         .overlay {
+            // Stroke is the same `borderInk × 0.35` the rest of
+            // the design system uses, replacing the lilac that
+            // shipped before and disagreed with the mode-aware
+            // tinting story.
             Capsule(style: .continuous).strokeBorder(
-                (orchestrator.isRunning ? CTPalette.lilac : .secondary).opacity(0.30),
+                CTPalette.borderInk.opacity(orchestrator.isRunning ? 0.40 : 0.20),
                 lineWidth: 0.6
             )
         }
