@@ -59,7 +59,10 @@ public struct ConnectionFormView: View {
                 .disabled(orchestrator.profiles.count <= 1)
             }
 
-            if orchestrator.selectedProfile != nil {
+            if let profile = orchestrator.selectedProfile {
+                if isPlaceholderProfile(profile) {
+                    firstRunHint
+                }
                 form
             } else {
                 Text("No profile selected.").foregroundStyle(.secondary)
@@ -67,6 +70,51 @@ public struct ConnectionFormView: View {
         }
         .padding(16)
         .pupCard(cornerRadius: 8, tint: CTPalette.skyBlue)
+    }
+
+    /// Inline help banner that appears whenever the form still
+    /// holds the bundled `Profile.default` placeholder values.
+    /// First-run users open the app and see template text in
+    /// every field; this banner spells out that those fields
+    /// expect their *real* server details before Start will work.
+    private var firstRunHint: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lightbulb.fill")
+                .foregroundStyle(CTPalette.macBlue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("First time? Replace the template values below.")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(CTPalette.bodyInk)
+                Text(
+                    "Server, Username, and Password should be the ones from your "
+                        + "NaiveProxy server (see NaiveProxy_Server_Setup.md if you "
+                        + "haven't set one up yet). Local Port can stay at 1080."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(CTPalette.macBlueSoft.opacity(0.18))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(CTPalette.macBlue.opacity(0.30), lineWidth: 0.6)
+        }
+    }
+
+    /// True when the selected profile still carries the bundled
+    /// placeholder values from `Profile.default` — i.e. the user
+    /// hasn't customised it yet.
+    private func isPlaceholderProfile(_ profile: Profile) -> Bool {
+        profile.server == "naive.example.com"
+            || profile.server.isEmpty
+            || profile.username.isEmpty
+            || profile.password.isEmpty
     }
 
     private var form: some View {
