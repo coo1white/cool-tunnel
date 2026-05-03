@@ -101,6 +101,6 @@ public struct MigratingCredentialStore: CredentialStore {
     }
 }
 
-// MARK: - Conformances for the existing concrete stores
-
-extension KeychainStore: CredentialStore {}
+// `KeychainStore`'s `CredentialStore` conformance lives in
+// `KeychainStore.swift` per Swift convention (conformances belong
+// with the type, not the protocol).

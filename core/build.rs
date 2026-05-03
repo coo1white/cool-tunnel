@@ -1,19 +1,22 @@
-// build.rs
-//
-// Embed build-time metadata into the cool-tunnel-core binary so
-// `--version` is self-describing for support tickets:
-//
-//   $ cool-tunnel-core --version
-//   cool-tunnel-core 0.1.6
-//   build:    abc1234 2026-05-03 (release)
-//
-// The first line is the canonical wire format the Swift
-// `RustCoreResolver` greps for — keep it as `cool-tunnel-core <semver>`
-// so the resolver stays stable. Everything below is pure addition.
-//
-// LTSC posture: we shell out to `git` and `date` rather than pulling
-// in a build-deps crate. Fewer transitive dependencies = fewer
-// surprises across the support window.
+//! Cargo build script for `cool-tunnel-core`.
+//!
+//! Embeds build-time metadata into the binary so `--version` is
+//! self-describing for support tickets:
+//!
+//! ```text
+//! $ cool-tunnel-core --version
+//! cool-tunnel-core 0.1.7
+//! build:    abc1234 2026-05-03 (release)
+//! ```
+//!
+//! The first line is the canonical wire format the Swift
+//! `RustCoreResolver` greps for — keep it as
+//! `cool-tunnel-core <semver>` so the resolver stays stable.
+//! Everything below is pure addition.
+//!
+//! LTSC posture: we shell out to `git` and `date` rather than
+//! pulling in a build-deps crate. Fewer transitive dependencies
+//! = fewer surprises across the support window.
 
 use std::process::Command;
 
@@ -38,11 +41,11 @@ fn main() {
 /// `"unknown"` if anything goes wrong. Build scripts must never
 /// fail the build for missing metadata — packaging from a
 /// non-git tarball is a legitimate path.
-fn capture(argv: &[&str]) -> String {
-    let Some((program, args)) = argv.split_first() else {
+fn capture(command_line: &[&str]) -> String {
+    let Some((program, rest)) = command_line.split_first() else {
         return "unknown".to_owned();
     };
-    let Ok(output) = Command::new(program).args(args).output() else {
+    let Ok(output) = Command::new(program).args(rest).output() else {
         return "unknown".to_owned();
     };
     if !output.status.success() {

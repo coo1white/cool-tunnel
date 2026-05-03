@@ -170,19 +170,23 @@ async fn naive_pac(Json(body): Json<NaivePacRequest>) -> Json<NaivePacResponse> 
 
 // MARK: - Error type
 
-/// Single error envelope so handler code can `?` into it. Only
-/// the `internal` flavour exists today; add more as the API grows.
-struct ApiError {
-    status: StatusCode,
-    message: String,
+/// Error envelope for handler code. Each variant maps to a
+/// specific HTTP status in `into_response`; future handlers can
+/// add their own variants instead of squeezing every failure into
+/// 500. `Debug` is derived so handlers can `tracing::error!(?err)`
+/// without a re-write.
+#[derive(Debug)]
+enum ApiError {
+    /// HTTP 400 — caller-visible bad input.
+    #[allow(dead_code)] // First handler that needs it brings it to life.
+    BadRequest(String),
+    /// HTTP 500 — server-side failure with an opaque message.
+    Internal(String),
 }
 
 impl ApiError {
     fn internal(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: message.into(),
-        }
+        Self::Internal(message.into())
     }
 }
 
@@ -192,12 +196,10 @@ impl IntoResponse for ApiError {
         struct Body {
             error: String,
         }
-        (
-            self.status,
-            Json(Body {
-                error: self.message,
-            }),
-        )
-            .into_response()
+        let (status, message) = match self {
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        };
+        (status, Json(Body { error: message })).into_response()
     }
 }

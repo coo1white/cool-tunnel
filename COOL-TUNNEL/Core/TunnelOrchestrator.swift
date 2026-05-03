@@ -59,13 +59,20 @@ public final class TunnelOrchestrator {
     /// pause-spikes if naive starts streaming hundreds of lines a
     /// second on a flaky network.
     private let maxLogEntries: Int = PerformanceProfile.current.maxLogEntries
-    /// Re-entrancy guard for [`refreshNaiveDescriptor`]. The Settings
-    /// view's `.task` can fire two refreshes back-to-back if the user
-    /// opens / dismisses / reopens the sheet quickly; without this
-    /// guard each invocation would spawn its own `lipo` + `--version`
-    /// subprocess pair and stomp the cached descriptor with whichever
-    /// returned last (not necessarily the most recent settings).
-    private var isRefreshingNaive: Bool = false
+    /// In-flight task for [`refreshNaiveDescriptor`]. The Settings
+    /// view's `.task` can fire two refreshes back-to-back if the
+    /// user opens / dismisses / reopens the sheet quickly; without
+    /// this each invocation would spawn its own `lipo` +
+    /// `--version` subprocess pair and stomp the cached descriptor.
+    /// Late callers `await` the existing task instead of spinning
+    /// (the old `while … { await Task.yield() }` was a MainActor
+    /// busy-loop that pinned a CPU under contention).
+    private var refreshNaiveTask: Task<Void, Never>?
+
+    /// In-flight debounced settings autosave; cancelled and
+    /// replaced on every `persistSettings()` call so a rapid burst
+    /// of edits collapses into a single write.
+    private var persistSettingsTask: Task<Void, Never>?
 
     /// Cached descriptor for the naive binary the app is currently
     /// configured to spawn. Populated on bootstrap and after each
@@ -73,9 +80,12 @@ public final class TunnelOrchestrator {
     /// summary without firing extra subprocesses.
     public private(set) var activeNaiveDescriptor: NaiveBinaryDescriptor?
 
-    /// Detected host CPU. Exposed so the Settings view can render
-    /// "This Mac: Apple Silicon" without re-querying sysctl.
-    public let hostArchitecture: HostArchitecture = .current
+    // `hostArchitecture` was previously re-exported here as a
+    // convenience for the Settings view. Removed because
+    // `HostArchitecture.current` is itself a static cached value
+    // — the orchestrator was just a second alias adding no value
+    // and inflating its public surface. Settings now reads
+    // `HostArchitecture.current` directly.
 
     // MARK: - Construction
 
@@ -100,11 +110,22 @@ public final class TunnelOrchestrator {
     /// Builds an orchestrator wired with default dependencies sourced from
     /// the running app bundle.
     public static func bootstrap() -> TunnelOrchestrator {
+        // Try the real Application Support directory first. If that
+        // genuinely cannot be created (sandbox quirk, broken home
+        // dir, full disk on `/Users`) we degrade to a temporary
+        // directory and surface the failure as `lastError` after
+        // construction — the user sees a real error message
+        // explaining why Start fails, instead of a `fatalError`
+        // that takes down the app with no UI feedback. LTSC users
+        // landing security fixes in 2027 cannot afford boot-time
+        // crashes that bypass every diagnostic surface.
         let paths: AppSupportPaths
+        var bootstrapError: String?
         do {
             paths = try AppSupportPaths()
         } catch {
-            fatalError("unable to create application support directory: \(error)")
+            bootstrapError = "Application Support unavailable: \(error.localizedDescription) — engine will refuse to start. Free disk space and relaunch."
+            paths = AppSupportPaths.fallback()
         }
 
         // Pick the engine binary the orchestrator will spawn. The
@@ -140,7 +161,7 @@ public final class TunnelOrchestrator {
             primary: fileStore,
             legacy: KeychainStore()
         )
-        return TunnelOrchestrator(
+        let orchestrator = TunnelOrchestrator(
             core: CoreClient(executableURL: executableURL),
             proxyController: SystemProxyController(),
             firewall: FirewallProbe(),
@@ -148,6 +169,10 @@ public final class TunnelOrchestrator {
             settingsStore: SettingsStore(),
             paths: paths
         )
+        if let bootstrapError {
+            orchestrator.lastError = bootstrapError
+        }
+        return orchestrator
     }
 
     // MARK: - Bootstrap
@@ -164,7 +189,6 @@ public final class TunnelOrchestrator {
     /// may never need (read-only profile browsing doesn't spawn naive).
     public func bootstrapIfNeeded() async {
         guard !didBootstrap else { return }
-        didBootstrap = true
 
         profiles = profileStore.loadProfiles()
         selectedProfileID = profileStore.loadSelectedID() ?? profiles.first?.id
@@ -174,6 +198,11 @@ public final class TunnelOrchestrator {
         do {
             try await core.start()
             subscribeToEvents()
+            // Only flip the guard on success so a future call (e.g.
+            // a Retry button after a transient launch failure) can
+            // re-attempt the engine spawn instead of permanently
+            // short-circuiting on the previous failure.
+            didBootstrap = true
         } catch {
             recordError("engine failed to start: \(error)")
         }
@@ -190,28 +219,32 @@ public final class TunnelOrchestrator {
     /// only one inspection runs at a time; subsequent callers get the
     /// cached descriptor produced by the first call.
     public func refreshNaiveDescriptor() async {
-        if isRefreshingNaive {
-            // Wait for the in-flight refresh to publish, then return.
-            // Polling at the actor's natural cadence is fine here —
-            // descriptors take subprocess-call time, not microseconds.
-            while isRefreshingNaive { await Task.yield() }
+        // Coalesce concurrent refreshes onto the in-flight task
+        // instead of spinning. The previous `while isRefreshingNaive
+        // { await Task.yield() }` was a MainActor busy-loop — under
+        // contention it pinned a CPU and starved the UI. Holding a
+        // single shared `Task` lets late callers `await` for free,
+        // and dropping the cached task inside `defer` means the next
+        // call genuinely re-runs the resolver.
+        if let inFlight = refreshNaiveTask {
+            await inFlight.value
             return
         }
-        isRefreshingNaive = true
-        defer { isRefreshingNaive = false }
-        do {
-            activeNaiveDescriptor = try await naiveResolver.resolve(settings: settings)
-        } catch let error as NaiveResolverError {
-            // The failure modes here all *prevent the proxy from
-            // starting* (missing slice, bad signature, missing file).
-            // Surface as a real error so the UI can highlight it; the
-            // log line is still emitted for developer triage.
-            recordError("naive binary unusable: \(error.localizedDescription)")
-            activeNaiveDescriptor = nil
-        } catch {
-            recordError("naive binary inspection failed: \(error.localizedDescription)")
-            activeNaiveDescriptor = nil
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.activeNaiveDescriptor = try await self.naiveResolver.resolve(settings: self.settings)
+            } catch let error as NaiveResolverError {
+                self.recordError("naive binary unusable: \(error.localizedDescription)")
+                self.activeNaiveDescriptor = nil
+            } catch {
+                self.recordError("naive binary inspection failed: \(error.localizedDescription)")
+                self.activeNaiveDescriptor = nil
+            }
         }
+        refreshNaiveTask = task
+        await task.value
+        refreshNaiveTask = nil
     }
 
     /// Stops the engine and reverts the system proxy. Called from
@@ -221,6 +254,10 @@ public final class TunnelOrchestrator {
     /// expected (and not an engine crash).
     public func shutdown() async {
         isShuttingDown = true
+        // Flush any pending debounced settings write before we go
+        // away — without this, a settings edit made <250ms before
+        // Cmd+Q would be silently dropped.
+        flushSettings()
         eventTask?.cancel()
         eventTask = nil
         try? await proxyController.disableAll()
@@ -281,7 +318,27 @@ public final class TunnelOrchestrator {
         profileStore.deletePassword(forProfileID: id)
     }
 
+    /// Debounced settings autosave. The Settings view binds form
+    /// fields directly to `settings` and calls this on every
+    /// keystroke; the previous unconditional `settingsStore.save`
+    /// wrote the full UserDefaults blob once per character. The
+    /// 250ms coalesce window means a typed paragraph turns into a
+    /// single write; an explicit `commit()` (Done button) still
+    /// flushes immediately via `flushSettings()`.
     public func persistSettings() {
+        persistSettingsTask?.cancel()
+        persistSettingsTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.settingsStore.save(self.settings)
+        }
+    }
+
+    /// Skip the debounce window and write `settings` synchronously.
+    /// Use from explicit commit points (Done button, app shutdown).
+    public func flushSettings() {
+        persistSettingsTask?.cancel()
+        persistSettingsTask = nil
         settingsStore.save(settings)
     }
 
@@ -395,7 +452,7 @@ public final class TunnelOrchestrator {
         guard case .naiveConfig(let configJSON) = configResponse else {
             throw OrchestratorError.unexpectedResponse
         }
-        try writeRestrictedFile(configJSON, to: paths.configFile)
+        try RestrictedFile.write(configJSON, to: paths.configFile)
 
         let port = try parsePort(profile.localPort)
 
@@ -406,7 +463,7 @@ public final class TunnelOrchestrator {
             guard case .pac(let pacJS) = pacResponse else {
                 throw OrchestratorError.unexpectedResponse
             }
-            try writeRestrictedFile(pacJS, to: paths.pacFile)
+            try RestrictedFile.write(pacJS, to: paths.pacFile)
         }
 
         // Resolve the naive binary through the dedicated resolver: it

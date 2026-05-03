@@ -33,3 +33,9 @@ pub mod protocol;
 pub mod redaction;
 pub mod supervisor;
 pub mod util;
+
+// Re-export the canonical crate-wide error so consumers can write
+// `cool_tunnel_core::CoreError` instead of the longer
+// `cool_tunnel_core::error::CoreError`. Reduces refactor blast
+// radius if `error` ever moves into a parent module.
+pub use error::CoreError;

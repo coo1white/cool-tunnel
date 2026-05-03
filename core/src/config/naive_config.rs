@@ -12,10 +12,8 @@
 
 use serde::Serialize;
 
+use crate::config::LOOPBACK_HOST;
 use crate::domain::{Credentials, Port, Profile, ServerAddress};
-
-/// Loopback address the SOCKS listener binds to.
-const LOOPBACK_HOST: &str = "127.0.0.1";
 
 /// JSON config consumed by the bundled `naive` binary.
 ///
@@ -59,8 +57,8 @@ fn build_proxy_url(server: &ServerAddress, credentials: &Credentials) -> String 
     let encoded = credentials.percent_encoded();
     format!(
         "https://{user}:{pass}@{server}",
-        user = encoded.username,
-        pass = encoded.password,
+        user = encoded.username(),
+        pass = encoded.password(),
         server = server,
     )
 }

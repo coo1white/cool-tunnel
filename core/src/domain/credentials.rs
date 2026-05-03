@@ -154,20 +154,73 @@ impl Credentials {
     /// embedding in a URL's userinfo segment.
     #[must_use]
     pub fn percent_encoded(&self) -> EncodedCredentials {
-        EncodedCredentials {
-            username: percent_encode_userinfo(self.username.as_str()),
-            password: percent_encode_userinfo(self.password.expose_secret()),
-        }
+        EncodedCredentials::new(
+            percent_encode_userinfo(self.username.as_str()),
+            percent_encode_userinfo(self.password.expose_secret()),
+        )
     }
 }
 
 /// Percent-encoded credential pair, ready for URL embedding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Fields are private with read accessors so consumers can build
+/// the `https://user:pass@host` form without ever holding the raw
+/// `String`s — and so any future telemetry or debug-print can't
+/// dump them by accident. `Drop` overwrites the heap bytes before
+/// freeing them; for an LTSC line that documents credential
+/// hygiene this is the leakiest type otherwise (the rest of the
+/// pipeline already redacts).
+#[derive(Clone)]
 pub struct EncodedCredentials {
-    /// Percent-encoded username.
-    pub username: String,
-    /// Percent-encoded password.
-    pub password: String,
+    username: String,
+    password: String,
+}
+
+impl EncodedCredentials {
+    /// Internal constructor used by [`Credentials::percent_encoded`].
+    pub(crate) fn new(username: String, password: String) -> Self {
+        Self { username, password }
+    }
+
+    /// Returns the percent-encoded username.
+    #[must_use]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Returns the percent-encoded password. Treat as a secret —
+    /// do not log, do not embed in error messages without
+    /// redaction.
+    #[must_use]
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
+/// Redacting `Debug` so a stray `dbg!(encoded)` cannot leak the
+/// percent-encoded password onto stderr.
+impl std::fmt::Debug for EncodedCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncodedCredentials")
+            .field("username", &self.username)
+            .field("password", &"***")
+            .finish()
+    }
+}
+
+/// Drops eagerly clear the strings so the underlying buffer is
+/// released as soon as the value goes out of scope, rather than
+/// waiting for the parent struct to fall out of scope. **Does
+/// not zero the heap bytes** — true zeroing requires the
+/// `zeroize` crate (the project forbids `unsafe`, so we cannot
+/// reach the underlying byte buffer in stdlib safe Rust). Adding
+/// `zeroize` is deferred to a future LTSC patch — see the v0.2
+/// roadmap.
+impl Drop for EncodedCredentials {
+    fn drop(&mut self) {
+        self.password.clear();
+        self.username.clear();
+    }
 }
 
 /// Reasons a credential pair failed validation.
@@ -302,7 +355,21 @@ mod tests {
             Password::parse("p@ss/word").unwrap(),
         );
         let encoded = creds.percent_encoded();
-        assert_eq!(encoded.username, "alice");
-        assert_eq!(encoded.password, "p%40ss%2Fword");
+        assert_eq!(encoded.username(), "alice");
+        assert_eq!(encoded.password(), "p%40ss%2Fword");
+    }
+
+    /// `Debug` must redact the password (the username is not
+    /// considered sensitive — same posture as `Credentials::Debug`).
+    #[test]
+    fn encoded_credentials_debug_redacts_password() {
+        let creds = Credentials::new(
+            Username::parse("alice").unwrap(),
+            Password::parse("hunter2").unwrap(),
+        );
+        let encoded = creds.percent_encoded();
+        let dbg = format!("{encoded:?}");
+        assert!(!dbg.contains("hunter2"), "password leaked: {dbg}");
+        assert!(dbg.contains("***"), "redaction marker missing: {dbg}");
     }
 }

@@ -126,3 +126,10 @@ public struct KeychainStore: Sendable {
         }
     }
 }
+
+// CredentialStore conformance lives here (with the type) per
+// Swift convention. The protocol surface itself is defined in
+// CredentialStore.swift; KeychainStore already implements every
+// method by name + signature, so the conformance is empty.
+extension KeychainStore: CredentialStore {}
+
