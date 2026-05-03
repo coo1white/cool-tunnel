@@ -4,6 +4,7 @@ use tokio::process::Command;
 
 use crate::domain::Port;
 use crate::protocol::LatencySample;
+use crate::redaction;
 
 use super::metrics::{parse_write_out, secs_to_ms};
 
@@ -66,6 +67,11 @@ pub async fn run_probe(opts: &ProbeOptions) -> std::io::Result<LatencySample> {
 
     let ok = output.status.success() && http_code != "000";
 
+    // curl's stderr can include the full proxy URL (with embedded
+    // userinfo) and any auth/cookie headers from the failure path.
+    // Redact before stringifying so the note we ship over the wire,
+    // log to stderr, or surface to the UI never carries secrets even
+    // when a future code change starts passing credentials to curl.
     let notes = if ok {
         format!("HTTP {http_code} via curl exit {}", output.status)
     } else {
@@ -73,7 +79,8 @@ pub async fn run_probe(opts: &ProbeOptions) -> std::io::Result<LatencySample> {
         if trimmed.is_empty() {
             format!("HTTP {http_code} via curl exit {}", output.status)
         } else {
-            format!("curl exit {}: {trimmed}", output.status)
+            let redacted = redaction::redact(trimmed);
+            format!("curl exit {}: {redacted}", output.status)
         }
     };
 
