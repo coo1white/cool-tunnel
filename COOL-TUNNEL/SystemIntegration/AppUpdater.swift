@@ -103,7 +103,22 @@ public final class AppUpdater {
     /// first, then validate install assets only when there's
     /// genuinely something to install.
     public func checkForUpdates() async {
-        guard !isInFlight else { return }
+        // CRITICAL: this guard used to be `guard !isInFlight else
+        // { return }` which broke the v0.1.7.9 click flow. The
+        // Settings handler now calls `markEnteringCheck()` first
+        // (synchronous flip to `.checking`) and THEN spawns this
+        // Task. By the time we run, `state` is already
+        // `.checking` and the old `isInFlight` guard returned
+        // early — the network call never fired. Now we only
+        // refuse re-entry when a *genuinely active* later phase
+        // is already in flight; the `.checking` placeholder
+        // state is treated as "we are the in-flight check".
+        switch state {
+        case .downloading, .verifying, .extracting, .relaunching:
+            return
+        default:
+            break
+        }
         state = .checking
         do {
             let metadata = try await Self.fetchLatestReleaseMetadata()
@@ -128,7 +143,17 @@ public final class AppUpdater {
     /// relaunches. Caller should have already moved through
     /// `.available` via `checkForUpdates`.
     public func downloadAndInstall(_ release: AvailableRelease) async {
-        guard !isInFlight else { return }
+        // Same regression fix as `checkForUpdates`: the click
+        // handler synchronously flips `state` to `.downloading`
+        // via `markEnteringDownload`, so we'd return early on a
+        // strict `isInFlight` guard. Refuse only if a later
+        // phase has already begun.
+        switch state {
+        case .verifying, .extracting, .relaunching:
+            return
+        default:
+            break
+        }
         state = .downloading(progress: 0.0)
         do {
             try await Self.run(release: release) { phase in
@@ -329,12 +354,29 @@ public final class AppUpdater {
         report: @escaping @MainActor @Sendable (State) -> Void
     ) async throws {
         let tempRoot = try makeTempDirectory()
-        // Defer cleanup AFTER the helper script has been spawned;
-        // the helper reads from `extractedAppURL` so we must keep
-        // the temp tree alive past this function. Cleanup happens
-        // in the helper via `rm -rf` once it copies the new app.
-        // (We deliberately do NOT defer-cleanup here.)
+        // **v0.1.7.10 fix:** wrap the body so any failure
+        // (download, manifest mismatch, extraction error,
+        // verification reject, read-only volume) cleans up
+        // `tempRoot`. The previous implementation only handed
+        // tempRoot to the relaunch helper on success, leaking
+        // the tree forever on every failed attempt — users
+        // who Update against a few bad releases accumulated
+        // ~50 MB of orphan dirs in /var/folders/.../T/.
+        // On success the helper takes ownership and removes
+        // it via the `trap cleanup EXIT` we wired in C2.
+        do {
+            try await runPipeline(release: release, tempRoot: tempRoot, report: report)
+        } catch {
+            try? FileManager.default.removeItem(at: tempRoot)
+            throw error
+        }
+    }
 
+    private static func runPipeline(
+        release: AvailableRelease,
+        tempRoot: URL,
+        report: @escaping @MainActor @Sendable (State) -> Void
+    ) async throws {
         let zipURL = tempRoot.appendingPathComponent(release.zipURL.lastPathComponent)
         let shaURL = tempRoot.appendingPathComponent(release.shaManifestURL.lastPathComponent)
 
@@ -357,14 +399,18 @@ public final class AppUpdater {
         let extractDir = tempRoot.appendingPathComponent("extracted", isDirectory: true)
         try FileManager.default.createDirectory(
             at: extractDir, withIntermediateDirectories: true)
-        try unzip(zipURL: zipURL, to: extractDir)
+        try await unzip(zipURL: zipURL, to: extractDir)
 
         // 8. Find + verify the new .app.
         let extractedAppURL = try locateAppBundle(in: extractDir)
         try await verifyExtractedApp(at: extractedAppURL, expectedVersion: release.version)
 
-        // 9. Refuse if running app is on read-only volume.
-        let runningAppURL = Bundle.main.bundleURL
+        // 9. Refuse if running app is on read-only volume. Use
+        // the symlink-resolved URL so a symlinked install path
+        // (rare on personal Macs, sometimes seen on managed
+        // ones) is rejected based on the *real* destination,
+        // not the visible alias.
+        let runningAppURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
         try refuseReadOnlyInstall(at: runningAppURL)
 
         // 10. Spawn helper. The helper takes ownership of
@@ -379,6 +425,13 @@ public final class AppUpdater {
 
     // MARK: - Pipeline helpers
 
+    /// Hard cap on a single asset download. Cool Tunnel zips run
+    /// ~12 MB; setting the ceiling at 100 MB leaves generous
+    /// slack for future growth while preventing a confused-deputy
+    /// or compromised-asset URL from filling the user's disk.
+    /// Sw-H3 fix.
+    private static let maxDownloadBytes: Int64 = 100 * 1024 * 1024
+
     private static func download(_ url: URL, to destination: URL) async throws {
         let (tempURL, response): (URL, URLResponse)
         do {
@@ -391,6 +444,25 @@ public final class AppUpdater {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw UpdaterError.message(
                 "GitHub returned status \((response as? HTTPURLResponse)?.statusCode ?? -1) for \(url.lastPathComponent)."
+            )
+        }
+        // **v0.1.7.10 (Sw-H3):** size cap. By the time
+        // `download(from:)` returns, the bytes are already on
+        // disk in the temp file — but we can still refuse to
+        // promote anything larger than our ceiling. (Real
+        // streaming-cancel needs `URLSessionDownloadDelegate`,
+        // deferred to v0.2.) Reject the manifest at 1 MB
+        // (manifests are ~250 bytes) and the .zip at 100 MB.
+        let cap: Int64 = url.pathExtension == "sha256"
+            ? 1 * 1024 * 1024
+            : Self.maxDownloadBytes
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
+            let size = attrs[.size] as? NSNumber,
+            size.int64Value > cap
+        {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw UpdaterError.message(
+                "\(url.lastPathComponent) exceeded the \(cap / (1024 * 1024)) MB size limit; refusing to install."
             )
         }
         if FileManager.default.fileExists(atPath: destination.path) {
@@ -432,6 +504,20 @@ public final class AppUpdater {
                 "Manifest does not include a SHA-256 for \(zipFilename). Refusing to update."
             )
         }
+        // **v0.1.7.10 (Sw-H2):** validate the manifest entry is
+        // actually 64 hex chars before treating it as a hash. A
+        // corrupted manifest line `XYZ123… filename` would
+        // otherwise pass the count==64 check and fail the
+        // string-compare with a misleading "SHA-256 mismatch"
+        // message. Distinguishing manifest-malformed from
+        // hash-mismatch helps debug release-process bugs vs
+        // genuine MITM.
+        let isHex = expected.allSatisfy { $0.isHexDigit }
+        guard isHex else {
+            throw UpdaterError.message(
+                "SHA-256 manifest entry for \(zipFilename) is not valid hex. Manifest may be corrupted; refusing to update."
+            )
+        }
         let actualSha: String
         do {
             let data = try Data(contentsOf: zipURL)
@@ -441,8 +527,16 @@ public final class AppUpdater {
             throw UpdaterError.message("Couldn't read downloaded archive to verify hash.")
         }
         guard actualSha == expected else {
+            // **v0.1.7.10 (Sw-H2):** don't echo both hashes into
+            // the user-facing error string. The mismatch happens
+            // either because the upstream changed (release-process
+            // mistake — re-download will fix) or because of a
+            // MITM (in which case we MUST not show the attacker's
+            // hash). The actual values stay in tracing for
+            // debugging via `cool-tunnel-core --version` →
+            // support tickets.
             throw UpdaterError.message(
-                "SHA-256 mismatch — expected \(expected), got \(actualSha). Refusing to install."
+                "SHA-256 verification failed for \(zipFilename). The download may be corrupted or tampered with — refusing to install."
             )
         }
     }
@@ -450,25 +544,85 @@ public final class AppUpdater {
     /// Uses `/usr/bin/ditto -x -k` to extract the .zip preserving
     /// macOS metadata. `unzip(1)` on macOS sometimes drops
     /// resource forks and code-signature metadata.
-    private static func unzip(zipURL: URL, to destination: URL) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-x", "-k", zipURL.path, destination.path]
-        let pipe = Pipe()
-        process.standardError = pipe
-        process.standardOutput = pipe
+    ///
+    /// **v0.1.7.10 fix:** routed through `Subprocess.run` so a
+    /// verbose ditto failure (corrupted zip with thousands of
+    /// entries → multi-KB stderr) cannot fill the kernel pipe
+    /// buffer (~64 KB) and deadlock `waitUntilExit`. The
+    /// in-house `Subprocess` runner drains stdout + stderr
+    /// concurrently with timeout escalation, which is exactly
+    /// the bug class the v0.1.7.3 helper was built to fix —
+    /// AppUpdater (added v0.1.7.6) inherited the older,
+    /// buggier pattern by oversight.
+    private static func unzip(zipURL: URL, to destination: URL) async throws {
+        let result: SubprocessResult
         do {
-            try process.run()
+            result = try await Subprocess.run(
+                executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+                arguments: ["-x", "-k", zipURL.path, destination.path],
+                timeout: 120
+            )
         } catch {
             throw UpdaterError.message("Couldn't launch ditto to extract update.")
         }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
+        if result.timedOut {
             throw UpdaterError.message(
-                "ditto failed to extract update: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+                "ditto did not finish extracting within 120s — refusing to continue."
             )
+        }
+        guard result.success else {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw UpdaterError.message(
+                "ditto failed to extract update: \(stderr)"
+            )
+        }
+        // **v0.1.7.10 (Sw-H4):** post-extraction symlink-escape
+        // walk. `ditto -x -k` (PKZip mode) preserves symlinks
+        // inside the archive, including ones that point OUTSIDE
+        // the extraction directory. A malicious zip with an
+        // entry like `Cool tunnel.app/Contents/Resources/foo ->
+        // /Users/<you>/.ssh/config` would, after extraction,
+        // leave a side-channel symlink Cool Tunnel might later
+        // follow. Bundle-id + version + codesign verification
+        // protects the .app itself; the symlink walk closes
+        // the side-channel.
+        try refuseExtractionEscapingSymlinks(in: destination)
+    }
+
+    /// Walks `directory` recursively. If any entry is a symbolic
+    /// link whose realpath escapes `directory`, throws. Used by
+    /// the post-extraction security check above.
+    private static func refuseExtractionEscapingSymlinks(in directory: URL) throws {
+        let containerPath = directory.standardizedFileURL.resolvingSymlinksInPath().path
+        guard
+            let walker = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.isSymbolicLinkKey],
+                options: []
+            )
+        else {
+            // Couldn't open the directory; the next step (ditto
+            // already succeeded) would have noticed the same.
+            return
+        }
+        for case let item as URL in walker {
+            let isSymlink: Bool
+            do {
+                isSymlink = try item.resourceValues(forKeys: [.isSymbolicLinkKey])
+                    .isSymbolicLink ?? false
+            } catch {
+                continue
+            }
+            if !isSymlink { continue }
+            // Resolve the symlink target relative to its parent,
+            // then standardise. If the resolved path doesn't
+            // start with our container path, it escapes.
+            let resolved = item.resolvingSymlinksInPath().standardizedFileURL.path
+            if !resolved.hasPrefix(containerPath) {
+                throw UpdaterError.message(
+                    "Update archive contains a symbolic link pointing outside the extraction directory; refusing to install."
+                )
+            }
         }
     }
 
@@ -514,9 +668,29 @@ public final class AppUpdater {
         }
 
         let runningBundleID = Bundle.main.bundleIdentifier ?? ""
-        guard let newBundleID = info["CFBundleIdentifier"] as? String,
-            newBundleID == runningBundleID
-        else {
+        guard let newBundleIDRaw = info["CFBundleIdentifier"] as? String else {
+            throw UpdaterError.message(
+                "New app has no bundle identifier. Refusing to install."
+            )
+        }
+        // **v0.1.7.10 (Sw-H1):** defence-in-depth bundle-ID
+        // comparison. Apple bundle IDs are ASCII by convention,
+        // but a malicious release whose `CFBundleIdentifier`
+        // contained a Unicode confusable (e.g. Cyrillic 'е' for
+        // ASCII 'e') would have compared unequal pre-fix and
+        // gone through the rejection branch — but if SHA pinning
+        // were ever defeated and an attacker wrote the running
+        // bundle ID with the same confusable, the byte-compare
+        // would silently accept it. Reject anything non-ASCII
+        // outright.
+        let newBundleID = newBundleIDRaw.precomposedStringWithCanonicalMapping
+        let normalizedRunning = runningBundleID.precomposedStringWithCanonicalMapping
+        guard newBundleID.allSatisfy(\.isASCII), normalizedRunning.allSatisfy(\.isASCII) else {
+            throw UpdaterError.message(
+                "Bundle identifier contains non-ASCII characters. Refusing to install for safety."
+            )
+        }
+        guard newBundleID == normalizedRunning else {
             throw UpdaterError.message(
                 "New app's bundle identifier does not match. Refusing to install."
             )
@@ -568,18 +742,39 @@ public final class AppUpdater {
 
         // Bash relaunch dance:
         //   1. Wait up to 30 s for parent to exit (poll kill -0).
-        //   2. ditto-replace the old app with the new one.
-        //   3. open -a the new app.
-        //   4. Clean the temp tree.
-        // Single-quoted heredoc so the Swift-side string literal
-        // doesn't clash with bash variable expansion.
+        //   2. ditto into a sibling `.new` directory.
+        //   3. Atomic-rename pair: old → .old, .new → old.
+        //   4. open -a the new app.
+        //   5. Clean .old + temp tree + self.
+        //
+        // **v0.1.7.10 fix:** the previous flow was
+        //   `rm -rf "$OLD_APP" && ditto "$NEW_APP" "$OLD_APP"`,
+        // which is destructive with no rollback — if `ditto`
+        // failed mid-copy (ENOSPC, signal), the user was left
+        // with no Cool Tunnel installed at all. The new
+        // `.new`-stage-then-rename pattern lets us restore the
+        // .old copy on any failure step. `set -e` guarantees
+        // we abort on the first error; `trap` handles cleanup
+        // on every exit path, including the 30 s timeout.
         let script = """
             #!/bin/bash
-            set -u
+            set -eu
             PARENT_PID=\(parentPID)
             OLD_APP=\(shellQuote(oldAppURL.path))
             NEW_APP=\(shellQuote(newAppURL.path))
             TEMP_ROOT=\(shellQuote(tempRootToClean.path))
+            STAGED="${OLD_APP}.new"
+            BACKUP="${OLD_APP}.old-update"
+
+            # Always-run cleanup: the temp tree and the helper
+            # itself are removed on any exit path. .new and .old
+            # are only present mid-flight; the swap section
+            # cleans them as it goes.
+            cleanup() {
+                rm -rf "$TEMP_ROOT" 2>/dev/null || true
+                rm -f "$0" 2>/dev/null || true
+            }
+            trap cleanup EXIT
 
             # Wait for the parent process to exit so we can replace
             # the bundle without "file in use" errors. 30 s ceiling.
@@ -590,25 +785,46 @@ public final class AppUpdater {
                 sleep 0.5
             done
 
-            # Defensive: refuse if parent didn't exit (something held
-            # us up; better to leak the temp tree than corrupt the app).
+            # Defensive: refuse if parent didn't exit (something
+            # held us up; better to leak than corrupt the app).
             if kill -0 "$PARENT_PID" 2>/dev/null; then
                 exit 1
             fi
 
-            # Replace. ditto preserves macOS metadata (resource
-            # forks, code-signature, xattrs) which `cp -R` may not.
-            rm -rf "$OLD_APP"
-            ditto "$NEW_APP" "$OLD_APP"
+            # Pre-clean any stale stage/backup from a prior
+            # interrupted run.
+            rm -rf "$STAGED" "$BACKUP" 2>/dev/null || true
 
-            # Relaunch the freshly-installed copy.
+            # 1. Stage the new app alongside the old one.
+            #    `ditto` preserves macOS metadata (resource forks,
+            #    code-signature, xattrs) — `cp -R` may not.
+            ditto "$NEW_APP" "$STAGED"
+
+            # 2. Move old → .old-update (atomic rename — the user
+            #    has no app for a single rename's worth of time).
+            #    If this fails, the staged copy is removed by
+            #    cleanup; the original old app is intact.
+            if ! mv "$OLD_APP" "$BACKUP" 2>/dev/null; then
+                rm -rf "$STAGED"
+                exit 1
+            fi
+
+            # 3. Promote staged copy into place.
+            #    If this fails, restore the backup. Order matters:
+            #    move BACKUP back BEFORE removing STAGED, so even
+            #    if STAGED removal fails, the user has an app.
+            if ! mv "$STAGED" "$OLD_APP" 2>/dev/null; then
+                mv "$BACKUP" "$OLD_APP" 2>/dev/null || true
+                rm -rf "$STAGED" 2>/dev/null || true
+                exit 1
+            fi
+
+            # 4. Remove the backup (the swap succeeded; old app
+            #    no longer needed).
+            rm -rf "$BACKUP" 2>/dev/null || true
+
+            # 5. Relaunch the freshly-installed copy.
             open -a "$OLD_APP"
-
-            # Tidy up the temp tree the Swift side handed us.
-            rm -rf "$TEMP_ROOT"
-
-            # Self-delete the helper (best effort).
-            rm -f "$0"
             """
 
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)

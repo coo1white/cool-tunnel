@@ -58,12 +58,25 @@ const MAX_INFLIGHT_REQUESTS: usize = 32;
 
 /// Engine-wide mutable state. Wrapped in a [`Mutex`] and shared
 /// between the stdin reader and any background tasks.
+///
+/// **v0.1.7.10 additions** (Ru-A1 / Ru-A3):
+/// - `stopping`: dispatcher sets `true` while holding the lock to
+///   block concurrent `start_proxy` from spawning a second naive
+///   while a stop is in flight (Ru-A3 TOCTOU fix). Cleared after
+///   `supervisor.stop().await` returns.
+/// - `emitted_stopped`: at-most-once gate so the natural-death
+///   path in `monitor_loop` and the user-stop path in the
+///   dispatcher don't both emit `StateChanged{false}` for the
+///   same transition (Ru-A1 single-emitter discipline). Reset
+///   to `false` on every successful `start_proxy`.
 #[derive(Default)]
 struct EngineState {
     supervisor: Option<ProxySupervisor>,
     monitor_handle: Option<JoinHandle<()>>,
     active_port: Option<cool_tunnel_core::domain::Port>,
     anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer<AnomalyReason>,
+    stopping: bool,
+    emitted_stopped: bool,
 }
 
 /// Entry point for client mode. Returns when stdin reaches EOF or
@@ -334,22 +347,41 @@ async fn dispatch(
             port,
         } => start_proxy(state, binary_path, config_path, port, events).await,
         RequestKind::StopProxy => {
+            // Take supervisor + monitor under the lock AND set
+            // `stopping = true` so a concurrent `start_proxy` can't
+            // spawn a second naive in the window between us
+            // releasing the lock and `supervisor.stop()` returning
+            // (Ru-A3 fix). Also pre-claim the at-most-once
+            // emission flag so `monitor_loop`'s natural-death
+            // detection skips emitting (Ru-A1: single emitter
+            // per transition).
             let (supervisor, monitor_handle) = {
                 let mut guard = state.lock().await;
+                let Some(sup) = guard.supervisor.take() else {
+                    return Err(ErrorPayload::new("not_running", "proxy is not running"));
+                };
+                let mh = guard.monitor_handle.take();
                 guard.active_port = None;
-                (guard.supervisor.take(), guard.monitor_handle.take())
-            };
-            let Some(supervisor) = supervisor else {
-                return Err(ErrorPayload::new("not_running", "proxy is not running"));
+                guard.stopping = true;
+                guard.emitted_stopped = true;
+                (sup, mh)
             };
             if let Some(handle) = monitor_handle {
                 handle.abort();
                 let _ = handle.await;
             }
-            supervisor
+            let stop_result = supervisor
                 .stop()
                 .await
-                .map_err(|err| ErrorPayload::new("stop_failed", err.to_string()))?;
+                .map_err(|err| ErrorPayload::new("stop_failed", err.to_string()));
+            // Release the stopping flag so a future `start_proxy`
+            // can proceed. emitted_stopped stays true until the
+            // next `start_proxy` resets it.
+            {
+                let mut guard = state.lock().await;
+                guard.stopping = false;
+            }
+            stop_result?;
             Ok(ResponsePayload::Stopped)
         }
         RequestKind::RunDiagnostics => {
@@ -418,6 +450,17 @@ async fn start_proxy(
             "proxy is already running",
         ));
     }
+    if guard.stopping {
+        // A concurrent stop is in flight; the supervisor is
+        // taken but the previous naive may still be draining.
+        // Refuse rather than racing to spawn a second one.
+        // (Ru-A3 — pair to the lock-across-spawn fix on the
+        // start side.)
+        return Err(ErrorPayload::new(
+            "already_running",
+            "proxy is currently stopping; try Start again in a moment",
+        ));
+    }
     let supervisor = ProxySupervisor::spawn(&binary_path, &config_path, events.clone())
         .await
         .map_err(|err| {
@@ -429,6 +472,11 @@ async fn start_proxy(
         })?;
     let pid = supervisor.pid();
     guard.anomaly_debouncer.reset();
+    // Reset the at-most-once gate for the new session. Without
+    // this, any session after the first would skip the
+    // natural-death emit (because the gate was claimed by the
+    // PRIOR session's stop).
+    guard.emitted_stopped = false;
     let monitor_handle = tokio::spawn(monitor_loop(pid, port, events, Arc::clone(&state)));
     guard.supervisor = Some(supervisor);
     guard.monitor_handle = Some(monitor_handle);
@@ -459,6 +507,29 @@ async fn monitor_loop(
         // a real CVE-class hazard for a security monitor.
         if !pid_alive(pid).await {
             tracing::info!(pid, "supervised process gone; monitor_loop exiting");
+            // Natural-death path. Claim the at-most-once
+            // emission gate; if the dispatcher's user-stop got
+            // there first (already set `emitted_stopped =
+            // true`), skip our emit so Swift doesn't see two
+            // events for one transition (Ru-A1). If we win the
+            // claim, also clean up the EngineState so a
+            // subsequent StopProxy returns `not_running` rather
+            // than trying to stop an already-dead supervisor.
+            let should_emit = {
+                let mut guard = state.lock().await;
+                if guard.stopping || guard.emitted_stopped {
+                    false
+                } else {
+                    guard.emitted_stopped = true;
+                    let _ = guard.supervisor.take();
+                    let _ = guard.monitor_handle.take();
+                    guard.active_port = None;
+                    true
+                }
+            };
+            if should_emit {
+                let _ = events.send(Event::StateChanged { running: false }).await;
+            }
             return;
         }
         match monitor::run(pid, port).await {
@@ -521,7 +592,31 @@ async fn stdout_writer(mut rx: mpsc::Receiver<Outbound>) {
                 }
             }
             Err(err) => {
+                // **v0.1.7.10 (Ru-A4):** the previous behaviour
+                // was to log and continue, which silently dropped
+                // the frame and left the Swift waiter map for
+                // that `id` pending forever (UI hangs the
+                // operation until the per-call timeout fires).
+                // `Outbound` only contains primitives that
+                // serialize infallibly today — but if a future
+                // field ever fails (NaN float, non-UTF-8 byte),
+                // a hand-built fallback gives the waiter a real
+                // error to resolve against.
                 tracing::error!(error = %err, "failed to serialize outbound frame");
+                let id = match &frame {
+                    Outbound::Response { id, .. } | Outbound::Error { id, .. } => *id,
+                    Outbound::Event(_) => 0,
+                };
+                let fallback = format!(
+                    r#"{{"kind":"error","id":{id},"error":{{"code":"engine_serialization_panic","message":"engine could not serialize this response; please report this build's --version output"}}}}{}"#,
+                    "\n"
+                );
+                if stdout.write_all(fallback.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stdout.flush().await.is_err() {
+                    break;
+                }
             }
         }
     }

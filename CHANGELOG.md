@@ -9,6 +9,205 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.10] — 2026-05-04 (LTSC patch — comprehensive audit + security)
+
+LTSC patch on the v0.1.7 line. Two parallel comprehensive audits
+(Swift + Rust) plus a tooling self-audit. Fixes one real
+regression I shipped in v0.1.7.9, several security-relevant
+hardenings on the in-app updater, and a wire-ordering race in
+the engine's stop path.
+
+### Regression fix (urgent)
+
+- **AppUpdater Check + Update buttons were broken in v0.1.7.9.**
+  The `markEnteringCheck()` / `markEnteringDownload()` sync
+  flag I added flipped `state` to the placeholder phase
+  *before* the async method's `guard !isInFlight` check, so the
+  guard returned early and the network call never fired. Click
+  the button → state stuck at `.checking` forever. Fixed:
+  relaxed the guards in `checkForUpdates` and
+  `downloadAndInstall` to refuse only when a *genuinely active*
+  later phase (downloading, verifying, extracting, relaunching)
+  is in flight, treating the placeholder `.checking` /
+  `.downloading(0.0)` as "we are the in-flight check".
+
+### Security — Swift in-app updater
+
+- **Sw-H1 — Bundle-identifier comparison hardened.** Both the
+  running app and the new app's bundle IDs are now
+  `precomposedStringWithCanonicalMapping`-normalised, and any
+  non-ASCII character causes outright rejection. Defence in
+  depth against Unicode-confusable bundle IDs if SHA pinning
+  were ever defeated.
+- **Sw-H2 — SHA mismatch error message no longer echoes the
+  hashes.** Echoing both expected and got values into the
+  user-facing error helps a MITM observe what hash they need
+  to forge. New message just says verification failed; tracing
+  retains both values for debugging via support tickets. Plus:
+  manifest entries are now hex-validated before SHA compare so
+  a corrupted-but-64-chars manifest line gives a clean
+  "manifest may be corrupted" message instead of a misleading
+  "SHA-256 mismatch".
+- **Sw-H3 — Download size cap.** `URLSession.shared.download`
+  will happily fetch a multi-GB file. New caps: .zip ≤ 100 MB,
+  .sha256 ≤ 1 MB. A confused-deputy URL or compromised release
+  can no longer fill the user's disk. Real streaming-cancel
+  needs `URLSessionDownloadDelegate`, deferred to v0.2.
+- **Sw-H4 — Symlink-escape walk after extraction.** `ditto -x
+  -k` (PKZip mode) preserves symlinks INSIDE the archive,
+  including ones pointing OUTSIDE the extraction directory. A
+  malicious zip whose only deviation from a known-SHA copy was
+  an attacker-controlled symlink (e.g. `Resources/foo →
+  ~/.ssh/config`) would have planted a side-channel pointer.
+  New post-extraction walk rejects any symlink whose realpath
+  escapes the extraction dir.
+- **C1 — `AppUpdater.unzip` pipe-buffer deadlock fixed.**
+  `Process` with shared stdout/stderr pipe → `waitUntilExit`
+  blocks if `ditto` writes >64 KB to stderr (the kernel pipe
+  buffer fills, ditto blocks on next write, deadlock). Routed
+  through `Subprocess.run` which drains both pipes
+  concurrently with timeout escalation. (Same bug class
+  `Subprocess.swift` was created to fix in v0.1.7.3 — AppUpdater
+  shipped in v0.1.7.6 and inherited the older buggy pattern.)
+- **C2 — Relaunch helper script now does atomic .new staging
+  with rollback.** Previous `rm -rf "$OLD_APP" && ditto …`
+  was destructive with no recovery. If `ditto` failed
+  mid-copy (ENOSPC, signal), the user was left with NO Cool
+  Tunnel installed. New flow: ditto into `$OLD_APP.new` →
+  `mv $OLD_APP $OLD_APP.old-update` → `mv $OLD_APP.new
+  $OLD_APP` → `rm -rf $OLD_APP.old-update`. Restores from
+  backup on any failure. Plus `set -eu` and `trap cleanup
+  EXIT` so the temp tree is removed on every exit path.
+- **C4 — `RestrictedFile.write` fsync check + double-close
+  fix.** The `fsync(fd)` return value was discarded, so a
+  silent disk EIO meant the atomic rename pointed at unflushed
+  bytes — a crash right after rename would yield an empty/partial
+  credentials.json. Plus a real double-close in the catch path
+  (could corrupt an unrelated fd that macOS reused). Both
+  fixed; a `didClose` flag tracks state across paths.
+- **H5 — `AppUpdater.run` tempRoot leak fixed.** Every failed
+  validation path used to leak the temp tree forever. Wrapped
+  in a do/catch that cleans up on any throw. Plus
+  `Bundle.main.bundleURL.resolvingSymlinksInPath()` so
+  symlinked install paths (rare, sometimes seen on managed
+  Macs) are evaluated by their real destination for the
+  read-only check.
+
+### Wire-protocol correctness — Rust engine
+
+- **Ru-A1 — Single-emitter discipline for `state_changed:false`.**
+  The v0.1.7.5 message-pump refactor moved user-stop event
+  emission to the dispatcher, but `monitor_lifecycle` retained
+  the natural-death emit. Two paths could fire for the same
+  transition if naive crashed concurrently with a user-stop.
+  Fixed: `monitor_lifecycle` no longer emits state-changed at
+  all; `client_mode::monitor_loop`'s natural-death detection
+  (PID polling) now owns natural-death emission, gated by an
+  at-most-once flag (`emitted_stopped`) in `EngineState` so it
+  yields to the dispatcher's user-stop emission. Validated by
+  new `siege_natural_death_then_user_stop_emits_once` chaos
+  scenario.
+- **Ru-A2 — `Proxy-Authorization` header now redacted.** The
+  log-line redaction regex required the literal `Authorization:`
+  prefix; `naive`/curl emit `Proxy-Authorization: Basic
+  <b64-of-user:pass>` on upstream-proxy failure and the prior
+  regex let it through verbatim, undoing the rest of the
+  credential-hygiene effort. New regex: `(?:Proxy-)?Authorization:`.
+  Two new unit tests in `redaction.rs` lock in the fix.
+- **Ru-A3 — Stop-side TOCTOU race fixed.** The dispatcher
+  released the engine lock between `take()` and
+  `supervisor.stop().await`. During the (potentially 2-second)
+  window, `EngineState.supervisor` was `None`, so a concurrent
+  `start_proxy` would spawn a *second* `naive` while the first
+  was still draining. Symmetric to the start-side fix from
+  Ru#C2 (v0.1.7.3). Now: dispatcher sets `stopping = true`
+  under the lock; `start_proxy` checks both `supervisor.is_some`
+  AND `stopping` to refuse. Validated by new
+  `siege_concurrent_stop_proxy_race` chaos scenario.
+- **Ru-A4 — `stdout_writer` fallback on serialize failure.**
+  `serde_json::to_vec` is essentially infallible for our
+  current `Outbound` shape, but if a future field ever fails
+  (NaN float, non-UTF-8), the writer logged and continued —
+  silently dropping the response, leaving the Swift waiter
+  pending forever. New fallback writes a hand-built error
+  frame with the original `id` so the waiter resolves with a
+  real error.
+- **Ru-B6 — `ProxySupervisor::Drop` aborts the monitor task.**
+  Previously only signalled kill via `kill_tx`; the JoinHandle
+  was leaked on the runtime if the supervisor was dropped
+  without `stop()` being called.
+
+### Chaos suite extended
+
+- 18 → 18 + 2 new scenarios:
+  - `siege_concurrent_stop_proxy_race` — verifies Ru-A1+A3
+    (exactly one `Stopped` response, one `not_running` error,
+    one `state_changed:false` event for one transition).
+  - `siege_natural_death_then_user_stop_emits_once` — verifies
+    Ru-A1 single-emitter discipline holds when both paths
+    could fire.
+- Two new redaction unit tests cover Ru-A2.
+- **20 chaos + 104 unit + 6 integration + 2 doctest = 132
+  tests total**, all green.
+
+### Tooling
+
+- `cargo deny check` now runs in CI. The `deny.toml` policy
+  (advisory-as-error, license allow-list, crates.io-only
+  source) was previously policy-without-enforcement.
+- `multiple-versions = deny` (was `warn`) in deny.toml. Cargo.lock
+  has zero duplicates today; new ones must be allow-listed
+  via `skip` going forward.
+- swift-format CI step hard-fails if the tool isn't on PATH
+  (was soft-fail → silent no-op).
+
+### Items deliberately not delivered
+
+- **Ru-B1 (oneshot for pid_alive):** the `/bin/kill -0`
+  polling adds ~17k spawns/day under sustained operation.
+  Replacing with a oneshot from `monitor_lifecycle` is the
+  right design but requires plumbing a new channel. Defer.
+- **Ru-B5 (Password/Username `Drop::clear`):** parity item.
+  Defer with the rest of the encryption-at-rest work.
+- **Sw-H6 (KeychainStore `WhenUnlockedThisDeviceOnly`):** the
+  legacy migration backend; touch surface is small but
+  changing the accessibility flag affects credential
+  syncability for users mid-migration. Defer.
+- **Sw-H8 (Subprocess race on terminationHandler):** the race
+  window is theoretical (Foundation's documented behaviour).
+  Defer with the broader Subprocess refactor.
+- **Sw-H9 (CoreClient.stdin write blocking):** sits with the
+  deferred Sw#5/6 broken-pipe + race-y shutdown work.
+- **T2 (security_check.sh in CI):** would require building
+  the full .app on CI (currently CI builds only
+  cool-tunnel-core). Significant scope expansion. Document
+  the manual-pre-tag run as the contract.
+
+### Files
+
+- `core/src/client_mode.rs` — EngineState gets `stopping` +
+  `emitted_stopped` flags; StopProxy holds lock + pre-claims
+  emission gate; start_proxy refuses if stopping; monitor_loop
+  natural-death path claims the gate; stdout_writer fallback.
+- `core/src/supervisor/mod.rs` — `monitor_lifecycle` no longer
+  emits StateChanged; ProxySupervisor::Drop aborts monitor;
+  unit test updated.
+- `core/src/redaction.rs` — `(?:Proxy-)?Authorization` regex;
+  two new unit tests.
+- `core/tests/chaos.rs` — two new siege scenarios.
+- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` — relaxed
+  re-entry guards (M1 regression fix); unzip via Subprocess
+  (C1); helper script atomic swap with rollback (C2);
+  tempRoot cleanup on validation failure (H5); bundle-id
+  precomposed normalize + ASCII-only (Sw-H1); SHA hex
+  validate + scrub error message (Sw-H2); download size cap
+  (Sw-H3); symlink-escape walk after extraction (Sw-H4).
+- `COOL-TUNNEL/SystemIntegration/AppSupportPaths.swift` —
+  fsync check + double-close fix (C4).
+- `.github/workflows/ci.yml` — cargo-deny step; swift-format
+  hard-fail.
+- `core/deny.toml` — multiple-versions: warn → deny.
+
 ## [0.1.7.9] — 2026-05-03 (LTSC patch — UI/UX stress audit)
 
 LTSC patch. Fourth UI audit on the v0.1.7.x line, this time

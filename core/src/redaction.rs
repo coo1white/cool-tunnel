@@ -71,9 +71,16 @@ static USERINFO_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// `Authorization: <scheme> <value>` matcher. The scheme is left
 /// intact (Bearer / Basic / Digest tells the user what auth type the
 /// upstream wanted); the value is replaced with `***`.
+///
+/// **v0.1.7.10:** also matches `Proxy-Authorization:`. `naive` and
+/// curl emit this header verbatim on upstream-proxy failure, and
+/// the previous regex required the bare `Authorization:` prefix
+/// — letting `Proxy-Authorization: Basic <b64>` slip through and
+/// undoing every other credential-hygiene effort. Single regex
+/// covers both via the optional `Proxy-` prefix.
 #[allow(clippy::expect_used)]
 static AUTH_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?P<prefix>Authorization:\s*[A-Za-z]+\s+)\S+")
+    Regex::new(r"(?i)(?P<prefix>(?:Proxy-)?Authorization:\s*[A-Za-z]+\s+)\S+")
         .expect("Authorization redaction regex must compile")
 });
 
@@ -167,6 +174,39 @@ mod tests {
         let line = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig";
         let out = redact(line);
         assert_eq!(out, "Authorization: Bearer ***");
+    }
+
+    /// `Proxy-Authorization` (the upstream-proxy auth header) must
+    /// be redacted with the same posture as `Authorization`.
+    /// Regression test for v0.1.7.10's Ru-A2 fix — pre-fix the
+    /// regex required the literal `Authorization:` prefix and let
+    /// `Proxy-Authorization: Basic <b64>` slip through verbatim.
+    #[test]
+    fn redacts_proxy_authorization_header() {
+        let line = "Proxy-Authorization: Basic bmljazpodW50ZXIy";
+        let out = redact(line);
+        assert!(out.ends_with("***"), "expected trailing ***: {out}");
+        assert!(!out.contains("bmljazpodW50ZXIy"), "payload leaked: {out}");
+        assert!(out.starts_with("Proxy-Authorization:"), "header rewritten: {out}");
+    }
+
+    /// Mixed case + leading whitespace — matches the form curl
+    /// emits in `-v` output.
+    #[test]
+    fn redacts_proxy_authorization_with_whitespace_and_case() {
+        for line in [
+            "  proxy-authorization:   Bearer eyJhbGc...",
+            "Proxy-Authorization:Basic abcdef==",  // no space after colon
+            "PROXY-AUTHORIZATION: Digest nonce=...",
+        ] {
+            let out = redact(line);
+            assert!(
+                !out.contains("eyJhbGc")
+                    && !out.contains("abcdef")
+                    && !out.contains("nonce"),
+                "credentials leaked: {out}"
+            );
+        }
     }
 
     /// Basic auth is base64-encoded `user:pass` — must never reach

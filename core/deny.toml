@@ -18,7 +18,13 @@ yanked = "deny"
 ignore = []
 
 [bans]
-multiple-versions = "warn"
+# **v0.1.7.10:** bumped to `deny`. For an LTSC line where dep
+# tree consistency matters (a duplicated crate version means
+# two semver-incompatible copies of the same code reach
+# production simultaneously), `warn` was the wrong default.
+# If a legitimate duplicate appears later, allow-list it
+# explicitly via `skip`.
+multiple-versions = "deny"
 wildcards = "deny"
 deny = []
 skip = []
