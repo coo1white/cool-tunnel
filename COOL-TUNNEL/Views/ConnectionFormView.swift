@@ -140,15 +140,15 @@ public struct ConnectionFormView: View {
                 .frame(width: 130, alignment: .trailing)
             TextField(placeholder, text: binding(for: keyPath))
                 .textFieldStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
                 .background {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(CTPalette.paper)
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(.white.opacity(0.30), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(CTPalette.borderInk.opacity(0.45), lineWidth: 0.7)
                 }
         }
     }
@@ -165,15 +165,15 @@ public struct ConnectionFormView: View {
                 .frame(width: 130, alignment: .trailing)
             SecureField("•••••••", text: binding(for: keyPath))
                 .textFieldStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
                 .background {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(CTPalette.paper)
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(.white.opacity(0.30), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(CTPalette.borderInk.opacity(0.45), lineWidth: 0.7)
                 }
         }
     }

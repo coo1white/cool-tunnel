@@ -82,7 +82,7 @@ public struct ControlPanelView: View {
             Capsule(style: .continuous).fill(.ultraThinMaterial)
         }
         .overlay {
-            Capsule(style: .continuous).strokeBorder(.white.opacity(0.30), lineWidth: 0.5)
+            Capsule(style: .continuous).strokeBorder(CTPalette.borderInk.opacity(0.35), lineWidth: 0.6)
         }
     }
 
