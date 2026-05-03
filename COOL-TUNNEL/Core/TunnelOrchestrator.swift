@@ -245,6 +245,37 @@ public final class TunnelOrchestrator {
         settingsStore.save(settings)
     }
 
+    // MARK: - Mode switching
+
+    /// Atomically switches the *active* proxy mode. Three cases:
+    ///
+    /// 1. Proxy is stopped → equivalent to `start(mode:)`
+    /// 2. Proxy is running in `mode` already → no-op (don't bounce
+    ///    the supervisor for a click that selects the current mode)
+    /// 3. Proxy is running in a *different* mode → stop, then start in
+    ///    the new mode in one shot — the user only sees a single
+    ///    state-changed flicker rather than a manual stop / start
+    ///    dance
+    ///
+    /// This is what powers the single-button mode picker in the UI:
+    /// tapping a mode chip while the tunnel is live hot-swaps it
+    /// instead of forcing the user to stop first.
+    public func switchMode(to newMode: ProxyMode) async throws {
+        guard newMode != .stopped else {
+            await stop()
+            return
+        }
+        if isRunning && activeMode == newMode {
+            return
+        }
+        if isRunning {
+            // Stop without surfacing a "stopped" error — this is one
+            // logical user action, not two.
+            await stop()
+        }
+        try await start(mode: newMode)
+    }
+
     // MARK: - Lifecycle commands
 
     /// Validates the selected profile, writes config + PAC, spawns naive,
