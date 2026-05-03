@@ -5,6 +5,38 @@
 // preference about confirmation dialogs.
 
 import Foundation
+import SwiftUI
+
+/// User-controlled appearance preference. `.system` follows the
+/// macOS appearance setting (the default and the right answer
+/// for most users); `.light` and `.dark` lock the app regardless
+/// of the system. Persisted as a string in UserDefaults so the
+/// stored value is grep-able and the schema is forward-compatible
+/// (an unknown value falls back to `.system`).
+public enum AppearanceMode: String, Sendable, Codable, CaseIterable, Equatable {
+    case system
+    case light
+    case dark
+
+    /// Maps to SwiftUI's `preferredColorScheme` value. `nil`
+    /// means "follow the system" (don't override).
+    public var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+
+    /// User-facing label for the Settings picker.
+    public var displayName: String {
+        switch self {
+        case .system: "Match System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+}
 
 /// Persisted user settings.
 public struct AppSettings: Sendable, Codable, Equatable {
@@ -18,17 +50,24 @@ public struct AppSettings: Sendable, Codable, Equatable {
     /// into Application Support; takes effect on the next launch.
     public var customRustCorePath: String
     public var skipProxyConfirmations: Bool
+    /// Light / dark / system appearance preference. Defaults to
+    /// `.system` so existing v0.1.7.x users get system-matched
+    /// behaviour (the right default; their previous experience
+    /// was light-only).
+    public var appearanceMode: AppearanceMode
 
     public init(
         directDomains: [String],
         customNaiveBinaryPath: String,
         customRustCorePath: String = "",
-        skipProxyConfirmations: Bool
+        skipProxyConfirmations: Bool,
+        appearanceMode: AppearanceMode = .system
     ) {
         self.directDomains = directDomains
         self.customNaiveBinaryPath = customNaiveBinaryPath
         self.customRustCorePath = customRustCorePath
         self.skipProxyConfirmations = skipProxyConfirmations
+        self.appearanceMode = appearanceMode
     }
 
     /// Default `AppSettings` matching the previously hard-coded Swift
@@ -37,7 +76,8 @@ public struct AppSettings: Sendable, Codable, Equatable {
         directDomains: defaultDirectDomains,
         customNaiveBinaryPath: "",
         customRustCorePath: "",
-        skipProxyConfirmations: false
+        skipProxyConfirmations: false,
+        appearanceMode: .system
     )
 
     /// Direct-domain list shipped out of the box. Mirrors
@@ -67,6 +107,7 @@ public struct SettingsStore: @unchecked Sendable {
         static let customBinary = "customNaiveBinaryPath"
         static let customRustCore = "customRustCorePath"
         static let skipConfirmations = "skipProxyConfirmations"
+        static let appearanceMode = "appearanceMode"
     }
 
     private let defaults: UserDefaults
@@ -82,11 +123,18 @@ public struct SettingsStore: @unchecked Sendable {
         let custom = defaults.string(forKey: Keys.customBinary) ?? ""
         let rust = defaults.string(forKey: Keys.customRustCore) ?? ""
         let skip = defaults.bool(forKey: Keys.skipConfirmations)
+        // Unknown stored values fall back to `.system` so a
+        // forward-incompatible value from a future build
+        // downgraded to v0.1.7.7 doesn't crash the app.
+        let appearance =
+            (defaults.string(forKey: Keys.appearanceMode))
+            .flatMap(AppearanceMode.init(rawValue:)) ?? .system
         return AppSettings(
             directDomains: direct,
             customNaiveBinaryPath: custom,
             customRustCorePath: rust,
-            skipProxyConfirmations: skip
+            skipProxyConfirmations: skip,
+            appearanceMode: appearance
         )
     }
 
@@ -95,5 +143,6 @@ public struct SettingsStore: @unchecked Sendable {
         defaults.set(settings.customNaiveBinaryPath, forKey: Keys.customBinary)
         defaults.set(settings.customRustCorePath, forKey: Keys.customRustCore)
         defaults.set(settings.skipProxyConfirmations, forKey: Keys.skipConfirmations)
+        defaults.set(settings.appearanceMode.rawValue, forKey: Keys.appearanceMode)
     }
 }

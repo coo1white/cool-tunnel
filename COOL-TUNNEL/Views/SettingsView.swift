@@ -158,6 +158,10 @@ public struct SettingsView: View {
                     appUpdaterSection
                 }
 
+                Section("Appearance") {
+                    appearancePicker
+                }
+
                 Section("Behaviour") {
                     Toggle("Skip proxy mode confirmations", isOn: $draft.skipProxyConfirmations)
                 }
@@ -644,6 +648,51 @@ public struct SettingsView: View {
                 }
                 .disabled(isInspecting || updaterIsBusy)
             }
+        }
+    }
+
+    // MARK: - Appearance picker (new in v0.1.7.7)
+
+    /// Three-way segmented picker: Match System / Light / Dark.
+    /// Bound to `draft.appearanceMode`; the change is published
+    /// to the orchestrator via the `.onChange` below so the
+    /// chosen scheme applies *immediately* (not only on Done).
+    /// The dynamic `CTPalette` colours pick up the new scheme
+    /// the moment SwiftUI re-renders with the updated
+    /// `preferredColorScheme`.
+    @ViewBuilder
+    private var appearancePicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Appearance", selection: $draft.appearanceMode) {
+                ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("App appearance")
+            .onChange(of: draft.appearanceMode) { _, newValue in
+                // Push to the orchestrator immediately so the
+                // app re-renders with the new scheme. The full
+                // settings blob still flushes on Done via
+                // `commit()`; this is the live-preview path.
+                orchestrator.settings.appearanceMode = newValue
+                orchestrator.persistSettings()
+            }
+            Text(appearanceSubtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var appearanceSubtitle: String {
+        switch draft.appearanceMode {
+        case .system:
+            "Follows the macOS appearance setting (System Settings → Appearance)."
+        case .light:
+            "Always uses the System 7 / Platinum-era light palette, regardless of the macOS appearance."
+        case .dark:
+            "Always uses the dark palette, regardless of the macOS appearance."
         }
     }
 

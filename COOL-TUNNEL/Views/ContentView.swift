@@ -44,6 +44,13 @@ public struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: isShowingSettings)
         .background { windowBackground }
+        // Apply the user's appearance choice. `.system` returns
+        // nil from `colorScheme`, which leaves the appearance to
+        // follow `NSAppearance.current` (the macOS system
+        // setting). `.light` / `.dark` lock the app regardless
+        // of the system. The dynamic palette in MalteseTheme
+        // resolves itself the moment this appearance changes.
+        .preferredColorScheme(orchestrator.settings.appearanceMode.colorScheme)
     }
 
     private var mainStack: some View {

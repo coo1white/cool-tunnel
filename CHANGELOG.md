@@ -9,6 +9,76 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.7] — 2026-05-03 (LTSC patch — light/dark mode)
+
+LTSC additive feature. Closes the **Sw#24 deferred audit item**
+(dark-mode dynamic palette) and adds a user-controlled appearance
+preference. Three options in Settings → Appearance:
+
+- **Match System** (default) — follows the macOS appearance.
+- **Light** — locks to the System 7 / Platinum-era palette.
+- **Dark** — locks to a tuned dark palette regardless of macOS.
+
+### What changed
+
+**`CTPalette` is now fully dynamic.** Every token (`paper`,
+`platinum`, `borderInk`, `bodyInk`, `macBlue`, `macBlueSoft`,
+`cherryRose`, `bunnyPink`, `lilac`, `mint`) resolves to a
+light or dark variant via `NSColor(name:dynamicProvider:)`. The
+view layer is unchanged — same names, same call sites — so
+every existing pane, chip, badge, and card adapts
+automatically. Light variants are byte-identical to what
+shipped through v0.1.7.6 (no visual change for existing users
+on light mode); dark variants are tuned for the same System 7
+mood with inverted luminance and slightly brighter accents to
+compensate for the dark surround.
+
+**`AppearanceMode` enum** added to `AppSettings`:
+`.system` / `.light` / `.dark`. Persisted as a string in
+UserDefaults under the new `appearanceMode` key. Unknown
+stored values fall back to `.system` so a forward-incompatible
+write from a future build downgraded back to v0.1.7.7 doesn't
+crash.
+
+**`ContentView`** applies `.preferredColorScheme(orchestrator.settings.appearanceMode.colorScheme)`
+on the root. `.system` returns nil → SwiftUI follows the
+macOS appearance; `.light`/`.dark` lock the app regardless.
+The dynamic palette resolves itself the moment the appearance
+changes — no view-tree invalidation needed.
+
+**Settings → Appearance section** — new segmented picker
+(Match System / Light / Dark) with a one-line subtitle
+explaining the chosen option. Bound to `draft.appearanceMode`
+with an `.onChange` that pushes the change through the
+orchestrator + `persistSettings()` immediately, so the live
+preview happens *before* the user clicks Done.
+
+### Existing v0.1.7.6 users on dark mode
+
+If you've been running on macOS dark mode, the app has been
+rendering with the light palette (near-white surfaces). After
+updating to v0.1.7.7 with the default `.system` setting, the
+app picks up your dark mode automatically. If you preferred
+the old behaviour (always light regardless of system), set
+Settings → Appearance → Light.
+
+### Files
+
+- **Modified:** `COOL-TUNNEL/Persistence/SettingsStore.swift`
+  — new `AppearanceMode` enum, new field on `AppSettings`,
+  load/save in UserDefaults.
+- **Modified:** `COOL-TUNNEL/Views/MalteseTheme.swift` — every
+  `CTPalette` static is now a dynamic `NSColor`. Added a
+  private `dynamic(light:dark:)` helper.
+- **Modified:** `COOL-TUNNEL/Views/ContentView.swift` —
+  `.preferredColorScheme` modifier on the root.
+- **Modified:** `COOL-TUNNEL/Views/SettingsView.swift` — new
+  Appearance Section with the segmented picker.
+
+### Engine + chaos suite
+
+Unchanged. This is a UI-only patch. All 126 tests still pass.
+
 ## [0.1.7.6] — 2026-05-03 (LTSC patch — in-app self-updater)
 
 LTSC additive feature. New "Cool Tunnel" Settings section with
