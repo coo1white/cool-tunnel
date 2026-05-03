@@ -9,6 +9,184 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.11] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 1)
+
+LTSC patch on the v0.1.7 line. Fifth audit cycle, with the
+findings rated against the **Rule Maker** rubric (R1 fail-secure,
+R2 boundary enforcement, R3 ≤10ms latency on the core path, R4
+no theatre — every fix addresses the root cause, not the
+symptom). 25 findings total across `core/src/server_mode.rs` and
+`COOL-TUNNEL/SystemIntegration/AppUpdater.swift`; this release
+lands the must-fix tier (8 critical/high) plus 5 medium/low
+where the fix was small and the call unambiguous. Remaining 12
+findings ship in v0.1.7.12.
+
+### Critical / high (8)
+
+- **AU-1 (R2, R4) — relaunch helper script no longer in `/tmp`.**
+  Previously `String.write(to:atomically:)` created the script
+  with default umask perms (typically 0644), then a separate
+  `setAttributes(0o700)` call tightened them — leaving a tiny
+  but real window where a same-UID attacker could swap the
+  script via symlink before `task.run()`. The script now lives
+  in the per-update `tempRoot` and is created via
+  `open(O_CREAT|O_EXCL|O_WRONLY, 0o700)` so it is born with the
+  right mode and never exists with any other. New helper
+  `writeRelaunchScript` owns the FD lifecycle, fsyncs before
+  close, and surfaces `errno` on failure for support.
+- **AU-2 (R2) — GitHub asset URLs validated before fetch.**
+  `validateInstallAssets` now requires both the `.zip` and
+  `.sha256` `browser_download_url`s to be HTTPS on a host that
+  ends in `github.com` or `githubusercontent.com`. A compromised
+  or attacker-shaped API response that pointed the manifest
+  fetch at an attacker host would defeat SHA pinning by
+  substituting the verification root-of-trust; this gate cuts
+  that path at the seam where operator intent ("releases come
+  from GitHub") is encoded.
+- **AU-3 (R2) — HTTP redirects constrained to GitHub-served
+  hosts.** All four updater fetches (releases API, .zip,
+  .sha256, plus future) now use a per-task `URLSessionTaskDelegate`
+  (`GitHubRedirectGuard`) that rejects any HTTP redirect whose
+  target isn't on the same trusted suffix list AU-2 enforces.
+  `URLSession.shared.download(from:)` was previously following
+  up to ~20 redirects with no host check — a CDN takeover or
+  misconfigured GitHub edge could substitute the manifest at
+  this layer, defeating SHA pinning end-to-end.
+- **AU-4 (R3) — SHA hashing + plist read off `@MainActor`.**
+  The pipeline helpers (`run`, `runPipeline`, `download`,
+  `verifyZipAgainstManifest`, `unzip`, `verifyExtractedApp`,
+  `refuseExtractionEscapingSymlinks`, `refuseReadOnlyInstall`,
+  `spawnRelaunchHelper`, plus all helpers and parsers) are now
+  `nonisolated`. `verifyZipAgainstManifest` streams the .zip
+  through `FileHandle.read(upToCount:)` 64 KiB at a time
+  instead of `Data(contentsOf: zipURL)` — a 12 MB allocation on
+  the main thread previously froze the Settings UI on slow
+  disks, especially Intel Macs with HDDs. Plist parsing now
+  runs in `Task.detached(priority: .userInitiated)` and returns
+  a `Sendable` carrier struct (`ExtractedAppInfo`) rather than
+  the non-Sendable `[String: Any]`.
+- **AU-5 (R2, R4) — `realpath(3)` + path-component ancestor
+  check in symlink-escape walk.** `refuseExtractionEscapingSymlinks`
+  no longer uses `String.hasPrefix(containerPath)`, which gave
+  two classes of false negatives: (1) sibling-path collision
+  (`/extracted-evil` passed against `/extracted` — no trailing
+  separator), and (2) symlink-target traversal
+  (`URL.resolvingSymlinksInPath()` resolves the link itself but
+  doesn't normalise `..` *through* the resolved target).
+  `realpath(3)` returns a fully-canonical absolute path; the
+  comparison is now `targetComponents.starts(with:
+  containerComponents)`. Broken symlinks now reject outright
+  rather than passing silently.
+- **SM-1 (R1, R2) — `JsonRejection` scrubbed at every handler
+  boundary.** Every `axum::Json<T>` handler now takes
+  `Result<Json<T>, JsonRejection>` and converts the rejection
+  via `ApiError::from_json_rejection` — which logs the verbatim
+  serde error server-side via `tracing::warn!` and returns
+  `{"error":"bad request"}` to the wire. Previously axum's
+  default 400 body included the verbatim serde error
+  (containing internal field names and the engine's domain
+  validation rules — e.g. `"server: contains forbidden ':/​/'"`),
+  which is a free probe of internal validation logic for an
+  unauthenticated caller.
+- **SM-2 (R1) — `ApiError` carries no payload.** Both
+  `ApiError::BadRequest` and `ApiError::Internal` are now
+  unit variants. The wire body is a stable opaque string per
+  HTTP status (`"bad request"` / `"internal error"`); the
+  cause-of-failure detail goes to `tracing::error!` only. The
+  previous `Internal(String)` field structurally invited callers
+  to interpolate `serde_json::Error` (which embeds line/column/
+  field info) — removing the field forces logging-only.
+- **SM-3 (R4, R2) — `naive_validate` honours its advertised
+  contract.** Previously the handler took `Json<Profile>` and
+  dropped the value with `_`; deserialize failures became 400s
+  from the axum extractor, so the `ok:false` branch of
+  `ValidationReport` was structurally unreachable. The handler
+  now accepts any JSON value, runs the `Profile` deserializer
+  itself, and returns `{ok:false, reason:"invalid profile"}`
+  on failure (with the detailed cause logged server-side) and
+  `{ok:true}` on success. Both wire-shape branches are now
+  reachable by well-behaved callers.
+
+### Medium / low (5)
+
+- **AU-7 (R1) — version-mismatch error scrubs attacker-
+  controlled plist value.** The error string in
+  `verifyExtractedApp` no longer interpolates the new bundle's
+  `CFBundleShortVersionString`. An attacker who got past SHA
+  pinning could plant a Unicode bidi-override or fake
+  "click here to bypass" text in that string and have it
+  rendered into the Settings panel; the actual value now goes
+  to `os_log` for support tickets.
+- **AU-12 (R1, R2) — `versionIsNewer` rejects non-numeric
+  segments + pre-release suffixes.** The previous `Int($0) ?? 0`
+  silently coerced `"0-rc1"` to 0, making `1.0.0-rc1` compare
+  *equal* to `1.0.0`. New helper `parseVersionSegments` returns
+  `nil` if the version contains `-` (pre-release marker) or
+  any segment fails to parse strictly; `versionIsNewer` then
+  short-circuits to `false` (no upgrade offered).
+  `/releases/latest` already excludes pre-releases, so the
+  legitimate path is unaffected.
+- **AU-15 (R2) — `public` removed from within-module symbols.**
+  `AppUpdater`, `State`, `AvailableRelease`, `UpdaterError`,
+  the public-state property, the lifecycle methods
+  (`init`, `checkForUpdates`, `downloadAndInstall`, `reset`,
+  `isInFlight`, `markEnteringCheck`, `markEnteringDownload`)
+  and their associated types all dropped to `internal`
+  (the default). Cool Tunnel ships as a single app target —
+  no cross-module consumer needs `public`. Shrinks the API
+  surface a future code path can accidentally reach.
+- **SM-5 (R2) — `NaiveConfig` fields are `pub(crate)`.** The
+  struct's invariants (`listen` is `socks://127.0.0.1:<port>`,
+  `proxy` embeds percent-encoded credentials) are guaranteed
+  by `from_profile` and lost the moment an external caller can
+  construct `NaiveConfig { listen: "...", proxy: "..." }`
+  directly. Locking the constructors closes that back-door
+  without affecting `Serialize` (derive sees private fields
+  fine) or any current call site (handlers only ever go
+  through `from_profile` + `to_pretty_json`).
+- **SM-9 (R2) — `--listen` non-loopback requires
+  `--allow-public`.** `server_mode::run` now refuses to bind a
+  non-loopback address unless the caller explicitly passed
+  `allow_public: true` (set by `--allow-public` on the CLI),
+  returning `io::ErrorKind::PermissionDenied` with a message
+  that tells the operator exactly what the flag is for. The
+  loopback-only deployment posture was previously documented
+  but not enforced; a `--listen 0.0.0.0:8787` typo silently
+  exposed an unauthenticated engine. With the gate, the
+  exposure is now a one-flag-acknowledgement decision instead
+  of a silent security hole.
+
+### Tests
+
+- 104 lib tests + 18 chaos tests pass on this revision (no
+  changes — the audit fixes preserve every test invariant).
+- Swift app compiles clean under Swift 6 strict concurrency
+  with `nonisolated` propagation through the entire pipeline.
+
+### Logging policy (new — `core/src/server_mode.rs` header)
+
+Codified as a doc comment at the top of `server_mode.rs`:
+handlers MUST NOT log the request body, the resolved `Profile`,
+or `ApiError::*` payloads. `Profile` carries `Password::expose_secret`,
+and a "let's log the failing body for debug" PR would silently
+leak credentials. When you need diagnostic detail, log the
+*cause* (a `serde_json::Error`'s `Display` is fine — it only
+references field paths, never values) but never the payload
+itself.
+
+### Deferred to v0.1.7.12 (12 findings)
+
+AU-6 (bundle-ID ASCII-only impersonation), AU-8 (download HTTP
+status leak), AU-9 (read-only check tests parent only),
+AU-10 (`open -a "$OLD_APP"` semantics with spaces),
+AU-11 (helper trap order), AU-13 (click race in
+`markEnteringCheck`), AU-14 (`locateAppBundle` accepts
+files/symlinks), SM-4 (`NaivePacRequest.direct_domains` cap value
+needs decision), SM-6 (`spawn_blocking` only matters if SM-4
+lands), SM-7 (`encode_js_string_array` `unwrap_or_default`),
+SM-8 (logging policy as a checked lint, not just a doc comment),
+SM-10 (router timeout/concurrency tower layers).
+
 ## [0.1.7.10] — 2026-05-04 (LTSC patch — comprehensive audit + security)
 
 LTSC patch on the v0.1.7 line. Two parallel comprehensive audits
