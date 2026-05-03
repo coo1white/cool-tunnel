@@ -7,9 +7,38 @@ the fourth digit are pre-release polish on the same line.
 The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 **v0.1.6** is the first stable release.
 
-## [0.1.6] — 2026-05-03 (stable)
+## [0.1.6] — 2026-05-03 (stable, **LTSC**)
 
-First stable release. Everything from the v0.1.5.x line, plus:
+First stable release **and the first release on the Long-Term
+Servicing Channel** line. The LTSC posture is documented in
+[SUPPORT.md](./SUPPORT.md): public surface (UI flows, CLI flags,
+engine protocol, on-disk paths) is locked for the lifetime of the
+v0.1.6 line; only patch + minor security fixes and upstream
+NaiveProxy updates land in-line. Major changes wait for the next
+LTSC line.
+
+LTSC infrastructure shipped as part of v0.1.6:
+
+- `rust-toolchain.toml` pins the build to Rust 1.80.0 — bumps
+  happen at LTSC boundaries, never silently across machines.
+- `SUPPORT.md` documents the support window (≥ 18 months from
+  release), supported macOS / Rust / hardware matrix, what counts
+  as a breaking change, and the issue-reporting flow.
+- `.github/workflows/ci.yml` runs cargo fmt + clippy + tests +
+  swift-format + shellcheck on every push and PR.
+- `.github/dependabot.yml` opens weekly dependency-update PRs and
+  ignores major bumps inside an LTSC line.
+- `core/deny.toml` configures cargo-deny with allow-list
+  licences, advisory-as-error, and crates.io as the only trusted
+  source.
+- `cool-tunnel-core --version` now embeds the build SHA + date
+  for support tickets — first line stays
+  `cool-tunnel-core <semver>` so the Swift resolver still parses
+  it.
+- `scripts/security_check.sh` adds a section 9 LTSC-posture audit
+  (lockfile present + fresh, toolchain pin, SUPPORT.md).
+
+Everything from the v0.1.5.x line, plus:
 
 - Engine subprocess crash now surfaces a clear error in the live
   log instead of a silent stop.

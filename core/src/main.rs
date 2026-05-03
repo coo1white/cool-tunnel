@@ -52,7 +52,21 @@ async fn main() -> ExitCode {
 
     match parsed {
         Cli::Version => {
+            // First line is the canonical wire format that the Swift
+            // `RustCoreResolver` greps for: `cool-tunnel-core <semver>`.
+            // Do not change. Everything below is metadata for support
+            // tickets — safe to add to.
             println!("cool-tunnel-core {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "build:    {} {} ({})",
+                env!("COOL_TUNNEL_BUILD_SHA"),
+                env!("COOL_TUNNEL_BUILD_DATE"),
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                },
+            );
             ExitCode::SUCCESS
         }
         Cli::Help => {
@@ -140,7 +154,12 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
 }
 
 fn print_help() {
-    println!("cool-tunnel-core {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "cool-tunnel-core {} ({} {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("COOL_TUNNEL_BUILD_SHA"),
+        env!("COOL_TUNNEL_BUILD_DATE"),
+    );
     println!();
     println!("USAGE:");
     println!("    cool-tunnel-core [--mode client]                        # default");
