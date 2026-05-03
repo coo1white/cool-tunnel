@@ -160,8 +160,19 @@ impl ProxySupervisor {
 
 impl Drop for ProxySupervisor {
     fn drop(&mut self) {
+        // Signal the monitor to terminate the child.
         if let Some(tx) = self.kill_tx.take() {
             let _ = tx.send(());
+        }
+        // Abort the monitor task too, so the JoinHandle isn't
+        // leaked on the runtime if the supervisor is dropped
+        // without `stop()` being called (e.g. a future code
+        // path where `start_proxy` succeeds but a subsequent
+        // `?` propagates and the supervisor goes out of scope
+        // before being stored in `EngineState`). `kill_on_drop`
+        // on the underlying `Child` handles reap.
+        if let Some(handle) = self.monitor.take() {
+            handle.abort();
         }
     }
 }
@@ -206,24 +217,22 @@ where
 async fn monitor_lifecycle(
     mut child: Child,
     kill_rx: oneshot::Receiver<()>,
-    events: mpsc::Sender<Event>,
+    _events: mpsc::Sender<Event>,
 ) {
-    let user_initiated = tokio::select! {
+    // **v0.1.7.10 (Ru-A1):** monitor_lifecycle no longer emits
+    // `StateChanged { running: false }`. The single emitter
+    // for natural-death is now `client_mode::monitor_loop`,
+    // gated by an at-most-once flag in `EngineState` so it
+    // never duplicates with the dispatcher's user-stop emit.
+    // monitor_lifecycle's job is now pure cleanup: drain on
+    // either `kill_rx` or natural exit, kill_on_drop reaps the
+    // child if we were aborted mid-flight.
+    tokio::select! {
         _ = kill_rx => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            true
         }
-        _ = child.wait() => false,
-    };
-    // Only emit the natural-death event from here. A
-    // user-initiated stop has its `state_changed { running:
-    // false }` emitted by the dispatcher AFTER the `Stopped`
-    // response writes — that's the Ru#C4 ordering contract. If
-    // we emitted from both sides under user-initiated stop,
-    // Swift would see two events for one transition.
-    if !user_initiated {
-        let _ = events.send(Event::StateChanged { running: false }).await;
+        _ = child.wait() => {}
     }
 }
 
@@ -264,24 +273,23 @@ mod tests {
         let _h = tokio::spawn(monitor_lifecycle(child, kx_rx, tx.clone()));
         drop(tx); // close the original sender so receivers see end-of-stream when tasks finish
 
+        // **v0.1.7.10:** monitor_lifecycle no longer emits
+        // `StateChanged { running: false }` (Ru-A1 single-emitter
+        // discipline). The natural-death emission moved to
+        // `client_mode::monitor_loop` which gates on the engine
+        // state's at-most-once flag. So this test now just
+        // asserts the log line was streamed and the lifecycle
+        // task drained — no state-change event is expected from
+        // the supervisor itself.
         let mut saw_log_line = false;
-        let mut saw_state_change_false = false;
         while let Some(evt) = timeout(Duration::from_secs(2), rx.recv()).await.unwrap() {
-            match evt {
-                Event::LogLine { line, .. } if line.contains("hello-from-test") => {
+            if let Event::LogLine { line, .. } = evt {
+                if line.contains("hello-from-test") {
                     saw_log_line = true;
                 }
-                Event::StateChanged { running: false } => {
-                    saw_state_change_false = true;
-                }
-                _ => {}
             }
         }
         assert!(saw_log_line, "expected to receive the echoed log line");
-        assert!(
-            saw_state_change_false,
-            "expected a stopped state-change event"
-        );
         // suppress unused-variable warning for kx_tx; we deliberately let the child exit on its own.
         drop(kx_tx);
     }

@@ -66,6 +66,17 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: cargo test
         run: cargo test --all-features
+      # cargo-deny enforces the policy in `core/deny.toml`
+      # (advisories-as-error, license allow-list, crates.io-only
+      # source). Was policy-without-enforcement until v0.1.7.10:
+      # `deny.toml` existed but no CI step ran it. Caching the
+      # cargo-deny binary keeps the install fast.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check
       - name: cargo build --release (universal)
         if: github.event_name == 'push'
         run: |
@@ -84,12 +95,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: swift-format --lint
-        run: |
-          if ! command -v swift-format >/dev/null 2>&1; then
-            echo "swift-format not on PATH on this runner; skipping" >&2
-            exit 0
-          fi
-          swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
+        # **v0.1.7.10:** hard-fail if swift-format isn't on PATH.
+        # The previous soft-fail (`exit 0` when missing) silently
+        # turned the job into a no-op on any runner that lacked
+        # the tool — green CI without ever running the lint.
+        # macos-14 GitHub-hosted runners ship swift-format with
+        # Xcode; if a future runner image drops it, we want a
+        # loud failure so we can reinstall it explicitly.
+        run: swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
 
   shellcheck:
     name: ShellCheck

@@ -103,6 +103,12 @@ public enum RestrictedFile {
         guard fd >= 0 else {
             throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
         }
+        // Track close state so the catch block doesn't double-close
+        // a fd we already closed in the success path. macOS may
+        // reuse a closed fd for an unrelated open() between
+        // close() and the catch — closing it twice would corrupt
+        // an unrelated file handle in this process. v0.1.7.10 fix.
+        var didClose = false
         do {
             // Write the full buffer; partial writes get retried.
             try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
@@ -122,17 +128,34 @@ public enum RestrictedFile {
             }
             // fsync so a crash before journal flush doesn't leave
             // the rename pointing at empty/partial bytes on disk.
-            _ = fsync(fd)
+            // **v0.1.7.10 fix:** check the return value. The
+            // previous `_ = fsync(fd)` swallowed EIO, meaning a
+            // disk-level write failure on flush would silently
+            // proceed to rename — yielding an "atomic" write
+            // pointing at unflushed bytes. A crash right after
+            // the rename would leave an empty/partial
+            // credentials.json that decodes as `.malformed` and
+            // locks the user out of saved passwords.
+            if fsync(fd) != 0 {
+                let fsyncErrno = errno
+                close(fd)
+                didClose = true
+                _ = unlink(tempURL.path)
+                throw POSIXError(POSIXError.Code(rawValue: fsyncErrno) ?? .EIO)
+            }
             close(fd)
-            // rename(2) is atomic on the same filesystem. Any
-            // existing file at `url` is replaced atomically.
-            if rename(tempURL.path, url.path) != 0 {
-                let renameErrno = errno
+            didClose = true
+            // rename(2) is atomic on the same filesystem. Capture
+            // errno on the SAME line as the syscall — anything
+            // between rename and the read could clobber it.
+            let renameOK = rename(tempURL.path, url.path) == 0
+            let renameErrno = errno
+            if !renameOK {
                 _ = unlink(tempURL.path)
                 throw POSIXError(POSIXError.Code(rawValue: renameErrno) ?? .EIO)
             }
         } catch {
-            close(fd)
+            if !didClose { close(fd) }
             _ = unlink(tempURL.path)
             throw error
         }

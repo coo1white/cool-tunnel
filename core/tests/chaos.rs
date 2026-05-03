@@ -779,6 +779,143 @@ async fn siege_wire_ordering_holds_under_burst() {
 }
 
 // ---------------------------------------------------------------------
+// SIEGE — Scenario 17: Concurrent stop_proxy race (Ru-A3 fix verification)
+// ---------------------------------------------------------------------
+// Two stop_proxy requests sent back-to-back while a supervisor is
+// running. Asserts: exactly one Stopped response, exactly one
+// not_running error, exactly one state_changed:false event (not
+// two). Validates the v0.1.7.10 stop-side TOCTOU fix that holds
+// the engine lock and pre-claims the at-most-once emission flag.
+
+#[tokio::test]
+async fn siege_concurrent_stop_proxy_race() {
+    let mut harness = spawn().await;
+
+    // Start a long-lived fake naive.
+    harness
+        .send(&json!({
+            "id": 1,
+            "method": "start_proxy",
+            "params": {
+                "binary_path": "/bin/sleep",
+                "config_path": "60",
+                "port": 1080
+            }
+        }))
+        .await;
+    let _ = drain_until_response(&mut harness, 1).await;
+
+    // Fire two stops back-to-back.
+    harness
+        .send(&json!({"id": 2, "method": "stop_proxy", "params": null}))
+        .await;
+    harness
+        .send(&json!({"id": 3, "method": "stop_proxy", "params": null}))
+        .await;
+
+    // Drain replies + count state_changed:false events.
+    let mut stopped_responses = 0_usize;
+    let mut not_running_errors = 0_usize;
+    let mut state_changed_false_events = 0_usize;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let Ok(Some(line)) = timeout(Duration::from_secs(2), harness.recv_raw()).await else {
+            break;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+        match frame["kind"].as_str() {
+            Some("response") if frame["result"]["type"] == "stopped" => {
+                stopped_responses += 1;
+            }
+            Some("error") if frame["error"]["code"] == "not_running" => {
+                not_running_errors += 1;
+            }
+            Some("event") if frame["data"]["running"].as_bool() == Some(false) => {
+                state_changed_false_events += 1;
+            }
+            _ => {}
+        }
+        if stopped_responses == 1 && not_running_errors == 1 && state_changed_false_events == 1 {
+            break;
+        }
+    }
+
+    assert_eq!(stopped_responses, 1, "expected exactly one Stopped response");
+    assert_eq!(
+        not_running_errors, 1,
+        "expected exactly one not_running error from the racing stop"
+    );
+    assert_eq!(
+        state_changed_false_events, 1,
+        "Ru-A1 regression: state_changed:false event emitted {state_changed_false_events} times for one transition"
+    );
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
+// SIEGE — Scenario 18: Natural death then user stop (Ru-A1 fix)
+// ---------------------------------------------------------------------
+// Spawn a fake naive that exits immediately (`/bin/true`); after
+// the natural-death path triggers, send a user stop. Asserts at
+// most one state_changed:false event arrives. Pre-fix, both the
+// supervisor's monitor_lifecycle AND the dispatcher's user-stop
+// would emit, giving Swift two events for one transition.
+
+#[tokio::test]
+async fn siege_natural_death_then_user_stop_emits_once() {
+    let mut harness = spawn().await;
+
+    // Start a process that exits immediately. The monitor_loop
+    // will detect the death on its next 5-second tick — we
+    // can't wait that long in a test, so instead use a process
+    // that runs for ~1s then exits naturally, AND we also fire
+    // a user stop before/around the natural-death detection.
+    harness
+        .send(&json!({
+            "id": 1,
+            "method": "start_proxy",
+            "params": {
+                "binary_path": "/bin/sleep",
+                "config_path": "0.5",
+                "port": 1080
+            }
+        }))
+        .await;
+    let _ = drain_until_response(&mut harness, 1).await;
+
+    // Wait past the natural-death point + the next monitor tick
+    // so the natural-death path either has fired or won't.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    // Now try to stop. May return not_running (if natural-death
+    // already cleaned up) OR Stopped (if user-stop wins). Either
+    // is fine — the invariant is at-most-one state_changed:false.
+    harness
+        .send(&json!({"id": 2, "method": "stop_proxy", "params": null}))
+        .await;
+
+    let mut state_changed_false_events = 0_usize;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        let Ok(Some(line)) = timeout(Duration::from_secs(2), harness.recv_raw()).await else {
+            break;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if frame["kind"] == "event" && frame["data"]["running"].as_bool() == Some(false) {
+            state_changed_false_events += 1;
+        }
+    }
+
+    assert!(
+        state_changed_false_events <= 1,
+        "Ru-A1 regression: {state_changed_false_events} state_changed:false events for one transition"
+    );
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
 // Helpers — siege-specific
 // ---------------------------------------------------------------------
 
