@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A non-empty, whitespace-trimmed proxy username.
+///
+/// `Debug` and `Display` redact the contents to match [`Password`].
+/// Usernames are less sensitive than passwords, but they are still
+/// account identifiers — leaking them via a stray `info!("user: {u}")`
+/// or panic message would aid credential stuffing. The plaintext is
+/// reachable only via [`Username::as_str`], which callers must treat
+/// as sensitive (do not log, do not include in errors that cross the
+/// process boundary).
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Username(String);
@@ -27,7 +35,10 @@ impl Username {
         Ok(Self(trimmed.to_owned()))
     }
 
-    /// Returns the username as a string slice.
+    /// Returns the username as a string slice. Sensitive — callers
+    /// must not log it or persist it unencrypted outside the audited
+    /// `Credentials` -> `EncodedCredentials` -> `naive config.json`
+    /// path that always lands behind 0600 file permissions.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -36,13 +47,22 @@ impl Username {
 
 impl std::fmt::Debug for Username {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Username").field(&self.0).finish()
+        // Match Password: never reveal plaintext through Debug. A
+        // panic that captures Credentials, a tracing macro that
+        // formats the struct with `{:?}`, or a test snapshot would
+        // otherwise expose the username.
+        f.debug_tuple("Username").field(&"***").finish()
     }
 }
 
 impl std::fmt::Display for Username {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        // Display is intentionally redacted for the same reason as
+        // Debug. URL embedding goes through `percent_encoded()` which
+        // calls `as_str()` directly, so the plaintext path is the
+        // explicit one — implicit `format!("{}", username)` cannot
+        // accidentally leak.
+        f.write_str("***")
     }
 }
 
@@ -209,6 +229,41 @@ mod tests {
     fn password_debug_redacts() {
         let p = Password::parse("hunter2").unwrap();
         assert_eq!(format!("{p:?}"), "Password(\"***\")");
+    }
+
+    /// `Username::Debug` must redact the plaintext exactly like
+    /// `Password`. The original implementation forwarded `&self.0` to
+    /// `debug_tuple` which leaked the username on every panic /
+    /// tracing dump that captured a `Credentials` struct.
+    #[test]
+    fn username_debug_redacts() {
+        let u = Username::parse("nick").unwrap();
+        assert_eq!(format!("{u:?}"), "Username(\"***\")");
+    }
+
+    /// `Username::Display` must redact too — the `{}` formatter would
+    /// otherwise put the plaintext into any log line the caller forgot
+    /// to special-case.
+    #[test]
+    fn username_display_redacts() {
+        let u = Username::parse("nick").unwrap();
+        assert_eq!(format!("{u}"), "***");
+    }
+
+    /// Round-trip the full `Credentials` struct through `{:?}` to
+    /// guarantee neither field leaks even when both appear together.
+    #[test]
+    fn credentials_debug_redacts_both_fields() {
+        let c = Credentials::new(
+            Username::parse("nick").unwrap(),
+            Password::parse("hunter2").unwrap(),
+        );
+        let dump = format!("{c:?}");
+        assert!(!dump.contains("nick"), "username leaked via Debug: {dump}");
+        assert!(
+            !dump.contains("hunter2"),
+            "password leaked via Debug: {dump}"
+        );
     }
 
     #[test]

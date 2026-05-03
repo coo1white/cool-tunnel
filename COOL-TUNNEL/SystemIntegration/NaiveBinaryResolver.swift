@@ -209,20 +209,36 @@ public struct NaiveBinaryResolver: Sendable {
         return Set(tokens.filter { known.contains($0) })
     }
 
-    /// Runs the candidate with `--version` and returns the first line of
-    /// output, or `nil` if the binary does not understand the flag.
+    /// Runs the candidate with `--version` and returns the first line
+    /// of output that **matches the expected naive version pattern**,
+    /// or `nil` otherwise.
+    ///
+    /// We validate the shape (`naive <semantic-version>`) instead of
+    /// trusting whatever the subprocess prints. A misbehaving binary
+    /// could emit an error message containing a config path, a Mach-O
+    /// load error pointing at a private framework, or an attacker-
+    /// controlled string — all of which would otherwise land in the
+    /// Settings view's monospaced "Version" row.
     private static func runVersion(at url: URL) async -> String? {
-        // Some naive builds emit version on stdout, others on stderr —
-        // we capture both and return whichever yields a non-empty line
-        // first.
         let output = await runProcess(
             executable: url,
             arguments: ["--version"]
         )
-        return output?
-            .split(whereSeparator: \.isNewline)
-            .first
-            .map(String.init)
+        guard let raw = output else { return nil }
+        // `naive 147.0.7727.49` is the canonical upstream format. We
+        // accept `naive` followed by whitespace and a 1-4-segment
+        // dotted numeric version (with optional pre-release suffix
+        // like `-beta1`). Anything else is rejected — the UI will
+        // render "(no --version output)" instead of leaking whatever
+        // junk came back.
+        let pattern = #"^naive\s+\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?\s*$"#
+        for line in raw.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.range(of: pattern, options: .regularExpression) != nil {
+                return trimmed
+            }
+        }
+        return nil
     }
 
     /// Returns whether [`CodeSignVerifier`] accepts the binary. Errors
