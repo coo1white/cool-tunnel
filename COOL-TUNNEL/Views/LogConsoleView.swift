@@ -14,6 +14,21 @@ import SwiftUI
 /// the first log line" placeholder instead of a blank rectangle.
 public struct LogConsoleView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Inner-scrollview surface fill. The previous flat
+    /// `paper.opacity(0.55)` made the log surface read as a
+    /// *highlighted* lighter rectangle in dark mode (because
+    /// `paper`'s dark variant is itself a card-like dark
+    /// colour, and 0.55 on top of the parent card composited
+    /// LIGHTER than the surround). Inverted in dark mode: a
+    /// black overlay at 35% recesses the surface so it reads
+    /// as a sunken log area in both modes.
+    private var logSurfaceFill: Color {
+        colorScheme == .dark
+            ? Color.black.opacity(0.35)
+            : CTPalette.paper.opacity(0.55)
+    }
 
     public init() {}
 
@@ -53,7 +68,7 @@ public struct LogConsoleView: View {
                 }
                 .background {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(CTPalette.paper.opacity(0.55))
+                        .fill(logSurfaceFill)
                 }
                 .overlay {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)

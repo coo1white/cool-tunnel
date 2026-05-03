@@ -9,6 +9,162 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.9] — 2026-05-03 (LTSC patch — UI/UX stress audit)
+
+LTSC patch. Fourth UI audit on the v0.1.7.x line, this time
+focused on the surfaces added since the last visual audit
+(in-app updater UI, dark-mode dynamic palette, updater state
+machine). Audit returned 38 findings; this patch closes the
+high-confidence visible bugs + dark-mode contrast issues.
+
+### Honest progress text (was: "Downloading 0%…" forever)
+
+The in-app updater showed `"Downloading \(Int(p * 100))%…"`
+with `p` always 0.0 because `URLSession.shared.download(from:)`
+doesn't report byte-level progress. Users on slow connections
+would stare at "Downloading 0%…" for minutes and reasonably
+conclude the app had hung.
+
+**Fixed:** subtitle now reads `"Downloading… (typically a few
+seconds on broadband)"` — honest about the indeterminate
+nature of the operation.
+
+### Sync re-entry guard on the Check + Update buttons
+
+The naive/rust updater buttons in this same file flip a
+synchronous `isInspecting = true` flag in the click handler
+*before* spawning the Task — so a fast double-tap can't
+queue two operations. The new AppUpdater Check/Update
+buttons didn't follow this pattern; rapid clicks queued
+multiple Tasks that each fired their own re-entry guard
+*after* the first completed.
+
+**Fixed:** added `markEnteringCheck()` / `markEnteringDownload()`
+methods on `AppUpdater` that flip `state` synchronously; the
+Settings handlers call them before `Task { ... }`. Mirrors
+the proven naive/rust pattern.
+
+### Dark-mode card edges restored (`PupCardModifier`)
+
+Three problems on dark stacked together:
+
+- `.shadow(color: Color.black.opacity(0.06))` — invisible on
+  near-black window backgrounds; cards floated with no edge.
+- `borderInk.opacity(0.45)` border — barely visible because
+  the dark `borderInk` variant is itself muted (RGB 0.55).
+- `paper.opacity(0.4)` overlay — defeated the
+  `.regularMaterial` vibrancy in dark mode, making cards
+  read as opaque rectangles.
+
+**Fixed:** `PupCardModifier` now reads `@Environment(\.colorScheme)`
+and picks mode-aware values:
+- Shadow: `Color.black.opacity(0.55)` in dark, 0.06 in light.
+- Border opacity: 0.65 in dark, 0.45 in light.
+- Paper overlay: 0.18 in dark, 0.40 in light (lets the
+  vibrancy material show through).
+
+### Status pill backgrounds — mode-aware opacity
+
+Six sites used `.opacity(0.10)` for the green/red OK/NG
+verdict pills, the macBlue release-notes pill, and the red
+failed pill. On dark backgrounds 10% opacity vanishes; pills
+stop being a visual cue. New `CTSurface.statusPillAlpha(scheme)`
+helper returns 0.22 in dark, 0.10 in light. All six sites
+migrated.
+
+### LogConsole inner surface inverted in dark
+
+The log scrollview's `paper.opacity(0.55)` background made
+the surface read *lighter* than the surrounding pupCard in
+dark mode (mental model: "logs should be recessed/darker, not
+highlighted"). Now uses `Color.black.opacity(0.35)` in dark
+to recess the surface like the user expects.
+
+### Updater UX polish
+
+- **`.relaunching` delay bumped 500 ms → 1.2 s.** The 500 ms
+  was below SwiftUI's render budget on Intel Macs — users
+  often never saw the "Relaunching…" state before AppKit
+  began terminating.
+- **`appUpdaterSection` wrapped in single VStack** so the
+  title row + status row read as one Form-section row, not
+  two with intra-row padding between them.
+- **Wording fix:** `"(was 0.1.7.8)"` → `"— you're on
+  0.1.7.8"`. "was" implied past tense; the user is currently
+  on the older version, not historically.
+- **Update button gets `.layoutPriority(1)`** so it can't
+  get clipped at min window width (780pt) when the subtitle
+  is long.
+- **Release-notes Link**: combined into single self-describing
+  link (`"View release notes for v0.1.7.9"`) instead of two
+  disconnected elements; added trailing `arrow.up.right`
+  glyph; underlined. VoiceOver hears one unambiguous link.
+- **Failed-state row**: switched to `HStack(alignment: .top)`,
+  added `fixedSize(vertical:)` + `frame(maxWidth: .infinity)`
+  so multi-line errors render cleanly with the icon and
+  Dismiss button anchored at the top. "Reset" → "Dismiss"
+  (more accurate semantically).
+- **`appUpdater.reset()` added to `onDisappear`** so a
+  `.failed` or `.upToDate` state doesn't survive the
+  Settings dismiss/re-open cycle. (True orphan-download
+  cancellation deferred to v0.2.)
+
+### Connection form first-run hint — dark-mode contrast
+
+`macBlueSoft.opacity(0.18)` was nearly invisible on dark
+backgrounds. New mode-aware `firstRunHintFill` keeps the
+existing light look and uses `macBlue.opacity(0.22)` in dark.
+
+### Add Domain field accepts Return
+
+Previously, pressing Return inside the "Add direct domain"
+TextField fell through to the Done button's
+`.keyboardShortcut(.defaultAction)` and dismissed Settings
+without adding the typed value. New `.onSubmit { addDomain() }`
+on the TextField does the obvious thing.
+
+### Accessibility improvements
+
+- **Appearance picker** now exposes the current selection via
+  `.accessibilityValue(draft.appearanceMode.displayName)` —
+  VoiceOver hears "App appearance, Dark, picker" instead of
+  just "App appearance, picker".
+- **Updater progress spinner** carries
+  `.accessibilityLabel(...)` describing the current phase
+  ("Downloading update", "Verifying download integrity",
+  etc.) instead of the generic "progress indicator".
+- **Release notes link** has explicit `accessibilityLabel`
+  noting it opens in browser.
+
+### Files
+
+- `COOL-TUNNEL/Views/MalteseTheme.swift` — `PupCardModifier`
+  reads colorScheme; new `CTSurface.statusPillAlpha`.
+- `COOL-TUNNEL/Views/SettingsView.swift` — VStack wrap, sync
+  guards, Dismiss button, status-row redesign, onDisappear
+  reset, picker accessibilityValue, Add Domain onSubmit, all
+  pillAlpha conversions.
+- `COOL-TUNNEL/Views/LogConsoleView.swift` — dynamic surface
+  fill.
+- `COOL-TUNNEL/Views/ConnectionFormView.swift` — dynamic
+  firstRunHint fill.
+- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` —
+  `markEnteringCheck/Download` methods, `isInFlight` made
+  `public`, relaunching delay bumped.
+
+### Engine + chaos suite
+
+Unchanged. UI-only patch. All 126 tests still pass.
+
+### Deferred to v0.2.0
+
+- Real cancel button + URLSessionDownloadDelegate
+  (orphan-download lifecycle)
+- Promote AppUpdater out of SettingsView's @State so download
+  state survives Settings dismiss/re-open
+- Real download progress bar (would replace
+  `URLSession.shared.download` with a delegate-driven flow)
+
 ## [0.1.7.8] — 2026-05-03 (LTSC patch — updater bugfix)
 
 LTSC patch. Two real bugs surfaced when the v0.1.7.7
