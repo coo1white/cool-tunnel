@@ -105,11 +105,32 @@ fn init_tracing() {
 
 /// Engine-wide mutable state. Wrapped in a [`Mutex`] and shared between the
 /// stdin reader and any background tasks.
-#[derive(Default)]
 struct EngineState {
     supervisor: Option<ProxySupervisor>,
     monitor_handle: Option<JoinHandle<()>>,
     active_port: Option<cool_tunnel_core::domain::Port>,
+    /// Per-anomaly-reason debouncer that survives proxy restarts.
+    /// Earlier versions instantiated this fresh inside `monitor_loop`
+    /// every time `StartProxy` ran, which meant a naive that bounced
+    /// twice within `ANOMALY_DEBOUNCE` (e.g., a 50 ms restart loop)
+    /// would emit the same anomaly twice — the second instance saw
+    /// an empty debouncer. Living on the `EngineState` mutex means
+    /// the timer survives the restart; `StartProxy` calls `reset()`
+    /// on it explicitly when a new run begins so the user *does*
+    /// see the anomaly once on every fresh start, just not twice
+    /// inside the suppression window.
+    anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer<AnomalyReason>,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        Self {
+            supervisor: None,
+            monitor_handle: None,
+            active_port: None,
+            anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer::new(ANOMALY_DEBOUNCE),
+        }
+    }
 }
 
 async fn run() -> std::io::Result<()> {
@@ -347,38 +368,7 @@ async fn dispatch(
             binary_path,
             config_path,
             port,
-        } => {
-            let mut guard = state.lock().await;
-            if guard.supervisor.is_some() {
-                return Err(ErrorPayload::new(
-                    "already_running",
-                    "proxy is already running",
-                ));
-            }
-            let supervisor = ProxySupervisor::spawn(&binary_path, &config_path, events.clone())
-                .await
-                .map_err(|err| {
-                    // Log the full OS error to stderr (engine-side
-                    // tracing, audited surface) but only surface a
-                    // generic message over the wire. The raw
-                    // `std::io::Error` can include the config path —
-                    // which is harmless on its own but noise we don't
-                    // want in the UI's `lastError`. The error code
-                    // (`spawn_failed`) tells the user *what* failed;
-                    // the message tells them *what to check*.
-                    tracing::error!(error = %err, "ProxySupervisor::spawn failed");
-                    ErrorPayload::new(
-                        "spawn_failed",
-                        "failed to spawn the naive proxy binary; check the engine log for details",
-                    )
-                })?;
-            let pid = supervisor.pid();
-            let monitor_handle = tokio::spawn(monitor_loop(pid, port, events));
-            guard.supervisor = Some(supervisor);
-            guard.monitor_handle = Some(monitor_handle);
-            guard.active_port = Some(port);
-            Ok(ResponsePayload::Started { pid })
-        }
+        } => start_proxy(state, binary_path, config_path, port, events).await,
         RequestKind::StopProxy => {
             let (supervisor, monitor_handle) = {
                 let mut guard = state.lock().await;
@@ -428,7 +418,77 @@ async fn dispatch(
     }
 }
 
-async fn monitor_loop(pid: u32, port: cool_tunnel_core::domain::Port, events: mpsc::Sender<Event>) {
+/// `StartProxy` handler — extracted from `dispatch()` so the
+/// `dispatch` match arm body stays under clippy's 100-line
+/// `too_many_lines` ceiling. Owns the two-phase spawn protocol
+/// (audit-fixed in v0.1.5.8): take the engine-state lock briefly
+/// to assert the already-running invariant, drop the lock, do the
+/// potentially-slow `ProxySupervisor::spawn`, then re-acquire to
+/// commit.
+async fn start_proxy(
+    state: Arc<Mutex<EngineState>>,
+    binary_path: std::path::PathBuf,
+    config_path: std::path::PathBuf,
+    port: cool_tunnel_core::domain::Port,
+    events: mpsc::Sender<Event>,
+) -> Result<ResponsePayload, ErrorPayload> {
+    // Phase 1: cheap pre-check under the lock so we can fail fast
+    // without paying for a doomed `spawn`.
+    {
+        let guard = state.lock().await;
+        if guard.supervisor.is_some() {
+            return Err(ErrorPayload::new(
+                "already_running",
+                "proxy is already running",
+            ));
+        }
+    }
+
+    let supervisor = ProxySupervisor::spawn(&binary_path, &config_path, events.clone())
+        .await
+        .map_err(|err| {
+            // Log the full OS error to stderr (engine-side tracing,
+            // audited surface) but only surface a generic message
+            // over the wire. The raw `std::io::Error` can include
+            // the config path — harmless on its own but noise we
+            // don't want in the UI's `lastError`.
+            tracing::error!(error = %err, "ProxySupervisor::spawn failed");
+            ErrorPayload::new(
+                "spawn_failed",
+                "failed to spawn the naive proxy binary; check the engine log for details",
+            )
+        })?;
+    let pid = supervisor.pid();
+
+    // Phase 2: re-acquire and commit. Re-check the invariant —
+    // between the two lock acquisitions another StartProxy could
+    // have raced to spawn a second supervisor. If we lose the race
+    // we kill *our* spawned supervisor (the other one is the
+    // canonical instance) and surface the already-running error.
+    let mut guard = state.lock().await;
+    if guard.supervisor.is_some() {
+        let _ = supervisor.stop().await;
+        return Err(ErrorPayload::new(
+            "already_running",
+            "proxy is already running",
+        ));
+    }
+    // Reset the per-anomaly debouncer so a previous run's
+    // suppression timestamps don't bleed into this start.
+    guard.anomaly_debouncer.reset();
+    let monitor_handle = tokio::spawn(monitor_loop(pid, port, events, Arc::clone(&state)));
+    guard.supervisor = Some(supervisor);
+    guard.monitor_handle = Some(monitor_handle);
+    guard.active_port = Some(port);
+    Ok(ResponsePayload::Started { pid })
+}
+
+async fn monitor_loop(
+    pid: u32,
+    port: cool_tunnel_core::domain::Port,
+    events: mpsc::Sender<Event>,
+    state: Arc<Mutex<EngineState>>,
+) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the first immediate tick — give naive a moment to bind before we probe.
@@ -437,18 +497,26 @@ async fn monitor_loop(pid: u32, port: cool_tunnel_core::domain::Port, events: mp
     // Anomalies are emitted at most once per `ANOMALY_DEBOUNCE` per
     // reason. The probe interval is currently 5 s so this only kicks
     // in on tighter probe schedules or when several consecutive probes
-    // happen to fall inside the window after a missed tick. Keeping
-    // the debouncer here (rather than at the channel boundary) makes
-    // the suppression policy local and easy to reason about.
-    let mut anomaly_debouncer = cool_tunnel_core::util::debounce::Debouncer::new(ANOMALY_DEBOUNCE);
-
+    // happen to fall inside the window after a missed tick.
+    //
+    // The debouncer state lives on `EngineState` so it survives
+    // across `monitor_loop` task aborts during a proxy restart —
+    // earlier versions instantiated a fresh debouncer per loop and
+    // leaked the suppression timer when StopProxy aborted the task.
+    // `StartProxy` calls `anomaly_debouncer.reset()` whenever a new
+    // run begins, so the user always sees the *first* anomaly of a
+    // session even if it happened seconds before in the previous run.
     loop {
         ticker.tick().await;
         match monitor::run(pid, port).await {
             Ok(snapshot) => {
                 if let Some(anomaly) = snapshot.anomaly {
                     let reason: AnomalyReason = (&anomaly).into();
-                    if anomaly_debouncer.admit(reason, std::time::Instant::now()) {
+                    let admitted = {
+                        let mut guard = state.lock().await;
+                        guard.anomaly_debouncer.admit(reason, std::time::Instant::now())
+                    };
+                    if admitted {
                         let _ = events
                             .send(Event::Anomaly {
                                 reason,
