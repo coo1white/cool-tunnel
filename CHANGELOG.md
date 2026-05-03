@@ -9,6 +9,52 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## Unreleased — chaos test infra (no binary change)
+
+LTSC test-infrastructure addition. `core/tests/chaos.rs` —
+12 deliberate-misbehavior scenarios that exercise the engine
+under the failure modes the v0.1.7.x audits identified or
+fixed. Asserts each invariant the audits are supposed to
+guarantee, so a future regression that breaks one fails CI
+loudly instead of shipping silently.
+
+Scenarios:
+
+1. Oversized frame survival — engine returns
+   `frame_too_large` and continues processing.
+2. No-newline flood — discard cap (`16 × MAX_FRAME_BYTES`)
+   triggers; engine fails fast instead of looping forever
+   (verifies Ru#H4 fix).
+3. Malformed-frame burst (1000 invalid lines) — engine
+   stays responsive; sentinel valid request still answered.
+4. Concurrent `start_proxy` race — exactly one
+   `started` reply + one `already_running` error, no
+   double-spawn (verifies Ru#C2 TOCTOU fix).
+5. Stdin EOF mid-frame — engine exits cleanly.
+6. Empty + whitespace lines — silently skipped, no
+   error frames.
+7. Invalid UTF-8 — `malformed_request` error, engine
+   alive.
+8. ID correlation under interleaved valid/invalid — every
+   reply carries its associated id (verifies the two-phase
+   parse contract).
+9. `stop_proxy` when idle — `not_running` error.
+10. `stop_proxy` spam (20× back-to-back) — stable error
+    replies, no crash.
+11. 100k pure-newline flood — empty-line short-circuit
+    holds; zero error frames emitted.
+12. `shutdown` during in-flight requests — engine exits
+    cleanly with status 0.
+
+No engine changes. The artifact bytes for v0.1.7.4 are
+unaffected; this commit only adds test infrastructure that CI
+runs on every push.
+
+Surfaced one known design quirk (audit Ru#C4): the engine
+emits `state_changed: true` event *before* the `started`
+response. Documented; deferred to v0.2.0 where the wire
+contract opens.
+
 ## [0.1.7.4] — 2026-05-03 (LTSC patch)
 
 LTSC in-line patch — debounce-design audit. Single-line tuning
