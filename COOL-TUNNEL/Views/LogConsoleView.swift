@@ -52,12 +52,12 @@ public struct LogConsoleView: View {
                     .padding(10)
                 }
                 .background {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(CTPalette.paper.opacity(0.55))
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(.white.opacity(0.30), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(CTPalette.borderInk.opacity(0.40), lineWidth: 0.7)
                 }
                 .onChange(of: orchestrator.logEntries.count) { _, _ in
                     withAnimation(.linear(duration: 0.1)) {
