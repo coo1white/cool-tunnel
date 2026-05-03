@@ -1,6 +1,6 @@
 // Views/ControlPanelView.swift
 //
-// v0.1.5.4: redesigned as a NewJeans-style mode picker.
+// v0.1.5.4: redesigned as a Maltese-pup mode picker.
 //
 // One row, four interaction surfaces:
 //
@@ -13,7 +13,7 @@
 // because Global is running" state from earlier versions.
 //
 // macOS 26 features in use here:
-//   - `.glassEffect()` on the wrapper card (via `ganjiCard`)
+//   - `.glassEffect()` on the wrapper card (via `pupCard`)
 //   - `.symbolEffect(.bounce)` on the active chip's icon when the
 //     mode changes
 //   - `.sensoryFeedback(.selection, trigger:)` on chip taps
@@ -41,7 +41,7 @@ public struct ControlPanelView: View {
             settingsButton
         }
         .padding(12)
-        .ganjiCard(cornerRadius: 20)
+        .pupCard(cornerRadius: 20)
         // Selection feedback on the trackpad — feels "genki" without
         // being noisy. macOS only honours certain feedback kinds on
         // hardware that supports them; the modifier no-ops elsewhere.
