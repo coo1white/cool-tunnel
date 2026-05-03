@@ -67,7 +67,10 @@ public struct LogConsoleView: View {
             }
         }
         .padding(16)
-        .pupCard(cornerRadius: 8, tint: CTPalette.lilac)
+        // Mode-aware tint — matches the header pill so the whole
+        // window reads as one mood. See ConnectionFormView for the
+        // same pattern.
+        .pupCard(cornerRadius: 8, tint: CTPalette.accent(for: orchestrator.activeMode))
     }
 
     /// Friendly placeholder when no log lines have arrived yet — the

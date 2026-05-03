@@ -46,7 +46,11 @@ public struct ControlPanelView: View {
             settingsButton
         }
         .padding(12)
-        .pupCard(cornerRadius: 8)
+        // Mode-aware tint — same accent the active chip uses, so the
+        // control row reads as part of the chosen mode's "mood" rather
+        // than a neutral chrome strip. Smart=blue, Global=pink,
+        // Local=green; idle stays platinum-grey.
+        .pupCard(cornerRadius: 8, tint: CTPalette.accent(for: orchestrator.activeMode))
         // Selection feedback on the trackpad — feels "genki" without
         // being noisy. macOS only honours certain feedback kinds on
         // hardware that supports them; the modifier no-ops elsewhere.

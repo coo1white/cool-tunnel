@@ -229,6 +229,12 @@ public struct ModeChipStyle: ButtonStyle {
         let shape = Capsule(style: .continuous)
         return configuration.label
             .font(.callout.weight(.semibold))
+            // Single line, no truncation. Without this the chip labels
+            // ("Smart", "Local") wrap to two lines on the narrower
+            // window widths the Connection Form pushes us toward —
+            // visible as "Smar / t" and "Lo- / cal" in v0.1.6.
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .foregroundStyle(isActive ? Color.white : CTPalette.bodyInk)
