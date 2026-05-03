@@ -41,7 +41,7 @@ public struct ControlPanelView: View {
             settingsButton
         }
         .padding(12)
-        .pupCard(cornerRadius: 20)
+        .pupCard(cornerRadius: 8)
         // Selection feedback on the trackpad — feels "genki" without
         // being noisy. macOS only honours certain feedback kinds on
         // hardware that supports them; the modifier no-ops elsewhere.
