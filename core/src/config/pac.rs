@@ -38,6 +38,11 @@ pub fn generate_pac(direct_domains: &[String], port: Port) -> String {
     let cleaned = normalise_domains(direct_domains);
     let domains_array = encode_js_string_array(&cleaned);
     let port = port.get();
+    // Pull the loopback host through the central `config::LOOPBACK_HOST`
+    // constant so the JS template doesn't fossilise its own copy
+    // — kept aliased here as `loopback` to keep the format string
+    // readable.
+    let loopback = crate::config::LOOPBACK_HOST;
     format!(
         "function FindProxyForURL(url, host) {{\n\
          \x20   host = host.toLowerCase();\n\
@@ -75,7 +80,7 @@ pub fn generate_pac(direct_domains: &[String], port: Port) -> String {
          \x20       }}\n\
          \x20   }}\n\
          \n\
-         \x20   return \"SOCKS5 127.0.0.1:{port}; SOCKS 127.0.0.1:{port}; DIRECT\";\n\
+         \x20   return \"SOCKS5 {loopback}:{port}; SOCKS {loopback}:{port}; DIRECT\";\n\
          }}"
     )
 }
@@ -89,9 +94,15 @@ fn normalise_domains(input: &[String]) -> Vec<String> {
 }
 
 fn encode_js_string_array(values: &[String]) -> String {
-    // serde_json produces a strict-JSON array of strings, which is also a
-    // valid JavaScript expression — ideal for embedding in PAC content.
-    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_owned())
+    // serde_json produces a strict-JSON array of strings, which is
+    // also a valid JavaScript expression — ideal for embedding in
+    // PAC content. The `unwrap_or_default` fallback is structurally
+    // unreachable: `serde_json::to_string` over `&[String]` cannot
+    // fail because `String` has no `Serialize` failure modes
+    // (no map keys, no NaN floats). Kept defensive so the function
+    // remains total without violating the crate's `unwrap_used`
+    // / `expect_used` lints.
+    serde_json::to_string(values).unwrap_or_default()
 }
 
 #[cfg(test)]

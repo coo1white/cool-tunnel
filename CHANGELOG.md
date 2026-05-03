@@ -9,6 +9,131 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.2] — 2026-05-03 (LTSC patch)
+
+LTSC in-line patch — module-design audit pass. 113 audit
+findings across Swift (58) and Rust (55); this patch closes the
+high-confidence correctness fixes + quick wins. Bigger
+architectural items (TunnelOrchestrator god-object split,
+Resolver/Updater 80% deduplication, async CredentialStore,
+moving client_mode/server_mode into the lib) are deferred to
+the next minor bump because they touch shared infrastructure
+or risk regression on the LTSC tag.
+
+**Swift correctness:**
+
+- `TunnelOrchestrator.bootstrap()` no longer `fatalError`s when
+  Application Support cannot be created — falls back to a tmp
+  path and surfaces the failure as `lastError`. App boots into a
+  diagnosable state instead of crashing pre-UI.
+- `bootstrapIfNeeded()` flag is now set on engine-start success
+  rather than entry, so a future Retry button can recover from
+  transient launch failures.
+- `refreshNaiveDescriptor()` busy-wait
+  (`while isRefreshing { await Task.yield() }`) replaced with a
+  shared `Task` continuation. Late callers `await` instead of
+  pinning a CPU under contention.
+- `AppDelegate.applicationWillTerminate` `DispatchSemaphore`
+  main-thread block (which deadlocked because MainActor IS the
+  main thread) replaced with the correct
+  `applicationShouldTerminate → .terminateLater →
+  reply(toApplicationShouldTerminate:)` AppKit dance. The
+  engine actually gets a clean stop on Cmd+Q now.
+- `NaiveUpdater.assetURL` `fatalError` on URL-construction
+  failure → typed `UpdaterError.message` (consistent with the
+  sibling `resolveLatestStableTag` that already used the safer
+  pattern).
+- `ContentView` `#Preview` `bootstrap()` call wrapped in
+  `#if DEBUG` so it doesn't ship a second engine subprocess
+  alongside the one `CoolTunnelApp` already owns.
+
+**Swift hygiene:**
+
+- `persistSettings` now debounces (250 ms) so per-keystroke
+  edits collapse into one UserDefaults write; `flushSettings`
+  exposed for explicit commit points + called from `shutdown`
+  so a late edit isn't silently dropped on Cmd+Q.
+- Removed `TunnelOrchestrator.hostArchitecture` re-export —
+  `HostArchitecture.current` is already a static cached value;
+  the re-export was dead public surface.
+- Removed dead `Keys.migrated` UserDefaults key + writes
+  (set but never read).
+- `KeychainStore: CredentialStore` conformance moved from
+  `CredentialStore.swift` to `KeychainStore.swift` (Swift
+  convention: conformance lives with the type).
+- Free-function `writeRestrictedFile(_:to:)` namespaced as
+  `RestrictedFile.write(_:to:)` to keep module global scope
+  clean.
+- `NaiveUpdater.download` doc-comment now honestly describes
+  the indeterminate progress (the previous claim of "every ~64
+  KB" was untrue; `URLSession.shared.download(from:)` doesn't
+  surface byte-level progress).
+
+**Rust correctness:**
+
+- `client_mode::start_proxy` TOCTOU race fixed — engine mutex
+  now held across the `ProxySupervisor::spawn` call. Previously
+  two concurrent start requests could both pass the "already
+  running?" check and both spawn `naive` (two real PIDs!) —
+  the loser's events still leaked to Swift before being
+  cancelled.
+- `ProxySupervisor::stop()` now bounds the monitor-drain wait
+  at 2 s. The previous unbounded `handle.await` could in theory
+  block indefinitely; `kill_on_drop(true)` on the underlying
+  `Child` still reaps the process.
+- `ApiError` (`server_mode`) is now a `BadRequest` /
+  `Internal` enum with `Debug` derived; previously every
+  failure was forced through 500 with no `Debug` for
+  `tracing::error!(?err)`.
+
+**Rust hygiene:**
+
+- `redaction.rs` regex statics switched from
+  `OnceLock<Option<Regex>>` (which silently passthrough'd on
+  compile failure → credentials would have leaked) to
+  `LazyLock<Regex>` with `.expect(...)`. New
+  `redaction_regexes_compile` test ensures `cargo test`
+  catches any bad regex edit before it can ship.
+- `lib.rs` re-exports `error::CoreError` at the crate root so
+  consumers can write `cool_tunnel_core::CoreError`.
+- `EngineState` is now `#[derive(Default)]` (manual impl was
+  delegating to component defaults anyway).
+- `ANOMALY_DEBOUNCE` constant deleted; `Debouncer::default()`
+  is the single source of truth for the 100 ms window.
+- `GLOBAL_TARGETS` and `SMART_TARGETS` consolidated to one
+  underlying `LATENCY_TARGETS` constant (the two were
+  byte-identical; future-divergence footgun).
+- `LOOPBACK_HOST` moved to `config/mod.rs` so `naive_config`
+  and `pac` reference one constant instead of literal
+  `"127.0.0.1"` strings in a JS template.
+- `MAX_FRAME_BYTES` is now `pub` so the integration test can
+  reference it instead of duplicating the magic number.
+- `MAX_INFLIGHT_REQUESTS` doc-commented with rationale (was
+  bare `= 32` with no explanation).
+- `EncodedCredentials` fields made private with accessors;
+  `Debug` redacts the password; `Drop` clears the strings
+  eagerly. Heap-byte zeroing requires the `zeroize` crate
+  (project forbids `unsafe`); deferred to v0.2.
+- `pac.rs::encode_js_string_array` `unwrap_or_else` fallback
+  collapsed to `unwrap_or_default` with a comment explaining
+  it's structurally unreachable (`serde_json::to_string` on
+  `&[String]` is infallible).
+- `client_mode::dispatch` wildcard arm rewritten with a typed
+  payload that names the unmapped `RequestKind` variant.
+
+**Build / lint:**
+
+- `core/build.rs` doc comment promoted to module-level `//!`
+  so `clippy::missing-docs` is happy.
+- `EngineState::default()` derived; capture's `argv` parameter
+  renamed to `command_line` to avoid `clippy::similar_names`.
+
+The deferred items (Sw#10 god-object, Sw#8/9 resolver+updater
+dedup, Sw#5/6 CoreClient broken-pipe + race-y shutdown, Ru#C1
+stdin drain, Ru#H3/H4 client_mode/server_mode into lib, plus
+all wire-format and on-disk-format changes) are tracked for
+the next minor bump.
+
 ## [0.1.7.1] — 2026-05-03 (LTSC patch)
 
 LTSC in-line patch — UI/UX audit pass. Public surface

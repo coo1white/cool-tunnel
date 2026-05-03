@@ -7,7 +7,7 @@
 //! before the line crosses our boundary.
 
 use std::borrow::Cow;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -25,66 +25,66 @@ use regex::Regex;
 /// subprocess and to every curl-stderr blob forwarded to the UI.
 #[must_use]
 pub fn redact(line: &str) -> Cow<'_, str> {
-    // Apply redactors in sequence. Each one borrows when no match is
-    // found, so the no-secret common case (vast majority of log
-    // lines) allocates zero times.
-    let after_url = match userinfo_regex() {
-        Some(re) => re.replace_all(line, "${scheme}***:***@"),
-        None => Cow::Borrowed(line),
-    };
-    let after_auth = match auth_header_regex() {
-        Some(re) => re.replace_all(&after_url, "${prefix}***"),
-        None => after_url.clone(),
-    };
-    let after_cookie = match cookie_header_regex() {
-        Some(re) => re.replace_all(&after_auth, "${prefix}***"),
-        None => after_auth.clone(),
-    };
-    // If nothing changed, return the borrowed input — preserves the
-    // zero-allocation fast path for clean lines.
-    if after_cookie == line {
-        Cow::Borrowed(line)
-    } else {
-        Cow::Owned(after_cookie.into_owned())
+    // Each step takes a Cow and returns a Cow — passthrough when no
+    // match, owned only on substitution. Sequential reassignment
+    // keeps the zero-allocation fast path for clean lines without
+    // the previous `Option<Regex>` + `.clone()` dance that allocated
+    // even when no redaction was needed.
+    let mut current = Cow::Borrowed(line);
+    if let Cow::Owned(s) = USERINFO_REGEX.replace_all(&current, "${scheme}***:***@") {
+        current = Cow::Owned(s);
     }
+    if let Cow::Owned(s) = AUTH_HEADER_REGEX.replace_all(&current, "${prefix}***") {
+        current = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = COOKIE_HEADER_REGEX.replace_all(&current, "${prefix}***") {
+        current = Cow::Owned(s);
+    }
+    current
 }
 
-/// `scheme://userinfo@` matcher. Schemes are case-insensitive (curl
-/// occasionally upper-cases them in error output). The userinfo class
-/// `[^@\s/]+` stops at the first `@`, whitespace, or `/` so a path
-/// containing `@` cannot be mistaken for credentials.
-fn userinfo_regex() -> Option<&'static Regex> {
-    static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
-    REGEX
-        .get_or_init(|| {
-            Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^@\s/]+@").ok()
-        })
-        .as_ref()
-}
+// `LazyLock` (Rust 1.80+) panics on first use if the regex fails
+// to compile, which the supervisor's `kill_on_drop` reaps into a
+// fail-fast restart. The previous `OnceLock<Option<Regex>>`
+// silently degraded to a passthrough on compile failure —
+// credentials would then leak. Fail-loud is the right LTSC
+// posture for a security control. The
+// `redaction_regexes_compile` test below catches any bad edit
+// at `cargo test` time before it can ship.
+//
+// `expect` is used in spite of the crate-wide `expect_used =
+// "deny"` lint because the compile-time test acts as the safety
+// net the lint usually provides, and panic is the correct
+// response to a constant regex that won't compile.
+
+/// `scheme://userinfo@` matcher. Schemes are case-insensitive
+/// (curl occasionally upper-cases them in error output). The
+/// userinfo class `[^@\s/]+` stops at the first `@`, whitespace,
+/// or `/` so a path containing `@` cannot be mistaken for
+/// credentials.
+#[allow(clippy::expect_used)]
+static USERINFO_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^@\s/]+@")
+        .expect("userinfo redaction regex must compile")
+});
 
 /// `Authorization: <scheme> <value>` matcher. The scheme is left
 /// intact (Bearer / Basic / Digest tells the user what auth type the
 /// upstream wanted); the value is replaced with `***`.
-fn auth_header_regex() -> Option<&'static Regex> {
-    static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
-    REGEX
-        .get_or_init(|| {
-            // Capture everything up to and including the auth scheme +
-            // whitespace; replace just the secret tail.
-            Regex::new(r"(?i)(?P<prefix>Authorization:\s*[A-Za-z]+\s+)\S+").ok()
-        })
-        .as_ref()
-}
+#[allow(clippy::expect_used)]
+static AUTH_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?P<prefix>Authorization:\s*[A-Za-z]+\s+)\S+")
+        .expect("Authorization redaction regex must compile")
+});
 
 /// `Cookie: …` matcher. Cookies frequently carry session tokens and
 /// CSRF state — replacing the entire value (not just one cookie pair)
 /// is the conservative choice for log lines we don't control.
-fn cookie_header_regex() -> Option<&'static Regex> {
-    static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
-    REGEX
-        .get_or_init(|| Regex::new(r"(?i)(?P<prefix>(?:Set-)?Cookie:\s*)[^\r\n]+").ok())
-        .as_ref()
-}
+#[allow(clippy::expect_used)]
+static COOKIE_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?P<prefix>(?:Set-)?Cookie:\s*)[^\r\n]+")
+        .expect("Cookie redaction regex must compile")
+});
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -214,5 +214,18 @@ mod tests {
     #[test]
     fn empty_line_is_safe() {
         assert_eq!(redact(""), "");
+    }
+
+    /// Force-touch every `LazyLock` so a future regex edit that
+    /// doesn't compile fails `cargo test` instead of shipping and
+    /// turning credential redaction into a runtime panic. Belt-
+    /// and-braces alongside the `LazyLock`'s own `expect`.
+    #[test]
+    fn redaction_regexes_compile() {
+        // The asserts force initialisation; we don't care about the
+        // match result, only that `replace_all` does not panic.
+        let _ = USERINFO_REGEX.replace_all("", "");
+        let _ = AUTH_HEADER_REGEX.replace_all("", "");
+        let _ = COOKIE_HEADER_REGEX.replace_all("", "");
     }
 }

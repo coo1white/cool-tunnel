@@ -58,23 +58,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        // Real quit (Cmd+Q, menu Quit, system shutdown). Detach
-        // the engine cleanly — it'll revert any active system
-        // proxy and stop the supervisor before we exit.
-        if let orchestrator {
-            // `applicationWillTerminate` is allowed up to a few
-            // hundred ms of synchronous work; we run shutdown on
-            // a Task and wait briefly. The OS will SIGTERM us
-            // either way, and the engine handles SIGCHLD on its
-            // own — this is best-effort cleanup.
-            let semaphore = DispatchSemaphore(value: 0)
-            Task { @MainActor in
-                await orchestrator.shutdown()
-                semaphore.signal()
-            }
-            _ = semaphore.wait(timeout: .now() + .milliseconds(500))
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Real quit (Cmd+Q, menu Quit, system shutdown). The
+        // previous implementation parked the main thread on a
+        // `DispatchSemaphore` while a `Task @MainActor` tried to
+        // run shutdown — the MainActor IS the main thread, so the
+        // task could never run and the 500ms wait always elapsed
+        // with the engine still alive (system proxy left enabled,
+        // naive child PID lingering until the kernel reaped it).
+        //
+        // The correct AppKit dance is `.terminateLater` + a real
+        // async task that calls `NSApp.reply(toApplicationShouldTerminate:)`
+        // when shutdown finishes. The runloop keeps spinning, the
+        // MainActor-isolated `orchestrator.shutdown()` runs, and
+        // we tell AppKit to proceed once the engine is genuinely
+        // down.
+        guard let orchestrator else {
+            return .terminateNow
         }
+        Task { @MainActor in
+            await orchestrator.shutdown()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     /// Returns the Window-scene main window. Filters out any

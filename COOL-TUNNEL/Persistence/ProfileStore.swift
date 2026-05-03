@@ -29,10 +29,6 @@ public struct ProfileStore: @unchecked Sendable {
     private enum Keys {
         static let profiles = "profiles"
         static let selected = "selectedProfileID"
-        /// Marker we set the first time we strip passwords out of an
-        /// existing `profiles` blob — used to skip the legacy
-        /// migration on subsequent loads.
-        static let migrated = "profilesMigratedToKeychain"
     }
 
     private let defaults: UserDefaults
@@ -86,7 +82,6 @@ public struct ProfileStore: @unchecked Sendable {
 
         if needsRewrite {
             persistStripped(profiles: hydrated)
-            defaults.set(true, forKey: Keys.migrated)
         }
         return hydrated
     }
@@ -105,7 +100,6 @@ public struct ProfileStore: @unchecked Sendable {
             }
         }
         persistStripped(profiles: profiles)
-        defaults.set(true, forKey: Keys.migrated)
     }
 
     /// Returns the currently selected profile id, or `nil` if none

@@ -18,19 +18,27 @@ use crate::protocol::{DiagnosticReport, Event, LatencyReport, Outbound, ProbeRes
 pub use metrics::{parse_write_out, secs_to_ms};
 pub use probe::{run_probe, ProbeOptions};
 
-/// Targets used for the global-mode latency test. Matches the Swift
-/// `runTimeoutTest` argument list.
-pub const GLOBAL_TARGETS: &[&str] = &[
+/// Targets used for both the global-mode and smart-mode latency
+/// tests. Matches the Swift `runTimeoutTest` argument list.
+///
+/// The two modes used to ship as separate `GLOBAL_TARGETS` and
+/// `SMART_TARGETS` constants with byte-identical contents — a
+/// future-divergence footgun. If the two need to differ later
+/// (e.g. smart mode also pings a CDN region), reintroduce the
+/// split with `LATENCY_TARGETS_GLOBAL` / `LATENCY_TARGETS_SMART`
+/// names so the divergence is intentional.
+pub const LATENCY_TARGETS: &[&str] = &[
     "https://www.baidu.com",
     "https://www.google.com/generate_204",
 ];
 
-/// Targets used for the smart-mode latency test. Matches the Swift
-/// `runTimeoutTest` argument list.
-pub const SMART_TARGETS: &[&str] = &[
-    "https://www.baidu.com",
-    "https://www.google.com/generate_204",
-];
+/// Backwards-compatible aliases — `pub` items in the engine
+/// surface, kept under the LTSC contract until the next minor.
+/// Both point at the same underlying slice.
+pub const GLOBAL_TARGETS: &[&str] = LATENCY_TARGETS;
+/// Smart-mode latency targets. Identical to [`GLOBAL_TARGETS`]
+/// today; both are aliases for [`LATENCY_TARGETS`].
+pub const SMART_TARGETS: &[&str] = LATENCY_TARGETS;
 
 /// Error raised by a diagnostics run.
 #[derive(Debug, Error)]
@@ -84,10 +92,11 @@ pub async fn run_latency(
     port: Port,
     outbound: &mpsc::Sender<Outbound>,
 ) -> Result<LatencyReport, DiagnosticError> {
-    let targets: &[&str] = match mode {
-        ProxyTestMode::Smart => SMART_TARGETS,
-        ProxyTestMode::Global => GLOBAL_TARGETS,
-    };
+    // Both modes target the same upstream list today; if they
+    // need to diverge later, replace this with a per-mode pick
+    // and rename the underlying constants.
+    let _ = mode; // mode kept in the API for future per-mode targets
+    let targets: &[&str] = LATENCY_TARGETS;
 
     let mut samples = Vec::with_capacity(targets.len());
     for (idx, url) in targets.iter().enumerate() {
