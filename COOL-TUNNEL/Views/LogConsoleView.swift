@@ -63,7 +63,7 @@ public struct LogConsoleView: View {
             }
         }
         .padding(16)
-        .pupCard(cornerRadius: 20, tint: CTPalette.lilac)
+        .pupCard(cornerRadius: 8, tint: CTPalette.lilac)
     }
 
     /// Friendly placeholder when no log lines have arrived yet — the
@@ -86,12 +86,12 @@ public struct LogConsoleView: View {
     private func row(for entry: LogEntry) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(entry.timestamp, format: .dateTime.hour().minute().second())
-                .font(.system(.caption, design: .monospaced))
+                .font(CTTypography.monoSmall)
                 .foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
 
             Text(entry.text)
-                .font(.system(.caption, design: .monospaced))
+                .font(CTTypography.monoSmall)
                 .foregroundStyle(entry.source == .stderr ? CTPalette.cherryRose : .primary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
