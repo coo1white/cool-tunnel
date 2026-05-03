@@ -88,7 +88,17 @@ public struct ControlPanelView: View {
     private func modeChip(_ mode: ProxyMode, label: String, system: String) -> some View {
         let isActive = orchestrator.isRunning && orchestrator.activeMode == mode
         let tint = CTPalette.accent(for: mode)
+        // Tapping the *currently active* chip is a redundant request
+        // — switchMode handles it as a no-op, but we save the tap
+        // round-trip + visible "press" feedback by disabling it.
+        let isCurrent = orchestrator.isRunning && orchestrator.activeMode == mode
         return Button {
+            // Re-entry guard: a fast double-tap on the same chip
+            // would otherwise queue two `switchMode` tasks. Both
+            // serialise on the MainActor so it's not a correctness
+            // bug, but the second task does redundant stop/start
+            // work we can skip outright.
+            guard !isCurrent else { return }
             Task {
                 do {
                     try await orchestrator.switchMode(to: mode)
@@ -102,6 +112,7 @@ public struct ControlPanelView: View {
                 .symbolEffect(.bounce, options: .speed(1.3), value: isActive)
         }
         .buttonStyle(ModeChipStyle(isActive: isActive, tint: tint))
+        .disabled(isCurrent)
         .help(modeHelp(for: mode))
     }
 
