@@ -39,6 +39,14 @@ impl ProxySupervisor {
     ///
     /// Returns [`CoreError::Spawn`] when the child process cannot be created
     /// or its stdio handles cannot be captured.
+    // `async fn` retained even though the body no longer awaits
+    // (the `events.send(StateChanged{true}).await` moved to the
+    // dispatcher in v0.1.7.5 to fix the Ru#C4 ordering quirk).
+    // Callers spawn this with `.await`; converting to sync would
+    // ripple through `start_proxy`'s control flow without
+    // benefit. A future codesign-verification step (deferred from
+    // the Sw#C4 audit) would re-introduce real awaits here.
+    #[allow(clippy::unused_async)]
     pub async fn spawn(
         binary_path: &Path,
         config_path: &Path,
@@ -72,7 +80,13 @@ impl ProxySupervisor {
         tokio::spawn(read_lines(stdout, LogSource::Stdout, events.clone()));
         tokio::spawn(read_lines(stderr, LogSource::Stderr, events.clone()));
 
-        let _ = events.send(Event::StateChanged { running: true }).await;
+        // The `StateChanged { running: true }` event used to be
+        // emitted here, before `spawn` returned — which meant the
+        // event raced ahead of the `Started { pid }` response on
+        // its way to Swift (audit Ru#C4). v0.1.7.5 moves the
+        // emission to the dispatcher, AFTER the response writes,
+        // so the wire ordering is now guaranteed: response always
+        // precedes its event. See `client_mode::handle_request`.
 
         let (kill_tx, kill_rx) = oneshot::channel();
         let monitor = tokio::spawn(monitor_lifecycle(child, kill_rx, events));
@@ -194,14 +208,23 @@ async fn monitor_lifecycle(
     kill_rx: oneshot::Receiver<()>,
     events: mpsc::Sender<Event>,
 ) {
-    tokio::select! {
+    let user_initiated = tokio::select! {
         _ = kill_rx => {
             let _ = child.kill().await;
             let _ = child.wait().await;
+            true
         }
-        _ = child.wait() => {}
+        _ = child.wait() => false,
+    };
+    // Only emit the natural-death event from here. A
+    // user-initiated stop has its `state_changed { running:
+    // false }` emitted by the dispatcher AFTER the `Stopped`
+    // response writes — that's the Ru#C4 ordering contract. If
+    // we emitted from both sides under user-initiated stop,
+    // Swift would see two events for one transition.
+    if !user_initiated {
+        let _ = events.send(Event::StateChanged { running: false }).await;
     }
-    let _ = events.send(Event::StateChanged { running: false }).await;
 }
 
 #[cfg(test)]

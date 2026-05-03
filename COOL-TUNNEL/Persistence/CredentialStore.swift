@@ -78,12 +78,24 @@ public struct MigratingCredentialStore: CredentialStore {
         }
         // Promote into primary so the next launch finds the value
         // in the file store and skips the legacy backend forever.
-        // Best-effort: a write failure here just means we re-migrate
-        // next time, which is a UX wart but not a correctness bug.
-        try? primary.setPassword(legacyValue, forProfileID: id)
-        // Best-effort delete of the legacy entry so the OS-level
-        // ACL stays clean and there is no second copy lurking.
-        try? legacy.deletePassword(forProfileID: id)
+        // CRITICAL: only delete from legacy if primary write
+        // SUCCEEDED. The previous implementation `try?`-discarded
+        // both calls independently, so a failed primary write
+        // (disk full, permission denied) followed by a successful
+        // legacy delete would lose the password entirely. Now if
+        // the promotion fails, the legacy copy stays put and the
+        // user keeps their password — the worst case is one more
+        // Keychain prompt on next launch, not data loss.
+        let promoted: Bool
+        do {
+            try primary.setPassword(legacyValue, forProfileID: id)
+            promoted = true
+        } catch {
+            promoted = false
+        }
+        if promoted {
+            try? legacy.deletePassword(forProfileID: id)
+        }
         return legacyValue
     }
 
