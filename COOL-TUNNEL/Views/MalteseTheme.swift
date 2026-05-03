@@ -1,16 +1,17 @@
-// Views/NewJeansTheme.swift
+// Views/MalteseTheme.swift
 //
-// Design system for the v0.1.5.4 visual refresh — NewJeans-inspired
-// pastel palette + macOS 26 Liquid Glass materials. Centralised so
-// every view pulls colours, gradients, and surface modifiers from one
-// place; tweaking the palette here cascades through the whole app.
+// Design system for the v0.1.5.4 visual refresh — Maltese-pup
+// inspired soft palette + macOS 26 Liquid Glass materials.
+// Centralised so every view pulls colours, gradients, and surface
+// modifiers from one place; tweaking the palette here cascades
+// through the whole app.
 //
 // Aesthetic notes:
-//   - Pastel pink / baby blue / lavender / mint
-//   - Y2K-adjacent: glossy surfaces, soft outer glow, rounded
-//     everything (16-22 pt continuous corner radius)
-//   - "Genki" energy: spring animations, bouncing symbol effects,
-//     gentle scale-on-press
+//   - Pup soft: cream / blush pink / sky blue / lilac / mint
+//   - Cosy and warm — like a small fluffy dog asleep on a sunbeam
+//   - Rounded everything (16-22 pt continuous corner radius)
+//   - Spring animations and bouncing symbol effects keep the
+//     interactions feeling friendly rather than clinical
 //
 // macOS 26 features in active use:
 //   - `.glassEffect()` Liquid Glass surfaces (with material fallback
@@ -25,15 +26,16 @@ import SwiftUI
 
 // MARK: - Palette
 
-/// NewJeans-inspired pastel palette. Each colour is tuned to read
+/// Maltese-inspired soft palette. Each colour is tuned to read
 /// comfortably in both light and dark modes — the dark variants are
-/// pulled toward neon-pastel rather than muddied, matching the
-/// group's MV colour grading.
+/// pulled toward warm pastel rather than muddied, matching the
+/// "fluffy white pup on a cream cushion" mood.
 public enum CTPalette {
     /// Bubblegum pink — primary accent, used for the active mode pill
     /// and the start button while running.
     public static let bunnyPink = Color(red: 1.00, green: 0.71, blue: 0.84)
-    /// Saturated rose for emphasis and run-state glow.
+    /// Saturated rose for emphasis and run-state glow — like a Maltese
+    /// pup's tongue when she's smiling.
     public static let cherryRose = Color(red: 1.00, green: 0.41, blue: 0.61)
     /// Baby blue — secondary accent, used for the smart-mode chip and
     /// idle-state surfaces.
@@ -44,7 +46,8 @@ public enum CTPalette {
     public static let lilac = Color(red: 0.85, green: 0.78, blue: 1.00)
     /// Mint for local-only mode and "all clear" states.
     public static let mint = Color(red: 0.71, green: 0.93, blue: 0.85)
-    /// Cream — warm neutral background tint.
+    /// Cream — warm neutral background tint. The classic Maltese
+    /// coat colour.
     public static let cream = Color(red: 1.00, green: 0.97, blue: 0.92)
     /// Mode-aware accent — pulls one colour per [`ProxyMode`] so each
     /// view doesn't have to repeat the switch.
@@ -79,9 +82,9 @@ public enum CTPalette {
 
 /// Wraps any view in the standard "card" surface used across the app:
 /// continuous-corner rounded rectangle, Liquid Glass material on macOS
-/// 26+, plain ultraThinMaterial fallback otherwise. Pass a non-nil
+/// 26+, plain regularMaterial fallback otherwise. Pass a non-nil
 /// `tint` to bias the surface toward a mode colour.
-public struct GanjiCardModifier: ViewModifier {
+public struct PupCardModifier: ViewModifier {
     var cornerRadius: CGFloat = 18
     var tint: Color? = nil
 
@@ -117,11 +120,11 @@ public struct GanjiCardModifier: ViewModifier {
 }
 
 extension View {
-    /// Sugar for [`GanjiCardModifier`] — wraps the view in a Liquid
-    /// Glass / pastel card. The name nods to the "ganki / genki"
-    /// (元気) brief: the surfaces feel cheerful rather than clinical.
-    public func ganjiCard(cornerRadius: CGFloat = 18, tint: Color? = nil) -> some View {
-        modifier(GanjiCardModifier(cornerRadius: cornerRadius, tint: tint))
+    /// Sugar for [`PupCardModifier`] — wraps the view in a Liquid
+    /// Glass / pastel card. Named for the Maltese-pup theme: surfaces
+    /// feel soft and welcoming rather than clinical.
+    public func pupCard(cornerRadius: CGFloat = 18, tint: Color? = nil) -> some View {
+        modifier(PupCardModifier(cornerRadius: cornerRadius, tint: tint))
     }
 }
 
@@ -131,7 +134,7 @@ extension View {
 /// true the chip shows a pastel gradient fill, soft outer glow, and a
 /// tiny lift; otherwise it sits flat with a hairline border. Spring
 /// animations across the active transition give the picker its
-/// "bouncy" feel.
+/// gentle bounce.
 public struct ModeChipStyle: ButtonStyle {
     let isActive: Bool
     let tint: Color

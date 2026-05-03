@@ -63,7 +63,7 @@ public struct HeaderView: View {
             }
         }
         .padding(14)
-        .ganjiCard(cornerRadius: 22, tint: CTPalette.accent(for: activeMode))
+        .pupCard(cornerRadius: 22, tint: CTPalette.accent(for: activeMode))
     }
 
     private var subtitle: String {

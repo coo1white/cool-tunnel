@@ -63,7 +63,7 @@ public struct LogConsoleView: View {
             }
         }
         .padding(16)
-        .ganjiCard(cornerRadius: 20, tint: CTPalette.lilac)
+        .pupCard(cornerRadius: 20, tint: CTPalette.lilac)
     }
 
     /// Friendly placeholder when no log lines have arrived yet — the
