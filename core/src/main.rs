@@ -82,9 +82,12 @@ async fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Cli::Server { listen } => {
+        Cli::Server {
+            listen,
+            allow_public,
+        } => {
             init_tracing();
-            if let Err(err) = server_mode::run(listen).await {
+            if let Err(err) = server_mode::run(listen, allow_public).await {
                 tracing::error!(error = %err, "server mode exited with error");
                 return ExitCode::FAILURE;
             }
@@ -99,7 +102,15 @@ enum Cli {
     Version,
     Help,
     Client,
-    Server { listen: SocketAddr },
+    Server {
+        listen: SocketAddr,
+        /// **v0.1.7.11 (SM-9):** explicit acknowledgement that
+        /// the operator has put a reverse proxy with auth in
+        /// front of this binary. Required before `run()` will
+        /// bind a non-loopback address. Default `false` preserves
+        /// the documented loopback-only deployment posture.
+        allow_public: bool,
+    },
 }
 
 /// Minimal argv parser. Recognises:
@@ -107,12 +118,12 @@ enum Cli {
 ///   `--version` / `-V`
 ///   `--help` / `-h`
 ///   `--mode client` (same as no args)
-///   `--mode server [--listen ADDR]`
+///   `--mode server [--listen ADDR] [--allow-public]`
 ///
 /// Anything else returns `Err(usage)`. Order-sensitive on
 /// `--mode <value>` and `--listen <value>` (value must follow the
 /// flag); we don't accept `--mode=server` form to keep the parser
-/// trivial.
+/// trivial. `--allow-public` is a boolean flag with no value.
 fn parse_args(args: &[String]) -> Result<Cli, String> {
     if args.is_empty() {
         return Ok(Cli::Client);
@@ -120,6 +131,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut iter = args.iter().peekable();
     let mut mode = "client".to_owned();
     let mut listen = server_mode::DEFAULT_LISTEN.to_owned();
+    let mut allow_public = false;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--version" | "-V" => return Ok(Cli::Version),
@@ -136,6 +148,9 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                 };
                 value.clone_into(&mut listen);
             }
+            "--allow-public" => {
+                allow_public = true;
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -147,6 +162,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                 .map_err(|err| format!("invalid --listen address {listen:?}: {err}"))?;
             Ok(Cli::Server {
                 listen: listen_addr,
+                allow_public,
             })
         }
         other => Err(format!("unknown --mode value {other:?}")),
@@ -176,8 +192,17 @@ fn print_help() {
     println!("                         /naive/config /naive/pac");
     println!();
     println!("FLAGS:");
-    println!("    --version, -V    Print version and exit");
-    println!("    --help, -h       Print this help and exit");
+    println!("    --version, -V       Print version and exit");
+    println!("    --help, -h          Print this help and exit");
+    println!("    --listen ADDR       Listen address for --mode server");
+    println!("                        (default: {})", server_mode::DEFAULT_LISTEN);
+    println!("    --allow-public      Server only: acknowledge that the");
+    println!("                        --listen address is non-loopback and");
+    println!("                        a reverse proxy with auth is in");
+    println!("                        front of this binary. This server");
+    println!("                        has no auth of its own; binding a");
+    println!("                        public address without this flag");
+    println!("                        is refused.");
 }
 
 fn init_tracing() {

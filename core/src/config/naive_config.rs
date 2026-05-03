@@ -19,12 +19,23 @@ use crate::domain::{Credentials, Port, Profile, ServerAddress};
 ///
 /// Construct one from a [`Profile`] via [`NaiveConfig::from_profile`], then
 /// serialize with [`NaiveConfig::to_pretty_json`].
+///
+/// **v0.1.7.11 (SM-5):** the `listen` and `proxy` fields are
+/// `pub(crate)` rather than `pub`. The struct's invariants
+/// (`listen` is always `socks://127.0.0.1:<port>`, `proxy` always
+/// embeds percent-encoded credentials) are guaranteed by
+/// [`NaiveConfig::from_profile`] and lost the moment an external
+/// caller can construct a `NaiveConfig { listen: "...", proxy:
+/// "..." }` directly. Locking the constructors closes that
+/// back-door without affecting `Serialize` (derive sees private
+/// fields fine) or any current call site (handlers only ever go
+/// through `from_profile` + `to_pretty_json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NaiveConfig {
     /// `socks://127.0.0.1:<port>`
-    pub listen: String,
+    pub(crate) listen: String,
     /// `https://<user>:<pass>@<server>` with credentials percent-encoded.
-    pub proxy: String,
+    pub(crate) proxy: String,
 }
 
 impl NaiveConfig {
