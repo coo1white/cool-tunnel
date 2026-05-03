@@ -822,13 +822,19 @@ public struct SettingsView: View {
                 .accessibilityLabel(appUpdaterAccessibilityProgressLabel)
         case .available(let release):
             Button("Update to \(release.tag)") {
-                // Synchronous re-entry guard: a fast double-tap
-                // before the state machine moves to .downloading
-                // would otherwise queue two `downloadAndInstall`
-                // Tasks. Mirror the naive/rust pattern of
-                // setting the busy state inline before spawning.
-                guard !appUpdater.isInFlight else { return }
-                appUpdater.markEnteringDownload()
+                // **AU-13 fix:** the gate is now atomic with
+                // the spawn — `markEnteringDownload` returns
+                // false IFF the flip was a no-op (already in
+                // flight), so the `Task` only spawns when the
+                // state actually transitioned to .downloading.
+                // Previously a fast double-tap could fire the
+                // first click's flip, pass the second click's
+                // `!isInFlight` check (race: it ran before
+                // SwiftUI re-rendered post-first-flip), no-op
+                // its own `markEnteringDownload`, then still
+                // spawn a redundant Task that fired a parallel
+                // download.
+                guard appUpdater.markEnteringDownload() else { return }
                 Task { await appUpdater.downloadAndInstall(release) }
             }
             .buttonStyle(.borderedProminent)
@@ -836,13 +842,9 @@ public struct SettingsView: View {
             .accessibilityLabel("Download and install \(release.tag)")
         default:
             Button("Check for Updates") {
-                // Same sync guard as above — without it, 10 rapid
-                // taps spawn 10 Tasks that each call `checkForUpdates`,
-                // each fires its own re-entry guard *after* the
-                // first completes, but the user gets zero
-                // intervening UI feedback.
-                guard !appUpdater.isInFlight else { return }
-                appUpdater.markEnteringCheck()
+                // Same AU-13 race-defeating shape as above — the
+                // spawn is conditional on the actual state flip.
+                guard appUpdater.markEnteringCheck() else { return }
                 Task { await appUpdater.checkForUpdates() }
             }
             .accessibilityLabel("Check for Cool Tunnel updates")

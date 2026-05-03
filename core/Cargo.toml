@@ -45,6 +45,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # universal binary. Keeping default-features off so we don't drag
 # in tower-http / matchit-fs / multipart machinery we don't use.
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+# **v0.1.7.12 (SM-10):** ConcurrencyLimitLayer caps in-flight
+# requests in `server_mode::router()`. tower 0.5 is already in
+# the tree transitively via axum; declaring it as a direct dep
+# with the `limit` feature only keeps the audit surface tight
+# (no additional crates pulled in beyond what axum already
+# brings). `tower::timeout::TimeoutLayer` was considered for the
+# same router but introduces a non-Infallible error type that
+# requires `HandleErrorLayer` boilerplate; the audit's
+# slow-loris concern is partially addressed by the concurrency
+# cap (max 64 in-flight regardless of how slow each is) and a
+# proper body-read timeout is deferred to a later cycle.
+tower = { version = "0.5", default-features = false, features = ["limit"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

@@ -9,6 +9,159 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.12] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 2)
+
+LTSC patch on the v0.1.7 line. Lands the remaining 11 findings
+from the Fifth audit cycle's Rule Maker rubric — the medium /
+low quality-pass tier. Each fix addresses a root cause
+identified by the audit; v0.1.7.11 covered the 8 critical /
+high security-critical fixes plus 5 medium/low where the call
+was unambiguous. With this release the audit cycle's full
+findings list is closed.
+
+### AppUpdater.swift (7 findings)
+
+- **AU-6 (R2, R4) — canonical bundle ID const, not
+  `Bundle.main.bundleIdentifier`.** `verifyExtractedApp` now
+  compares the new bundle's `CFBundleIdentifier` against a
+  hard-coded `canonicalBundleID = "space.coolwhite.naive"`
+  baked into the binary, instead of against
+  `Bundle.main.bundleIdentifier` (which reads from the running
+  process's plist — attacker-controllable if the running app
+  was ever substituted, anchoring the trust comparison in the
+  attacker's input). The constant matches
+  `PRODUCT_BUNDLE_IDENTIFIER` in the Xcode project; if the
+  bundle ID legitimately changes, both must update in
+  lock-step.
+- **AU-8 (R1) — download error message scrubs asset filename.**
+  The user-facing message no longer names the failing artifact
+  (.zip vs .sha256) or the HTTP status. The asset name isn't
+  directly attacker-controlled but the stage tells an
+  observer-on-the-wire which artifact failed, helping calibrate
+  a partial-block attack against the manifest specifically
+  (the SHA-pin root of trust). Stage detail goes to `os_log`
+  for support.
+- **AU-9 (R2, R4) — read-only check covers bundle perms and
+  parent writability.** `refuseReadOnlyInstall` now tests
+  three things: the parent volume isn't read-only (DMG mount),
+  the parent folder is writable for the current user (admin
+  ACL, MDM lockdown), AND the bundle itself isn't immutable
+  (Get Info → Locked, `chflags uchg`). Previously only the
+  first was checked; the other two failure modes slipped
+  through pre-terminate, leaving the user with no app and no
+  UI to report once `NSApp.terminate` had fired.
+- **AU-10 (R4) — relaunch helper uses `open PATH`, not
+  `open -a NAME`.** `open -a` performs name-based app lookup;
+  with bundle paths containing spaces ("/Applications/Cool
+  tunnel.app") bash word-splits and `-a` treats "Cool" as
+  the app name and "tunnel.app" as a document, misfiring the
+  relaunch. The bareword form opens the bundle directly.
+- **AU-11 (R4) — pre-swap trap preserves recovery materials.**
+  The bash relaunch helper installs a `preswap_trap` at the
+  top that *retains* `$TEMP_ROOT` (containing the
+  verified-good extracted .app) and the `$BACKUP` (if mid-
+  rollback) on any error before the swap commits. Only after
+  step 4 (BACKUP removed → swap fully succeeded) does the
+  trap get replaced with the destructive cleanup. Previously
+  a rollback failure during step 3 would also delete
+  `$TEMP_ROOT`, leaving the user with neither the new app
+  nor a known-good copy to recover from.
+- **AU-13 (R1, R4) — `markEnteringCheck` /
+  `markEnteringDownload` return `Bool`; spawn is conditional
+  on the actual flip.** Settings click handlers used to call
+  `guard !appUpdater.isInFlight else { return };
+  appUpdater.markEnteringCheck(); Task { ... }` — three
+  separate steps that allowed a redundant `Task` to spawn
+  when a fast double-click hit the second click's
+  `!isInFlight` check before SwiftUI re-rendered (or when
+  state was reset by another path between the two flags).
+  Now the flip and the spawn are atomic: the click handler
+  is `guard appUpdater.markEnteringCheck() else { return };
+  Task { ... }`, where the bool return value is the actual
+  flip outcome.
+- **AU-14 (R2) — `locateAppBundle` filter requires
+  `isDirectory`.** A malicious zip can contain an entry
+  named `Cool tunnel.app` that is a regular file or symlink
+  rather than a bundle directory. Without this filter, the
+  next step (`verifyExtractedApp` reading
+  `Contents/Info.plist`) failed with a generic "couldn't
+  read Info.plist" message instead of a clean "structural
+  shape wrong" reject. The filter now demands both the
+  `.app` extension AND
+  `resourceValues(forKeys: [.isDirectoryKey]).isDirectory ==
+  true`.
+
+### server_mode.rs (3 findings) + pac.rs (1 finding)
+
+- **SM-4 (R2, R3) — `naive_pac` caps `direct_domains` at
+  1024 entries × 253 bytes each.** The 64 KiB router-wide
+  body limit is the outer ceiling, but inside that envelope
+  a single request could carry ~16k single-char domain
+  entries — each becoming a `to_lowercase()` allocation, a
+  `serde_json::to_string` pass, and a `format!` insertion,
+  pushing PAC generation past the R3 ≤10 ms target on a
+  busy worker. The 1024-entry cap is far above any
+  legitimate proxy-bypass list (Cool Tunnel ships ~16 by
+  default); 253 bytes matches the RFC 1035 hostname
+  maximum. Over-cap requests reject with
+  `ApiError::BadRequest` and a `tracing::warn!` for support.
+- **SM-6 (R3) — resolved by SM-4.** The audit had flagged
+  PAC generation as potentially blocking the tokio worker
+  but explicitly warned against `spawn_blocking`-without-cap
+  (which would just move the unbounded work elsewhere).
+  With SM-4 caps in place the synchronous cost is bounded
+  well under 10 ms; no `spawn_blocking` is needed. Documented
+  as a comment in the handler to lock in the reasoning.
+- **SM-7 (R4) — `encode_js_string_array` uses `expect`,
+  not `unwrap_or_default`.** `serde_json::to_string` over
+  `&[String]` is structurally infallible — `String` has no
+  `Serialize` failure modes. The defensive
+  `unwrap_or_default()` silently emitted `String::new()` on
+  the unreachable path: if a future refactor swapped
+  `&[String]` for a type that *can* fail, the PAC body
+  would become `var directDomains = ;` (invalid JS) with
+  zero diagnostic. `expect()` restores the failure signal
+  and names the invariant for whoever reads the trace.
+- **SM-10 (R3) — router gets
+  `tower::limit::ConcurrencyLimitLayer(64)`.** Caps total
+  in-flight requests across all routes. Far above any
+  legitimate Filament admin UI workload but bounds the
+  worst-case for a slow-loris client dripping bytes into a
+  64 KiB body — the connection still has to wait, but the
+  server can't be made to hold more than 64 simultaneously.
+  Combined with hyper's default keepalive timeout, the
+  resource exhaustion path is capped without needing the
+  `tower::timeout::TimeoutLayer` boilerplate (which
+  introduces a non-Infallible error type and requires
+  `HandleErrorLayer` plumbing). A proper body-read timeout
+  is deferred to a later cycle. New direct dep: `tower =
+  { version = "0.5", features = ["limit"] }` (already in
+  the tree transitively via axum; no new crates pulled in).
+
+### Tests
+
+- 104 lib tests + 18 chaos tests pass on this revision (no
+  test changes — all existing invariants preserved by the
+  fixes).
+- Swift app compiles clean under Swift 6 strict concurrency.
+
+### Audit cycle closed
+
+With this release the full Fifth audit cycle's findings list
+(25 across `server_mode.rs` and `AppUpdater.swift`) is closed:
+
+- v0.1.7.11 landed: AU-1, AU-2, AU-3, AU-4, AU-5, AU-7,
+  AU-12, AU-15, SM-1, SM-2, SM-3, SM-5, SM-9 (13 fixes).
+- v0.1.7.12 lands: AU-6, AU-8, AU-9, AU-10, AU-11, AU-13,
+  AU-14, SM-4, SM-6, SM-7, SM-10 (11 fixes). SM-8
+  (logging policy) was folded into v0.1.7.11's
+  `server_mode.rs` header doc.
+
+Net audit-driven change across the cycle: 24 fixes against
+4 source files (`server_mode.rs`, `AppUpdater.swift`,
+`config/naive_config.rs`, `config/pac.rs`) plus supporting
+files (`Cargo.toml`, `main.rs`, `SettingsView.swift`).
+
 ## [0.1.7.11] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 1)
 
 LTSC patch on the v0.1.7 line. Fifth audit cycle, with the
