@@ -52,10 +52,10 @@ xcodebuild -scheme COOL-TUNNEL -configuration Release \
     clean build
 
 # Run the pre-package security audit
-EXPECTED_VERSION=0.1.6 scripts/security_check.sh
+EXPECTED_VERSION=0.1.7 scripts/security_check.sh
 
 # Package .dmg + .pkg + .zip + standalone cool-tunnel-core
-scripts/package_release.sh 0.1.6
+scripts/package_release.sh 0.1.7
 ```
 
 ## Running the test sweep
