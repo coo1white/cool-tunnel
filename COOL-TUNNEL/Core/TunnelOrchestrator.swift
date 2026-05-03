@@ -100,17 +100,30 @@ public final class TunnelOrchestrator {
     /// Builds an orchestrator wired with default dependencies sourced from
     /// the running app bundle.
     public static func bootstrap() -> TunnelOrchestrator {
-        let executableURL =
-            Bundle.main.url(
-                forResource: "cool-tunnel-core",
-                withExtension: nil
-            ) ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/cool-tunnel-core")
-
         let paths: AppSupportPaths
         do {
             paths = try AppSupportPaths()
         } catch {
             fatalError("unable to create application support directory: \(error)")
+        }
+
+        // Pick the engine binary the orchestrator will spawn. The
+        // settings store is read here (no I/O beyond UserDefaults
+        // — no credential store, no keychain) so we honour any
+        // `customRustCorePath` the user installed via the Settings
+        // → Rust Core → Update flow on a previous run. Falls back
+        // to the bundled binary when the path is empty or the
+        // file no longer exists (e.g. the user manually removed
+        // the managed copy under Application Support).
+        let savedSettings = SettingsStore().load()
+        let bundledCore = RustCoreResolver.bundledURL()
+        let executableURL: URL
+        if !savedSettings.customRustCorePath.isEmpty,
+            FileManager.default.isExecutableFile(atPath: savedSettings.customRustCorePath)
+        {
+            executableURL = URL(fileURLWithPath: savedSettings.customRustCorePath)
+        } else {
+            executableURL = bundledCore
         }
 
         // v0.1.5.5: passwords moved off the macOS Keychain by default.

@@ -10,15 +10,24 @@ import Foundation
 public struct AppSettings: Sendable, Codable, Equatable {
     public var directDomains: [String]
     public var customNaiveBinaryPath: String
+    /// Optional override for the `cool-tunnel-core` binary the
+    /// orchestrator spawns at boot. Empty = use the bundled engine
+    /// inside `Cool tunnel.app/Contents/Resources/`. Populated by
+    /// the Settings → Rust Core → Update flow once
+    /// `RustCoreUpdater` finishes installing the downloaded binary
+    /// into Application Support; takes effect on the next launch.
+    public var customRustCorePath: String
     public var skipProxyConfirmations: Bool
 
     public init(
         directDomains: [String],
         customNaiveBinaryPath: String,
+        customRustCorePath: String = "",
         skipProxyConfirmations: Bool
     ) {
         self.directDomains = directDomains
         self.customNaiveBinaryPath = customNaiveBinaryPath
+        self.customRustCorePath = customRustCorePath
         self.skipProxyConfirmations = skipProxyConfirmations
     }
 
@@ -27,6 +36,7 @@ public struct AppSettings: Sendable, Codable, Equatable {
     public static let `default` = AppSettings(
         directDomains: defaultDirectDomains,
         customNaiveBinaryPath: "",
+        customRustCorePath: "",
         skipProxyConfirmations: false
     )
 
@@ -50,6 +60,7 @@ public struct SettingsStore: @unchecked Sendable {
     private enum Keys {
         static let directDomains = "directDomains"
         static let customBinary = "customNaiveBinaryPath"
+        static let customRustCore = "customRustCorePath"
         static let skipConfirmations = "skipProxyConfirmations"
     }
 
@@ -64,10 +75,12 @@ public struct SettingsStore: @unchecked Sendable {
             defaults.stringArray(forKey: Keys.directDomains)
             ?? AppSettings.defaultDirectDomains
         let custom = defaults.string(forKey: Keys.customBinary) ?? ""
+        let rust = defaults.string(forKey: Keys.customRustCore) ?? ""
         let skip = defaults.bool(forKey: Keys.skipConfirmations)
         return AppSettings(
             directDomains: direct,
             customNaiveBinaryPath: custom,
+            customRustCorePath: rust,
             skipProxyConfirmations: skip
         )
     }
@@ -75,6 +88,7 @@ public struct SettingsStore: @unchecked Sendable {
     public func save(_ settings: AppSettings) {
         defaults.set(settings.directDomains, forKey: Keys.directDomains)
         defaults.set(settings.customNaiveBinaryPath, forKey: Keys.customBinary)
+        defaults.set(settings.customRustCorePath, forKey: Keys.customRustCore)
         defaults.set(settings.skipProxyConfirmations, forKey: Keys.skipConfirmations)
     }
 }

@@ -42,6 +42,11 @@ mkdir -p "${DIST_DIR}"
 DMG="${DIST_DIR}/Cool-tunnel-v${VERSION}.dmg"
 PKG="${DIST_DIR}/Cool-tunnel-v${VERSION}.pkg"
 ZIP="${DIST_DIR}/Cool-tunnel-v${VERSION}.zip"
+# Standalone universal cool-tunnel-core binary as a separate
+# release asset. The Settings → Rust Core → Update flow
+# downloads this directly from GitHub so users can refresh
+# the engine without reinstalling the whole .app.
+CORE="${DIST_DIR}/cool-tunnel-core-v${VERSION}-universal"
 MANIFEST="${DIST_DIR}/Cool-tunnel-v${VERSION}.sha256"
 
 # --- DMG ---------------------------------------------------------------
@@ -80,13 +85,25 @@ echo "info: building ${ZIP##*/}"
 rm -f "${ZIP}"
 ditto -c -k --sequesterRsrc --keepParent "${APP}" "${ZIP}"
 
+# --- Standalone Rust core --------------------------------------------------
+# Lift the universal cool-tunnel-core binary out of the app bundle and
+# emit it as a separate, ad-hoc-signed release asset. The macOS
+# Settings → Rust Core → Update flow downloads this URL directly to
+# `~/Library/Application Support/COOL-TUNNEL/cool-tunnel-core-managed`
+# so the engine can be refreshed without reinstalling the whole .app.
+echo "info: building ${CORE##*/}"
+rm -f "${CORE}"
+cp "${APP}/Contents/Resources/cool-tunnel-core" "${CORE}"
+chmod +x "${CORE}"
+
 # --- SHA-256 manifest --------------------------------------------------
-# Single file containing all three hashes so the release notes and any
+# Single file containing every hash so the release notes and any
 # downstream mirror script can pin the exact downloads.
 {
     shasum -a 256 "${DMG}"
     shasum -a 256 "${PKG}"
     shasum -a 256 "${ZIP}"
+    shasum -a 256 "${CORE}"
 } | awk '{ n=split($2, p, "/"); print $1 "  " p[n] }' > "${MANIFEST}"
 
 echo ""
@@ -94,7 +111,7 @@ echo "ok: artefacts written to ${DIST_DIR}/"
 # `stat -f` portability: macOS uses `-f`, Linux uses `-c` — guard with
 # a probe so the script keeps working if someone runs it on Linux for
 # CI experimentation later.
-for f in "${DMG}" "${PKG}" "${ZIP}"; do
+for f in "${DMG}" "${PKG}" "${ZIP}" "${CORE}"; do
     if size=$(stat -f '%z' "${f}" 2>/dev/null) || size=$(stat -c '%s' "${f}" 2>/dev/null); then
         # Convert bytes to a human-readable size (KB/MB/GB) using awk
         # so the output mirrors `ls -lh` without the parse-ls warning.
