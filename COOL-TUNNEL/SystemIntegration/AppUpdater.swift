@@ -15,18 +15,22 @@
 //      `CFBundleShortVersionString`. No-op if equal or older.
 //   3. Download the `Cool-tunnel-vX.Y.Z.zip` asset.
 //   4. Download the `Cool-tunnel-vX.Y.Z.sha256` asset.
-//   5. Compute SHA-256 of the downloaded .zip via CryptoKit.
+//   5. Compute SHA-256 of the downloaded .zip via CryptoKit
+//      (streamed from disk; AU-4 fix avoids loading the whole
+//      .zip into memory on @MainActor).
 //   6. Cross-reference against the manifest line for the .zip
 //      filename. Refuse on mismatch.
-//   7. Extract via `ditto -x -k`.
+//   7. Extract via `ditto -x -k` (through `Subprocess.run` for
+//      concurrent pipe drain + timeout escalation).
 //   8. Verify the extracted `Cool tunnel.app`:
 //      - Bundle identifier matches the running app's.
 //      - `CFBundleShortVersionString` matches the release tag.
 //      - `CodeSignVerifier` accepts the bundle.
 //   9. Refuse if the running app is on a read-only volume (DMG
 //      mount or quarantine staging).
-//  10. Write a small bash relaunch helper to /tmp; spawn it
-//      detached.
+//  10. Write a small bash relaunch helper into the per-update
+//      tempRoot (NOT /tmp — see AU-1) atomically with mode
+//      0700, then spawn it detached.
 //  11. `NSApp.terminate(nil)` — the helper waits for the parent
 //      PID to exit, ditto-replaces the bundle, and `open -a`s
 //      the new copy.
@@ -43,20 +47,79 @@
 //   admin-group writable by default; the user is asked to drag
 //   the .app there once, after which all updates work without
 //   `sudo` or auth dialogs.
+//
+// ## v0.1.7.11 Rule-Maker hardening (Fifth audit cycle)
+//
+// - **AU-1 (R2, R4):** the relaunch helper script no longer
+//   lives in `/tmp`. Previously `String.write(to:atomically:)`
+//   created the file with default umask perms (typically 0644),
+//   then a separate `setAttributes(0o700)` call tightened them —
+//   leaving a tiny but real window where a same-UID attacker
+//   could swap the script via symlink before `task.run()`. The
+//   script now lives in the per-update `tempRoot` (already
+//   created with restrictive perms), and is created via
+//   `open(O_CREAT|O_EXCL|O_WRONLY, 0o700)` so it is born with
+//   the right mode and never exists with any other.
+// - **AU-2 (R2):** `browser_download_url`s returned by the
+//   GitHub releases API are now validated against an HTTPS +
+//   github.com / githubusercontent.com host suffix list before
+//   being handed to `URLSession.download`. Previously a
+//   compromised or changed API response could redirect the
+//   .zip / manifest fetch to an attacker-controlled host;
+//   SHA pinning protects the .zip but TRUSTS the manifest URL
+//   (it defines the expected hash), so the manifest URL is the
+//   actual root of trust.
+// - **AU-3 (R2):** all GitHub fetches now use a per-task
+//   delegate that constrains HTTP redirects to the same host
+//   suffix list. `URLSession.shared.download(from:)` was
+//   following up to ~20 redirects with no host check — a CDN
+//   takeover or misconfigured GitHub redirect could substitute
+//   the manifest at this layer, defeating SHA pinning.
+// - **AU-4 (R3):** SHA hashing and Info.plist parsing have
+//   been moved off `@MainActor`. The pipeline helpers are now
+//   `nonisolated`, and `verifyZipAgainstManifest` streams the
+//   .zip through `FileHandle.read(upToCount:)` 64 KiB at a
+//   time instead of `Data(contentsOf: zipURL)` which previously
+//   loaded the full ~12 MB into memory on the main thread.
+// - **AU-5 (R2, R4):** `refuseExtractionEscapingSymlinks` no
+//   longer uses `String.hasPrefix` (which gives false negatives
+//   for sibling paths like `/extracted-evil` vs `/extracted`,
+//   and doesn't normalise `..`-traversal through symlink
+//   targets). It now uses `realpath(3)` + path-component
+//   ancestor comparison.
+// - **AU-7 (R1):** the version-mismatch error in
+//   `verifyExtractedApp` no longer interpolates the new app's
+//   `CFBundleShortVersionString` into the user-facing string.
+//   That value is attacker-controlled; an attacker who got past
+//   SHA pinning could plant a Unicode-bidi-override or fake
+//   "click here to bypass" text in it. The actual value still
+//   goes to `os_log` for support tickets.
+// - **AU-12 (R1, R2):** `versionIsNewer` no longer silently
+//   coerces non-numeric segments to 0 via `Int($0) ?? 0`.
+//   Pre-release suffixes (`-rc1`, `-beta`) are now an outright
+//   reject signal — `/releases/latest` already excludes them,
+//   so seeing one is a release-process bug, not a normal upgrade.
+// - **AU-15 (R2):** `public` access has been removed from
+//   symbols that are only consumed within the same module
+//   (Settings UI). `internal` (the default) is sufficient and
+//   shrinks the API surface that future code paths can
+//   accidentally reach.
 
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
 import Observation
+import os
 
 /// Live state of the in-app self-updater. `@Observable` so the
 /// Settings panel re-renders as the pipeline progresses.
 @MainActor
 @Observable
-public final class AppUpdater {
+final class AppUpdater {
 
     /// Pipeline state. Each variant is a UI-renderable phase.
-    public enum State: Sendable, Equatable {
+    enum State: Sendable, Equatable {
         case idle
         case checking
         case upToDate(currentVersion: String)
@@ -69,25 +132,25 @@ public final class AppUpdater {
     }
 
     /// What the GitHub API said about the newest release.
-    public struct AvailableRelease: Sendable, Equatable {
-        public let tag: String              // e.g. "v0.1.7.6"
-        public let version: String          // e.g. "0.1.7.6"
-        public let zipURL: URL
-        public let shaManifestURL: URL
-        public let releaseNotesURL: URL
-        public let publishedAt: Date?
+    struct AvailableRelease: Sendable, Equatable {
+        let tag: String              // e.g. "v0.1.7.6"
+        let version: String          // e.g. "0.1.7.6"
+        let zipURL: URL
+        let shaManifestURL: URL
+        let releaseNotesURL: URL
+        let publishedAt: Date?
     }
 
     /// Errors raised by the updater pipeline.
-    public enum UpdaterError: Error, Sendable, Equatable {
+    enum UpdaterError: Error, Sendable, Equatable {
         case message(String)
     }
 
-    public private(set) var state: State = .idle
+    private(set) var state: State = .idle
 
-    public init() {}
+    init() {}
 
-    // MARK: - Public surface
+    // MARK: - Public surface (within-module; AU-15 demoted from `public`)
 
     /// Performs steps 1–2: hits GitHub, decides whether an update
     /// exists. Cheap; safe to call from `Settings.onAppear`.
@@ -102,7 +165,7 @@ public final class AppUpdater {
     /// message. Fixed: fetch metadata only, compare versions
     /// first, then validate install assets only when there's
     /// genuinely something to install.
-    public func checkForUpdates() async {
+    func checkForUpdates() async {
         // CRITICAL: this guard used to be `guard !isInFlight else
         // { return }` which broke the v0.1.7.9 click flow. The
         // Settings handler now calls `markEnteringCheck()` first
@@ -142,7 +205,7 @@ public final class AppUpdater {
     /// Performs steps 3–11: downloads, verifies, extracts,
     /// relaunches. Caller should have already moved through
     /// `.available` via `checkForUpdates`.
-    public func downloadAndInstall(_ release: AvailableRelease) async {
+    func downloadAndInstall(_ release: AvailableRelease) async {
         // Same regression fix as `checkForUpdates`: the click
         // handler synchronously flips `state` to `.downloading`
         // via `markEnteringDownload`, so we'd return early on a
@@ -181,18 +244,16 @@ public final class AppUpdater {
 
     /// Resets `failed` / `upToDate` / `available` back to idle so
     /// the Settings UI can present a fresh "Check" button.
-    public func reset() {
+    func reset() {
         guard !isInFlight else { return }
         state = .idle
     }
 
-    // MARK: - Pipeline (off-main wherever possible)
-
     /// `true` when a phase is in flight that further user input
-    /// should not interrupt. Made `public` so the Settings UI
-    /// can synchronously short-circuit double-clicks before the
+    /// should not interrupt. Used by the Settings UI to
+    /// synchronously short-circuit double-clicks before the
     /// async machinery flips `state`.
-    public var isInFlight: Bool {
+    var isInFlight: Bool {
         switch state {
         case .checking, .downloading, .verifying, .extracting, .relaunching:
             true
@@ -207,17 +268,19 @@ public final class AppUpdater {
     /// rapid clicks each pass their own re-entry guard. The
     /// `Task` that follows then re-runs the same check
     /// internally and is a no-op if state is already `.checking`.
-    public func markEnteringCheck() {
+    func markEnteringCheck() {
         guard !isInFlight else { return }
         state = .checking
     }
 
     /// Synchronously flips `state` to `.downloading(progress: 0)`.
     /// Same race-defeating role as `markEnteringCheck`.
-    public func markEnteringDownload() {
+    func markEnteringDownload() {
         guard !isInFlight else { return }
         state = .downloading(progress: 0.0)
     }
+
+    // MARK: - Pipeline (off-main; nonisolated by design)
 
     /// Bare release metadata — tag, version, html URL, and the
     /// raw asset list. Does NOT validate that install-time
@@ -226,7 +289,7 @@ public final class AppUpdater {
     /// "Check for Updates" path can compare versions and
     /// short-circuit to "up to date" without erroring on a
     /// missing manifest in the same-version case.
-    private struct ReleaseMetadata {
+    private struct ReleaseMetadata: Sendable {
         let tag: String
         let version: String
         let htmlURL: URL
@@ -234,7 +297,7 @@ public final class AppUpdater {
         let assets: [GHAsset]
     }
 
-    private struct GHAsset: Decodable {
+    private struct GHAsset: Decodable, Sendable {
         let name: String
         let browserDownloadURL: URL
         enum CodingKeys: String, CodingKey {
@@ -248,7 +311,7 @@ public final class AppUpdater {
     /// the .app updater we only care about stable tags;
     /// `/latest` excludes pre-releases which is the right
     /// policy for a user-facing upgrade.
-    private static func fetchLatestReleaseMetadata() async throws -> ReleaseMetadata {
+    nonisolated private static func fetchLatestReleaseMetadata() async throws -> ReleaseMetadata {
         guard
             let api = URL(
                 string: "https://api.github.com/repos/coo1white/cool-tunnel/releases/latest"
@@ -261,9 +324,12 @@ public final class AppUpdater {
         request.setValue("Cool-Tunnel-AppUpdater", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
+        // **AU-3:** per-task delegate constrains any HTTP
+        // redirect to the trusted GitHub host suffixes.
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await URLSession.shared.data(
+                for: request, delegate: GitHubRedirectGuard())
         } catch {
             throw UpdaterError.message(
                 "Couldn't reach GitHub. Check your internet connection and try again."
@@ -319,12 +385,10 @@ public final class AppUpdater {
     }
 
     /// Confirms the release exposes both the install .zip and
-    /// the matching .sha256 manifest. Called only when there's
-    /// genuinely a newer version to install — the missing-asset
-    /// case is then a real release-process bug worth surfacing
-    /// to the user, not noise on the same-version "check"
-    /// path.
-    private static func validateInstallAssets(_ meta: ReleaseMetadata) throws -> AvailableRelease {
+    /// the matching .sha256 manifest, AND that both asset URLs
+    /// point at trusted GitHub-served hosts (AU-2). Called only
+    /// when there's genuinely a newer version to install.
+    nonisolated private static func validateInstallAssets(_ meta: ReleaseMetadata) throws -> AvailableRelease {
         let zipName = "Cool-tunnel-\(meta.tag).zip"
         let shaName = "Cool-tunnel-\(meta.tag).sha256"
         guard let zipAsset = meta.assets.first(where: { $0.name == zipName }) else {
@@ -335,6 +399,26 @@ public final class AppUpdater {
         guard let shaAsset = meta.assets.first(where: { $0.name == shaName }) else {
             throw UpdaterError.message(
                 "Release \(meta.tag) has no \(shaName) integrity manifest. Refusing to update without a hash to verify against."
+            )
+        }
+        // **AU-2:** validate both URLs point at trusted GitHub
+        // hosts before letting them through to URLSession.
+        // browser_download_url has historically resolved to
+        // github-releases.githubusercontent.com via redirect;
+        // direct values that aren't on github.com /
+        // *.githubusercontent.com are a sign of an attacker-
+        // shaped API response or an upstream change we should
+        // pause for, not trust silently.
+        guard isTrustedGitHubURL(zipAsset.browserDownloadURL) else {
+            updaterLog("AU-2 reject: zip URL not GitHub-hosted: \(zipAsset.browserDownloadURL)")
+            throw UpdaterError.message(
+                "GitHub returned a release archive URL on an unexpected host. Refusing to update."
+            )
+        }
+        guard isTrustedGitHubURL(shaAsset.browserDownloadURL) else {
+            updaterLog("AU-2 reject: sha URL not GitHub-hosted: \(shaAsset.browserDownloadURL)")
+            throw UpdaterError.message(
+                "GitHub returned a SHA-256 manifest URL on an unexpected host. Refusing to update."
             )
         }
         return AvailableRelease(
@@ -349,7 +433,7 @@ public final class AppUpdater {
 
     /// Steps 3–10. Pure pipeline; the caller maps phases to
     /// `state` via the `report` callback.
-    private static func run(
+    nonisolated private static func run(
         release: AvailableRelease,
         report: @escaping @MainActor @Sendable (State) -> Void
     ) async throws {
@@ -372,7 +456,7 @@ public final class AppUpdater {
         }
     }
 
-    private static func runPipeline(
+    nonisolated private static func runPipeline(
         release: AvailableRelease,
         tempRoot: URL,
         report: @escaping @MainActor @Sendable (State) -> Void
@@ -410,16 +494,17 @@ public final class AppUpdater {
         // (rare on personal Macs, sometimes seen on managed
         // ones) is rejected based on the *real* destination,
         // not the visible alias.
-        let runningAppURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let runningAppURL = await MainActor.run { Bundle.main.bundleURL.resolvingSymlinksInPath() }
         try refuseReadOnlyInstall(at: runningAppURL)
 
         // 10. Spawn helper. The helper takes ownership of
         // `tempRoot` and removes it after copying.
+        let parentPID = ProcessInfo.processInfo.processIdentifier
         try spawnRelaunchHelper(
             oldAppURL: runningAppURL,
             newAppURL: extractedAppURL,
             tempRootToClean: tempRoot,
-            parentPID: ProcessInfo.processInfo.processIdentifier
+            parentPID: parentPID
         )
     }
 
@@ -430,20 +515,32 @@ public final class AppUpdater {
     /// slack for future growth while preventing a confused-deputy
     /// or compromised-asset URL from filling the user's disk.
     /// Sw-H3 fix.
-    private static let maxDownloadBytes: Int64 = 100 * 1024 * 1024
+    nonisolated private static let maxDownloadBytes: Int64 = 100 * 1024 * 1024
 
-    private static func download(_ url: URL, to destination: URL) async throws {
+    nonisolated private static func download(_ url: URL, to destination: URL) async throws {
+        // **AU-3:** per-task delegate constrains any redirect to
+        // a trusted GitHub-served host. The browser_download_url
+        // for a release asset has always been served via a
+        // redirect to objects.githubusercontent.com; without
+        // this guard, a CDN takeover or misconfigured GitHub
+        // edge could substitute the asset (or, for the .sha256,
+        // the verification root-of-trust itself).
+        let request = URLRequest(url: url)
         let (tempURL, response): (URL, URLResponse)
         do {
-            (tempURL, response) = try await URLSession.shared.download(from: url)
+            (tempURL, response) = try await URLSession.shared.download(
+                for: request, delegate: GitHubRedirectGuard())
         } catch {
             throw UpdaterError.message(
                 "Download failed for \(url.lastPathComponent). Check your internet connection and try again."
             )
         }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            updaterLog(
+                "download non-200 for \(url.lastPathComponent): \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+            )
             throw UpdaterError.message(
-                "GitHub returned status \((response as? HTTPURLResponse)?.statusCode ?? -1) for \(url.lastPathComponent)."
+                "GitHub didn't return the update file \(url.lastPathComponent). Try again later."
             )
         }
         // **v0.1.7.10 (Sw-H3):** size cap. By the time
@@ -475,7 +572,7 @@ public final class AppUpdater {
     /// computes the SHA-256 of `zipURL` and asserts a match.
     /// Throws `UpdaterError.message` on any mismatch — the
     /// caller treats that as a refusal to install.
-    private static func verifyZipAgainstManifest(
+    nonisolated private static func verifyZipAgainstManifest(
         zipURL: URL,
         manifestURL: URL,
         zipFilename: String
@@ -518,11 +615,17 @@ public final class AppUpdater {
                 "SHA-256 manifest entry for \(zipFilename) is not valid hex. Manifest may be corrupted; refusing to update."
             )
         }
+        // **AU-4:** stream the .zip through `FileHandle` 64 KiB
+        // at a time instead of `Data(contentsOf: zipURL)`. A
+        // 12 MB allocation on the main thread (which runPipeline
+        // formerly ran on, before being marked `nonisolated`)
+        // could freeze the Settings UI for ~200 ms on slow
+        // disks; on Intel Macs with HDDs the user sometimes
+        // saw a beach ball. Streaming SHA fixes both axes
+        // (background actor + bounded memory).
         let actualSha: String
         do {
-            let data = try Data(contentsOf: zipURL)
-            let digest = SHA256.hash(data: data)
-            actualSha = digest.map { String(format: "%02x", $0) }.joined()
+            actualSha = try sha256(of: zipURL)
         } catch {
             throw UpdaterError.message("Couldn't read downloaded archive to verify hash.")
         }
@@ -541,6 +644,22 @@ public final class AppUpdater {
         }
     }
 
+    /// Streams `fileURL` through CryptoKit's incremental SHA-256
+    /// in 64 KiB chunks. AU-4: avoids `Data(contentsOf:)` which
+    /// loads the full file into memory and (when this method ran
+    /// on @MainActor) froze the UI on slow disks.
+    nonisolated private static func sha256(of fileURL: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Uses `/usr/bin/ditto -x -k` to extract the .zip preserving
     /// macOS metadata. `unzip(1)` on macOS sometimes drops
     /// resource forks and code-signature metadata.
@@ -554,7 +673,7 @@ public final class AppUpdater {
     /// the bug class the v0.1.7.3 helper was built to fix —
     /// AppUpdater (added v0.1.7.6) inherited the older,
     /// buggier pattern by oversight.
-    private static func unzip(zipURL: URL, to destination: URL) async throws {
+    nonisolated private static func unzip(zipURL: URL, to destination: URL) async throws {
         let result: SubprocessResult
         do {
             result = try await Subprocess.run(
@@ -590,10 +709,38 @@ public final class AppUpdater {
     }
 
     /// Walks `directory` recursively. If any entry is a symbolic
-    /// link whose realpath escapes `directory`, throws. Used by
-    /// the post-extraction security check above.
-    private static func refuseExtractionEscapingSymlinks(in directory: URL) throws {
-        let containerPath = directory.standardizedFileURL.resolvingSymlinksInPath().path
+    /// link whose realpath escapes `directory`, throws.
+    ///
+    /// **AU-5 fix:** the previous implementation used
+    /// `String.hasPrefix(containerPath)`, which produced two
+    /// classes of false negatives:
+    ///   1. Sibling-path collision: `/extracted-evil` passes the
+    ///      prefix check against `/extracted` because there's no
+    ///      trailing separator.
+    ///   2. Symlink target traversal: `URL.resolvingSymlinksInPath()`
+    ///      on a symlink resolves the link itself but does not
+    ///      normalise `..` traversal *through* the resolved
+    ///      target.
+    ///
+    /// Both are fixed by switching to `realpath(3)` (which
+    /// returns a fully-canonical absolute path with all
+    /// interior symlinks resolved and `..` collapsed) and a
+    /// component-wise ancestor check.
+    nonisolated private static func refuseExtractionEscapingSymlinks(in directory: URL) throws {
+        // Resolve the container to its canonical absolute path
+        // so the ancestor check is robust against any symlinks
+        // in the tempdir hierarchy (e.g. /var → /private/var on
+        // macOS).
+        guard let containerC = realpath(directory.path, nil) else {
+            throw UpdaterError.message(
+                "Couldn't canonicalise extraction directory; refusing to install."
+            )
+        }
+        let containerComponents = URL(
+            fileURLWithPath: String(cString: containerC)
+        ).pathComponents
+        free(containerC)
+
         guard
             let walker = FileManager.default.enumerator(
                 at: directory,
@@ -614,11 +761,26 @@ public final class AppUpdater {
                 continue
             }
             if !isSymlink { continue }
-            // Resolve the symlink target relative to its parent,
-            // then standardise. If the resolved path doesn't
-            // start with our container path, it escapes.
-            let resolved = item.resolvingSymlinksInPath().standardizedFileURL.path
-            if !resolved.hasPrefix(containerPath) {
+
+            // realpath follows the link AND resolves all interior
+            // links + `..` segments — the only way to detect a
+            // target like `link/../../etc/passwd`. Returns nil
+            // for broken links; treat that as a reject (we don't
+            // need dangling symlinks in an update bundle).
+            guard let targetC = realpath(item.path, nil) else {
+                throw UpdaterError.message(
+                    "Update archive contains a broken symbolic link; refusing to install."
+                )
+            }
+            let targetComponents = URL(
+                fileURLWithPath: String(cString: targetC)
+            ).pathComponents
+            free(targetC)
+
+            // Component-wise ancestor check. Defeats both the
+            // trailing-slash false positive (`/extracted-evil` vs
+            // `/extracted`) and any symlink-traversal-via-target.
+            guard targetComponents.starts(with: containerComponents) else {
                 throw UpdaterError.message(
                     "Update archive contains a symbolic link pointing outside the extraction directory; refusing to install."
                 )
@@ -629,7 +791,7 @@ public final class AppUpdater {
     /// Walks the extraction directory looking for a single .app
     /// bundle. Refuses if zero or more than one is present —
     /// either is a sign the archive isn't what we expected.
-    private static func locateAppBundle(in directory: URL) throws -> URL {
+    nonisolated private static func locateAppBundle(in directory: URL) throws -> URL {
         let items = try FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         )
@@ -642,37 +804,31 @@ public final class AppUpdater {
         return apps[0]
     }
 
+    /// Sendable carrier for the two strings `verifyExtractedApp`
+    /// pulls out of Info.plist. Lets us read the plist on a
+    /// background actor (AU-4) and pass only the strings back —
+    /// `[String: Any]` is not Sendable.
+    private struct ExtractedAppInfo: Sendable {
+        let bundleIdentifier: String
+        let shortVersion: String
+    }
+
     /// Defensive verification on the freshly-extracted .app:
-    /// - bundle identifier must match the running app's
-    /// - `CFBundleShortVersionString` must match `expectedVersion`
-    /// - `CodeSignVerifier` must accept the bundle
-    private static func verifyExtractedApp(at appURL: URL, expectedVersion: String) async throws {
-        // Read the new bundle's Info.plist.
+    /// - bundle identifier matches the running app's
+    /// - `CFBundleShortVersionString` matches `expectedVersion`
+    /// - `CodeSignVerifier` accepts the bundle
+    nonisolated private static func verifyExtractedApp(at appURL: URL, expectedVersion: String) async throws {
+        // Read the new bundle's Info.plist on a background
+        // priority task — AU-4. Previously this synchronous
+        // I/O ran on @MainActor (because runPipeline was
+        // implicitly MainActor-isolated) and could stall the
+        // UI on slow disks.
         let infoURL = appURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Info.plist", isDirectory: false)
-        let info: [String: Any]
-        do {
-            let data = try Data(contentsOf: infoURL)
-            guard
-                let plist = try PropertyListSerialization.propertyList(
-                    from: data, options: [], format: nil) as? [String: Any]
-            else {
-                throw UpdaterError.message("New app's Info.plist is malformed.")
-            }
-            info = plist
-        } catch let UpdaterError.message(reason) {
-            throw UpdaterError.message(reason)
-        } catch {
-            throw UpdaterError.message("Couldn't read new app's Info.plist.")
-        }
+        let info = try await readAppInfo(at: infoURL)
 
-        let runningBundleID = Bundle.main.bundleIdentifier ?? ""
-        guard let newBundleIDRaw = info["CFBundleIdentifier"] as? String else {
-            throw UpdaterError.message(
-                "New app has no bundle identifier. Refusing to install."
-            )
-        }
+        let runningBundleID = await MainActor.run { Bundle.main.bundleIdentifier ?? "" }
         // **v0.1.7.10 (Sw-H1):** defence-in-depth bundle-ID
         // comparison. Apple bundle IDs are ASCII by convention,
         // but a malicious release whose `CFBundleIdentifier`
@@ -683,7 +839,7 @@ public final class AppUpdater {
         // bundle ID with the same confusable, the byte-compare
         // would silently accept it. Reject anything non-ASCII
         // outright.
-        let newBundleID = newBundleIDRaw.precomposedStringWithCanonicalMapping
+        let newBundleID = info.bundleIdentifier.precomposedStringWithCanonicalMapping
         let normalizedRunning = runningBundleID.precomposedStringWithCanonicalMapping
         guard newBundleID.allSatisfy(\.isASCII), normalizedRunning.allSatisfy(\.isASCII) else {
             throw UpdaterError.message(
@@ -695,11 +851,17 @@ public final class AppUpdater {
                 "New app's bundle identifier does not match. Refusing to install."
             )
         }
-        guard let newVersion = info["CFBundleShortVersionString"] as? String,
-            newVersion == expectedVersion
-        else {
+        // **AU-7:** the version-mismatch error no longer
+        // interpolates `info.shortVersion` (attacker-controlled
+        // bytes from the new bundle's plist). An attacker who
+        // got past SHA pinning could plant a Unicode
+        // bidi-override or fake-instruction text in that
+        // string and have it rendered into the Settings panel.
+        // The actual mismatch detail goes to os_log for support.
+        guard info.shortVersion == expectedVersion else {
+            updaterLog("AU-7 version mismatch: got=\(info.shortVersion) expected=\(expectedVersion)")
             throw UpdaterError.message(
-                "New app's version (\(info["CFBundleShortVersionString"] ?? "?")) does not match the release tag \(expectedVersion). Refusing to install."
+                "New app's version does not match the release tag \(expectedVersion). Refusing to install."
             )
         }
 
@@ -713,11 +875,52 @@ public final class AppUpdater {
         }
     }
 
+    /// Reads an Info.plist off the @MainActor and returns only
+    /// the two Sendable strings we need. AU-4.
+    nonisolated private static func readAppInfo(at infoURL: URL) async throws -> ExtractedAppInfo {
+        try await Task.detached(priority: .userInitiated) {
+            let data: Data
+            do {
+                data = try Data(contentsOf: infoURL)
+            } catch {
+                throw UpdaterError.message("Couldn't read new app's Info.plist.")
+            }
+            let plist: [String: Any]
+            do {
+                guard
+                    let parsed = try PropertyListSerialization.propertyList(
+                        from: data, options: [], format: nil) as? [String: Any]
+                else {
+                    throw UpdaterError.message("New app's Info.plist is malformed.")
+                }
+                plist = parsed
+            } catch let UpdaterError.message(reason) {
+                throw UpdaterError.message(reason)
+            } catch {
+                throw UpdaterError.message("Couldn't parse new app's Info.plist.")
+            }
+            guard let bundleID = plist["CFBundleIdentifier"] as? String else {
+                throw UpdaterError.message(
+                    "New app has no bundle identifier. Refusing to install."
+                )
+            }
+            guard let shortVersion = plist["CFBundleShortVersionString"] as? String else {
+                throw UpdaterError.message(
+                    "New app has no version string. Refusing to install."
+                )
+            }
+            return ExtractedAppInfo(
+                bundleIdentifier: bundleID,
+                shortVersion: shortVersion
+            )
+        }.value
+    }
+
     /// Refuse to install if the running app is on a read-only
     /// volume — that's a DMG mount or a quarantine staging area.
     /// The user needs to drag-install at least once before the
     /// updater can replace in place.
-    private static func refuseReadOnlyInstall(at appURL: URL) throws {
+    nonisolated private static func refuseReadOnlyInstall(at appURL: URL) throws {
         let parentDirectory = appURL.deletingLastPathComponent()
         let values = try parentDirectory.resourceValues(forKeys: [.volumeIsReadOnlyKey])
         if values.volumeIsReadOnly == true {
@@ -727,18 +930,28 @@ public final class AppUpdater {
         }
     }
 
-    /// Writes the relaunch helper to a temp file with mode 0700,
-    /// spawns it detached, and returns. The helper waits for the
-    /// parent PID to exit, dittos the new app over the old, and
-    /// `open -a`s the new copy.
-    private static func spawnRelaunchHelper(
+    /// Writes the relaunch helper script into `tempRootToClean`
+    /// (NOT /tmp — see AU-1) atomically with mode 0700, then
+    /// spawns it detached. The helper waits for the parent PID
+    /// to exit, dittos the new app over the old, and `open -a`s
+    /// the new copy.
+    nonisolated private static func spawnRelaunchHelper(
         oldAppURL: URL,
         newAppURL: URL,
         tempRootToClean: URL,
         parentPID: Int32
     ) throws {
-        let scriptURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cool-tunnel-relaunch-\(UUID().uuidString).sh")
+        // **AU-1 fix:** the helper script lives inside the
+        // per-update tempRoot (already restrictive perms; about
+        // to be `rm -rf`'d by the script's own EXIT trap),
+        // NOT in `/var/folders/.../T/` where multiple users on
+        // the machine and same-UID processes could race a
+        // symlink swap into the (post-write, pre-chmod) window.
+        // The script is created via `open(O_CREAT|O_EXCL|O_WRONLY,
+        // 0o700)` so the file is born with the correct mode and
+        // never exists with any other.
+        let scriptURL = tempRootToClean
+            .appendingPathComponent("cool-tunnel-relaunch.sh", isDirectory: false)
 
         // Bash relaunch dance:
         //   1. Wait up to 30 s for parent to exit (poll kill -0).
@@ -766,13 +979,12 @@ public final class AppUpdater {
             STAGED="${OLD_APP}.new"
             BACKUP="${OLD_APP}.old-update"
 
-            # Always-run cleanup: the temp tree and the helper
-            # itself are removed on any exit path. .new and .old
-            # are only present mid-flight; the swap section
-            # cleans them as it goes.
+            # Always-run cleanup: the temp tree (which now
+            # contains the helper script itself, AU-1) is removed
+            # on any exit path. .new and .old are only present
+            # mid-flight; the swap section cleans them as it goes.
             cleanup() {
                 rm -rf "$TEMP_ROOT" 2>/dev/null || true
-                rm -f "$0" 2>/dev/null || true
             }
             trap cleanup EXIT
 
@@ -827,9 +1039,7 @@ public final class AppUpdater {
             open -a "$OLD_APP"
             """
 
-        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+        try writeRelaunchScript(script, to: scriptURL)
 
         // Spawn detached. We deliberately do NOT wait — the
         // caller is about to NSApp.terminate.
@@ -848,7 +1058,68 @@ public final class AppUpdater {
         }
     }
 
-    private static func makeTempDirectory() throws -> URL {
+    /// AU-1: atomic, race-free helper-script writer.
+    ///
+    /// Uses `open(O_CREAT | O_EXCL | O_WRONLY, 0o700)` so the
+    /// file is created with the restrictive mode in a single
+    /// syscall. There is NO window where the file exists with
+    /// default umask perms (the previous `String.write` +
+    /// `setAttributes` pair did have such a window, ~µs but
+    /// real). `O_EXCL` refuses if the file already exists,
+    /// which would be a sign of a pre-existing attacker-planted
+    /// file in tempRoot — bail in that case.
+    nonisolated private static func writeRelaunchScript(_ contents: String, to scriptURL: URL) throws {
+        guard let data = contents.data(using: .utf8) else {
+            throw UpdaterError.message(
+                "Internal error: relaunch script not encodable as UTF-8."
+            )
+        }
+        let path = scriptURL.path
+        let fd = path.withCString { Darwin.open($0, O_CREAT | O_EXCL | O_WRONLY, 0o700) }
+        guard fd >= 0 else {
+            let captured = errno
+            throw UpdaterError.message(
+                "Couldn't create the relaunch helper script (errno \(captured))."
+            )
+        }
+        // FileHandle wraps the fd for the buffered write API,
+        // but we own the lifetime — `closeOnDealloc: false` so
+        // we control when the close happens (defer below).
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        var didClose = false
+        defer {
+            if !didClose {
+                try? handle.close()
+            }
+        }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw UpdaterError.message("Couldn't write relaunch helper.")
+        }
+        // fsync — the bash subprocess that opens this file
+        // immediately may otherwise read pre-flush garbage on
+        // a busy system. `synchronize()` returns void on success
+        // and throws on failure; treat failure as fatal here.
+        do {
+            try handle.synchronize()
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw UpdaterError.message("Couldn't fsync relaunch helper.")
+        }
+        do {
+            try handle.close()
+            didClose = true
+        } catch {
+            // The bytes are already written and fsync'd; close
+            // failure is unusual but not security-critical. Log
+            // and continue.
+            updaterLog("AU-1 relaunch-script close failed (non-fatal): \(error)")
+        }
+    }
+
+    nonisolated private static func makeTempDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("cool-tunnel-app-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -859,7 +1130,7 @@ public final class AppUpdater {
 
     /// Validates a tag matches `v?N.N.N(.N)?` shape. Defensive
     /// against a future GitHub-side issue that returns garbage.
-    static func isValidVersionTag(_ tag: String) -> Bool {
+    nonisolated static func isValidVersionTag(_ tag: String) -> Bool {
         guard !tag.isEmpty, tag.count <= 64 else { return false }
         let pattern = #"^v?\d+(\.\d+){1,3}(-[A-Za-z0-9.]+)?$"#
         return tag.range(of: pattern, options: .regularExpression) != nil
@@ -867,10 +1138,27 @@ public final class AppUpdater {
 
     /// Returns true if `candidate` strictly outranks `base` under
     /// segment-wise numeric compare. Both must already be
-    /// canonical (no leading `v`). Missing segments compare as 0.
-    static func versionIsNewer(_ candidate: String, than base: String) -> Bool {
-        let lhs = candidate.split(separator: ".").map { Int($0) ?? 0 }
-        let rhs = base.split(separator: ".").map { Int($0) ?? 0 }
+    /// canonical (no leading `v`).
+    ///
+    /// **AU-12 fix:** previously `Int($0) ?? 0` silently coerced
+    /// non-numeric segments to 0, which had two failure modes:
+    ///   1. A pre-release tag like `1.0.0-rc1` would split into
+    ///      `["1","0","0-rc1"]`, the `0-rc1` segment would coerce
+    ///      to 0, and the version compared *equal* to `1.0.0`.
+    ///   2. Any garbage segment (`"foo"`) became 0 with no
+    ///      diagnostic, masking a real upstream/release-process
+    ///      bug.
+    /// Now: presence of `-` (pre-release marker) or any
+    /// non-numeric segment short-circuits to `false` (no upgrade
+    /// offered). `/releases/latest` already excludes pre-releases,
+    /// so the only legitimate path through this function is
+    /// strict numeric segments.
+    nonisolated static func versionIsNewer(_ candidate: String, than base: String) -> Bool {
+        guard let lhs = parseVersionSegments(candidate),
+            let rhs = parseVersionSegments(base)
+        else {
+            return false
+        }
         let len = max(lhs.count, rhs.count)
         for i in 0..<len {
             let l = i < lhs.count ? lhs[i] : 0
@@ -880,9 +1168,93 @@ public final class AppUpdater {
         return false
     }
 
+    /// Parses `"N.N.N"` or `"N.N.N.N"` into integer segments.
+    /// Returns nil if the version contains a `-` (pre-release
+    /// marker) or any segment fails to parse strictly. AU-12.
+    nonisolated private static func parseVersionSegments(_ version: String) -> [Int]? {
+        if version.contains("-") { return nil }
+        var segments: [Int] = []
+        for raw in version.split(separator: ".") {
+            guard let value = Int(raw), value >= 0 else { return nil }
+            segments.append(value)
+        }
+        return segments.isEmpty ? nil : segments
+    }
+
     /// Quotes `arg` for safe inclusion in a bash single-quoted
     /// context. Single quotes inside become `'\''`.
-    private static func shellQuote(_ arg: String) -> String {
+    nonisolated private static func shellQuote(_ arg: String) -> String {
         "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    // MARK: - URL trust boundary (AU-2 / AU-3)
+
+    /// Returns true if `url` is HTTPS and its host is on the
+    /// trusted GitHub-served suffix list. Used by
+    /// `validateInstallAssets` (AU-2) to gate the asset URLs
+    /// before download, and by `GitHubRedirectGuard` (AU-3) to
+    /// gate any HTTP redirects mid-download.
+    nonisolated fileprivate static func isTrustedGitHubURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https" else { return false }
+        guard let host = url.host?.lowercased() else { return false }
+        let suffixes = ["github.com", "githubusercontent.com"]
+        return suffixes.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+}
+
+// MARK: - Logging
+
+/// Module-level OSLog handle for the updater. Used to capture
+/// detail (failing URLs, version-mismatch values, status codes)
+/// that AU-2/AU-7/AU-8 deliberately strip from user-facing
+/// errors — the support workflow can still recover the real
+/// values from `log show --predicate 'subsystem == "..."'`.
+private let updaterOSLog = OSLog(
+    subsystem: "com.cool-tunnel.app",
+    category: "AppUpdater"
+)
+
+private func updaterLog(_ message: String) {
+    os_log("%{public}@", log: updaterOSLog, type: .info, message)
+}
+
+// MARK: - GitHub redirect guard (AU-3)
+
+/// URLSession per-task delegate that constrains HTTP redirects
+/// to the trusted GitHub-served host suffix list.
+///
+/// Why this matters: SHA pinning protects the .zip's *content*
+/// but TRUSTS the manifest URL (which defines the expected
+/// hash). A CDN takeover, misconfigured GitHub edge redirect,
+/// or attacker-shaped API response that pointed the manifest
+/// fetch at a non-GitHub host would defeat SHA pinning by
+/// substituting the verification root-of-trust. This delegate
+/// rejects any redirect whose target isn't on the same trusted
+/// list `validateInstallAssets` already enforces (AU-2).
+///
+/// Used via the `delegate:` parameter of
+/// `URLSession.download(for:delegate:)` and
+/// `URLSession.data(for:delegate:)` — the per-task delegate
+/// pattern (macOS 12+) avoids long-lived shared session state.
+private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        if let url = request.url, AppUpdater.isTrustedGitHubURL(url) {
+            completionHandler(request)
+        } else {
+            // Reject the redirect. URLSession surfaces this as
+            // the response that *would have been* the redirect
+            // (the 3xx) — the caller's status check (we want
+            // 200) catches it.
+            updaterLog(
+                "AU-3 redirect rejected: \(request.url?.absoluteString ?? "<nil>")"
+            )
+            completionHandler(nil)
+        }
     }
 }
