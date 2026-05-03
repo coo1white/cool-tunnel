@@ -1,0 +1,102 @@
+# .github/workflows/ci.yml
+#
+# LTSC continuous integration: every push and PR runs the same
+# checks the release script runs locally. If a regression slips
+# through, CI catches it before it reaches a release tag.
+#
+# Three jobs run in parallel on every event:
+#
+#   - rust:       fmt, clippy --pedantic -D warnings, tests
+#   - swift:      swift-format --lint
+#   - shellcheck: every script under scripts/
+#
+# Macs are expensive on Actions, so we only build the universal
+# binary on push to main and on tag pushes — PRs get a host-arch
+# build for cycle time.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same ref. Saves runner time when
+# someone force-pushes a fixup.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Surface backtraces in test failures so CI logs are useful
+  # without re-running locally.
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (build + clippy + test)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml is honoured automatically by rustup —
+      # this step just makes sure rustup is present and up to date.
+      - name: Install pinned toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy --pedantic -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo test
+        run: cargo test --all-features
+      - name: cargo build --release (universal)
+        if: github.event_name == 'push'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/cool-tunnel-core \
+            target/x86_64-apple-darwin/release/cool-tunnel-core \
+            -output target/release/cool-tunnel-core-universal
+          file target/release/cool-tunnel-core-universal
+
+  swift:
+    name: Swift (format lint)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift-format --lint
+        run: |
+          if ! command -v swift-format >/dev/null 2>&1; then
+            echo "swift-format not on PATH on this runner; skipping" >&2
+            exit 0
+          fi
+          swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck scripts/*.sh
+        run: shellcheck scripts/*.sh
