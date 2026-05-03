@@ -54,6 +54,13 @@ public final class TunnelOrchestrator {
     private var eventTask: Task<Void, Never>?
     private var didBootstrap: Bool = false
     private let maxLogEntries: Int = 1000
+    /// Re-entrancy guard for [`refreshNaiveDescriptor`]. The Settings
+    /// view's `.task` can fire two refreshes back-to-back if the user
+    /// opens / dismisses / reopens the sheet quickly; without this
+    /// guard each invocation would spawn its own `lipo` + `--version`
+    /// subprocess pair and stomp the cached descriptor with whichever
+    /// returned last (not necessarily the most recent settings).
+    private var isRefreshingNaive: Bool = false
 
     /// Cached descriptor for the naive binary the app is currently
     /// configured to spawn. Populated on bootstrap and after each
@@ -149,17 +156,32 @@ public final class TunnelOrchestrator {
     /// inspection) and after the user changes the override path so the
     /// chip / arch summary stays accurate. **Not** called from
     /// `bootstrapIfNeeded` — see that method's docs for the rationale.
+    ///
+    /// Re-entrant calls overlap when the user opens / dismisses /
+    /// reopens Settings rapidly. We guard with `isRefreshingNaive` so
+    /// only one inspection runs at a time; subsequent callers get the
+    /// cached descriptor produced by the first call.
     public func refreshNaiveDescriptor() async {
+        if isRefreshingNaive {
+            // Wait for the in-flight refresh to publish, then return.
+            // Polling at the actor's natural cadence is fine here —
+            // descriptors take subprocess-call time, not microseconds.
+            while isRefreshingNaive { await Task.yield() }
+            return
+        }
+        isRefreshingNaive = true
+        defer { isRefreshingNaive = false }
         do {
             activeNaiveDescriptor = try await naiveResolver.resolve(settings: settings)
         } catch let error as NaiveResolverError {
-            // Surfacing the typed error in the log lets a developer see
-            // *why* resolution failed without forcing the user to open
-            // Settings — but we keep `lastError` clear so a stale
-            // descriptor failure does not block manual retries.
-            appendInfo("naive: \(error.localizedDescription)")
+            // The failure modes here all *prevent the proxy from
+            // starting* (missing slice, bad signature, missing file).
+            // Surface as a real error so the UI can highlight it; the
+            // log line is still emitted for developer triage.
+            recordError("naive binary unusable: \(error.localizedDescription)")
             activeNaiveDescriptor = nil
         } catch {
+            recordError("naive binary inspection failed: \(error.localizedDescription)")
             activeNaiveDescriptor = nil
         }
     }
@@ -317,7 +339,9 @@ public final class TunnelOrchestrator {
         // Wall-clock the whole call client-side so the summary can show
         // total elapsed (engine probes are streamed individually via
         // `diagnosticProgress` events while we await the response).
-        let started = Date()
+        // `ContinuousClock` is monotonic — `Date()` can jump backward
+        // on NTP adjustments and report a negative elapsed time.
+        let started = ContinuousClock.now
         appendInfo("diagnostics: starting…")
         do {
             let response = try await core.send(.runDiagnostics)
@@ -332,7 +356,7 @@ public final class TunnelOrchestrator {
     }
 
     public func runLatencyTest(mode: ProxyTestMode) async {
-        let started = Date()
+        let started = ContinuousClock.now
         appendInfo("latency: starting (\(mode.rawValue))…")
         do {
             let response = try await core.send(.runLatencyTest(mode: mode))
@@ -355,11 +379,21 @@ public final class TunnelOrchestrator {
 
     // MARK: - Time formatting helpers
 
-    /// Renders a `Date` interval as an `Nms` (or `N.NNs` if ≥ 1s) tag
-    /// for log lines. Fractional under-millisecond values round up to
-    /// `1ms` so user-visible timings never show `0ms`.
-    private static func formatElapsed(since start: Date) -> String {
-        let ms = max(1.0, Date().timeIntervalSince(start) * 1000.0)
+    /// Renders a monotonic interval as `Nms` (or `N.NNs` if ≥ 1s) for
+    /// log lines. Fractional under-millisecond values round up to `1ms`
+    /// so user-visible timings never show `0ms`. Driven by
+    /// `ContinuousClock` so wall-clock NTP adjustments cannot make a
+    /// successful operation appear to take negative time.
+    private static func formatElapsed(since start: ContinuousClock.Instant) -> String {
+        let elapsed = ContinuousClock.now - start
+        // `Duration.components` is `(seconds: Int64, attoseconds: Int64)`.
+        // Convert to milliseconds via Double — this is a logging helper,
+        // so we don't need integer-exact precision.
+        let comps = elapsed.components
+        let ms = max(
+            1.0,
+            Double(comps.seconds) * 1000.0 + Double(comps.attoseconds) / 1.0e15
+        )
         if ms >= 1000.0 {
             return String(format: "%.2fs", ms / 1000.0)
         }
@@ -368,16 +402,28 @@ public final class TunnelOrchestrator {
 
     /// One-liner readout for a [`LatencySample`], suitable for the live
     /// log. Includes total elapsed, the curl-reported breakdown
-    /// (DNS / connect / TLS / first-byte), and a status glyph.
+    /// (DNS / connect / TLS / first-byte), and a status glyph. Each
+    /// numeric field is run through [`formatMs`] so a malformed engine
+    /// payload (NaN, infinity, negative) cannot trap with `Int(_:)`.
     private static func formatSampleLine(_ sample: LatencySample) -> String {
         let glyph = sample.ok ? "✓" : "✗"
-        let total = "\(Int(sample.elapsedMs.rounded()))ms"
-        let dns = "\(Int(sample.dnsMs.rounded()))ms"
-        let connect = "\(Int(sample.connectMs.rounded()))ms"
-        let tls = "\(Int(sample.tlsMs.rounded()))ms"
-        let firstByte = "\(Int(sample.firstByteMs.rounded()))ms"
+        let total = formatMs(sample.elapsedMs)
+        let dns = formatMs(sample.dnsMs)
+        let connect = formatMs(sample.connectMs)
+        let tls = formatMs(sample.tlsMs)
+        let firstByte = formatMs(sample.firstByteMs)
         return
             "\(glyph) \(sample.url) total=\(total) dns=\(dns) connect=\(connect) tls=\(tls) ttfb=\(firstByte)"
+    }
+
+    /// Defensive `Double → "Nms"` formatter. Rust clamps these values
+    /// to a finite non-negative `u64` before serialising, but the Swift
+    /// `Codable` decoder accepts any `Double`. Keeping the guard here
+    /// means a future protocol-version mismatch (or a hand-crafted
+    /// engine reply) cannot crash the UI with an `Int(_:)` trap.
+    private static func formatMs(_ ms: Double) -> String {
+        guard ms.isFinite, ms >= 0 else { return "?" }
+        return "\(Int(ms.rounded()))ms"
     }
 
     // MARK: - Event subscription
