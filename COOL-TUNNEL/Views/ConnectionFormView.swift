@@ -14,6 +14,17 @@ import SwiftUI
 @MainActor
 public struct ConnectionFormView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// First-run-hint background fill. The 18%-opacity light
+    /// `macBlueSoft` translates to nearly-invisible bluish wash
+    /// in dark mode. Bump opacity in dark so the callout stays
+    /// the visual signal it's meant to be.
+    private var firstRunHintFill: Color {
+        colorScheme == .dark
+            ? CTPalette.macBlue.opacity(0.22)
+            : CTPalette.macBlueSoft.opacity(0.18)
+    }
 
     public init() {}
 
@@ -109,7 +120,7 @@ public struct ConnectionFormView: View {
         .padding(10)
         .background {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(CTPalette.macBlueSoft.opacity(0.18))
+                .fill(firstRunHintFill)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 6, style: .continuous)

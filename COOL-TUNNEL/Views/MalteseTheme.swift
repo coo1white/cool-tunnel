@@ -236,8 +236,32 @@ public enum CTTypography {
 ///     6 pt offset by 2 pt) so cards sit on the platinum
 ///     background without bleeding into it.
 public struct PupCardModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
     var cornerRadius: CGFloat = 8
     var tint: Color? = nil
+
+    private var isDark: Bool { colorScheme == .dark }
+
+    /// Paper-overlay opacity. 0.4 in light lifts the card off
+    /// the platinum window background; 0.18 in dark lets the
+    /// `.regularMaterial` vibrancy show through (otherwise the
+    /// cards looked like opaque rectangles, killing the Liquid
+    /// Glass effect).
+    private var paperOverlayAlpha: Double { isDark ? 0.18 : 0.40 }
+
+    /// Border opacity. Bumped in dark because the dark
+    /// `borderInk` variant is itself muted — 0.45 there leaves
+    /// edges nearly invisible against the dark window
+    /// background.
+    private var borderAlpha: Double { isDark ? 0.65 : 0.45 }
+
+    /// Shadow colour. The previous flat `Color.black.opacity(0.06)`
+    /// disappeared on dark backgrounds — cards floated with no
+    /// edge separation. Dark variant uses a much darker shadow
+    /// (0.55 alpha) so the card silhouette still reads.
+    private var shadowColor: Color {
+        isDark ? Color.black.opacity(0.55) : Color.black.opacity(0.06)
+    }
 
     public func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -250,16 +274,33 @@ public struct PupCardModifier: ViewModifier {
                 } else {
                     shape.fill(.regularMaterial)
                 }
-                shape.fill(CTPalette.paper.opacity(0.4))
+                shape.fill(CTPalette.paper.opacity(paperOverlayAlpha))
                 if let tint {
                     shape.fill(tint.opacity(0.07))
                 }
             }
         }
         .overlay {
-            shape.strokeBorder(CTPalette.borderInk.opacity(0.45), lineWidth: 0.7)
+            shape.strokeBorder(CTPalette.borderInk.opacity(borderAlpha), lineWidth: 0.7)
         }
-        .shadow(color: Color.black.opacity(0.06), radius: 6, x: 0, y: 2)
+        .shadow(color: shadowColor, radius: 6, x: 0, y: 2)
+    }
+}
+
+/// Cross-mode design helpers consumed by views outside the
+/// `PupCardModifier` chrome — verdict pills, status banners,
+/// the firewall badge, anywhere a fixed `.opacity(0.10)` tint
+/// disappeared into the dark window background.
+public enum CTSurface {
+
+    /// Alpha for status/verdict pills (the green/red OK/NG
+    /// rows, the macBlue release-notes pill, the red failed
+    /// pill). 0.10 in light is barely-perceptible-but-visible;
+    /// 0.22 in dark restores the same visual weight against
+    /// the dark surface.
+    @MainActor
+    public static func statusPillAlpha(_ scheme: ColorScheme) -> Double {
+        scheme == .dark ? 0.22 : 0.10
     }
 }
 
