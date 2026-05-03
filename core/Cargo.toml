@@ -29,9 +29,16 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "signal",
+    "net",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Server-mode HTTP API. Pulled in only for `--mode server` paths;
+# client mode (the macOS app's stdin/stdout dispatch) does not
+# touch axum at all but the dependency adds ~600 KB to the
+# universal binary. Keeping default-features off so we don't drag
+# in tower-http / matchit-fs / multipart machinery we don't use.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

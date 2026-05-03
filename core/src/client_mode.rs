@@ -1,0 +1,457 @@
+//! Client mode: long-lived JSON-over-stdio engine driven by the
+//! macOS app (or any other client UI).
+//!
+//! This is the original — and historically only — `cool-tunnel-core`
+//! mode. Reads `Request` frames on stdin, writes `Outbound` frames
+//! (response / error / event) on stdout. Spawns the bundled
+//! `naive` binary as a child process; supervises it; emits log
+//! lines, anomaly events, and diagnostic progress to the client.
+//!
+//! Lives next to `server_mode.rs` so the same binary can be
+//! launched in either flavour from the same `--mode` flag in
+//! `main.rs`.
+
+use std::sync::Arc;
+
+use cool_tunnel_core::config::{generate_pac, NaiveConfig};
+use cool_tunnel_core::diagnostics::{run_diagnostics, run_latency};
+use cool_tunnel_core::monitor;
+use cool_tunnel_core::protocol::{
+    AnomalyReason, ErrorPayload, Event, Outbound, Request, RequestKind, ResponsePayload,
+    ValidationReport,
+};
+use cool_tunnel_core::supervisor::ProxySupervisor;
+use tokio::io::{AsyncWriteExt as _, BufReader};
+use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::task::JoinHandle;
+
+const OUTBOUND_BUFFER: usize = 256;
+const EVENT_BUFFER: usize = 256;
+const MONITOR_INTERVAL_SECS: u64 = 5;
+/// Per-anomaly-reason suppression window for [`monitor_loop`]. The
+/// same reason is forwarded to Swift at most once per window;
+/// distinct reasons are not blocked by each other. 100 ms balances
+/// responsive surfacing of new conditions against UI-flooding when
+/// the proxy is flapping.
+const ANOMALY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+/// Hard cap on a single inbound JSON frame (one stdin line), in
+/// bytes. Frames larger than this are dropped with an
+/// `Outbound::Error` reply rather than buffered. 1 MiB is two
+/// orders of magnitude above any legitimate request the Swift app
+/// can produce.
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Maximum number of in-flight request handler tasks.
+const MAX_INFLIGHT_REQUESTS: usize = 32;
+
+/// Engine-wide mutable state. Wrapped in a [`Mutex`] and shared
+/// between the stdin reader and any background tasks.
+struct EngineState {
+    supervisor: Option<ProxySupervisor>,
+    monitor_handle: Option<JoinHandle<()>>,
+    active_port: Option<cool_tunnel_core::domain::Port>,
+    anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer<AnomalyReason>,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        Self {
+            supervisor: None,
+            monitor_handle: None,
+            active_port: None,
+            anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer::new(ANOMALY_DEBOUNCE),
+        }
+    }
+}
+
+/// Entry point for client mode. Returns when stdin reaches EOF or
+/// the client sends `Shutdown`.
+pub async fn run() -> std::io::Result<()> {
+    let state = Arc::new(Mutex::new(EngineState::default()));
+    let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+    let (outbound_tx, outbound_rx) = mpsc::channel::<Outbound>(OUTBOUND_BUFFER);
+    let (event_tx, event_rx) = mpsc::channel::<Event>(EVENT_BUFFER);
+
+    let writer_task = tokio::spawn(stdout_writer(outbound_rx));
+    let bridge_task = tokio::spawn(event_bridge(event_rx, outbound_tx.clone()));
+
+    let mut reader = BufReader::new(tokio::io::stdin());
+    let mut frame = Vec::with_capacity(8 * 1024);
+
+    loop {
+        frame.clear();
+        match read_capped_line(&mut reader, &mut frame, MAX_FRAME_BYTES).await? {
+            FrameOutcome::Eof => break,
+            FrameOutcome::TooLarge => {
+                let _ = outbound_tx
+                    .send(Outbound::Error {
+                        id: 0,
+                        error: ErrorPayload::new(
+                            "frame_too_large",
+                            format!("request frame exceeded {MAX_FRAME_BYTES} bytes"),
+                        ),
+                    })
+                    .await;
+                continue;
+            }
+            FrameOutcome::Frame => {}
+        }
+
+        let frame_str = match std::str::from_utf8(&frame) {
+            Ok(s) => s.trim(),
+            Err(err) => {
+                let _ = outbound_tx
+                    .send(Outbound::Error {
+                        id: 0,
+                        error: ErrorPayload::new("malformed_request", err.to_string()),
+                    })
+                    .await;
+                continue;
+            }
+        };
+        if frame_str.is_empty() {
+            continue;
+        }
+
+        // Two-phase parse: extract `id` first as a raw `Value`, then
+        // attempt typed deserialization. If only the typed parse
+        // fails (e.g. invalid profile fields), we still have the
+        // original `id` to correlate the error reply with the
+        // caller's waiter.
+        let value: serde_json::Value = match serde_json::from_str(frame_str) {
+            Ok(v) => v,
+            Err(err) => {
+                let _ = outbound_tx
+                    .send(Outbound::Error {
+                        id: 0,
+                        error: ErrorPayload::new("malformed_request", err.to_string()),
+                    })
+                    .await;
+                continue;
+            }
+        };
+        let id = value
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+
+        match serde_json::from_value::<Request>(value) {
+            Ok(request) => {
+                if matches!(request.kind, RequestKind::Shutdown) {
+                    let _ = outbound_tx
+                        .send(Outbound::Response {
+                            id,
+                            result: ResponsePayload::Ack,
+                        })
+                        .await;
+                    break;
+                }
+
+                let Ok(permit) = Arc::clone(&inflight).acquire_owned().await else {
+                    break;
+                };
+                let state = Arc::clone(&state);
+                let outbound_tx = outbound_tx.clone();
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    handle_request(state, request, outbound_tx, event_tx).await;
+                });
+            }
+            Err(err) => {
+                let _ = outbound_tx
+                    .send(Outbound::Error {
+                        id,
+                        error: ErrorPayload::new("invalid_request", err.to_string()),
+                    })
+                    .await;
+            }
+        }
+    }
+
+    drain(state).await;
+    drop(event_tx);
+    drop(outbound_tx);
+    let _ = bridge_task.await;
+    let _ = writer_task.await;
+    Ok(())
+}
+
+enum FrameOutcome {
+    Eof,
+    Frame,
+    TooLarge,
+}
+
+async fn read_capped_line<R>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<FrameOutcome>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt as _;
+    buffer.clear();
+    let mut over = false;
+
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(if over {
+                FrameOutcome::TooLarge
+            } else if buffer.is_empty() {
+                FrameOutcome::Eof
+            } else {
+                FrameOutcome::Frame
+            });
+        }
+
+        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+            let take = pos + 1;
+            if !over && buffer.len() + take <= max {
+                buffer.extend_from_slice(&chunk[..take]);
+                reader.consume(take);
+                return Ok(FrameOutcome::Frame);
+            }
+            buffer.clear();
+            reader.consume(take);
+            return Ok(FrameOutcome::TooLarge);
+        }
+
+        let len = chunk.len();
+        if !over && buffer.len() + len > max {
+            over = true;
+            buffer.clear();
+        }
+        if !over {
+            buffer.extend_from_slice(chunk);
+        }
+        reader.consume(len);
+    }
+}
+
+async fn handle_request(
+    state: Arc<Mutex<EngineState>>,
+    request: Request,
+    outbound: mpsc::Sender<Outbound>,
+    events: mpsc::Sender<Event>,
+) {
+    let id = request.id;
+    let result = dispatch(state, request.kind, outbound.clone(), events).await;
+    let frame = match result {
+        Ok(payload) => Outbound::Response {
+            id,
+            result: payload,
+        },
+        Err(error) => Outbound::Error { id, error },
+    };
+    let _ = outbound.send(frame).await;
+}
+
+async fn dispatch(
+    state: Arc<Mutex<EngineState>>,
+    kind: RequestKind,
+    outbound: mpsc::Sender<Outbound>,
+    events: mpsc::Sender<Event>,
+) -> Result<ResponsePayload, ErrorPayload> {
+    match kind {
+        RequestKind::ValidateProfile { profile: _ } => {
+            Ok(ResponsePayload::Validation(ValidationReport {
+                ok: true,
+                reason: None,
+            }))
+        }
+        RequestKind::GenerateNaiveConfig { profile } => {
+            let config = NaiveConfig::from_profile(&profile);
+            let json = config
+                .to_pretty_json()
+                .map_err(|err| ErrorPayload::new("serialization", err.to_string()))?;
+            Ok(ResponsePayload::NaiveConfig { json })
+        }
+        RequestKind::GeneratePac {
+            direct_domains,
+            port,
+        } => {
+            let js = generate_pac(&direct_domains, port);
+            Ok(ResponsePayload::Pac { js })
+        }
+        RequestKind::StartProxy {
+            binary_path,
+            config_path,
+            port,
+        } => start_proxy(state, binary_path, config_path, port, events).await,
+        RequestKind::StopProxy => {
+            let (supervisor, monitor_handle) = {
+                let mut guard = state.lock().await;
+                guard.active_port = None;
+                (guard.supervisor.take(), guard.monitor_handle.take())
+            };
+            let Some(supervisor) = supervisor else {
+                return Err(ErrorPayload::new("not_running", "proxy is not running"));
+            };
+            if let Some(handle) = monitor_handle {
+                handle.abort();
+                let _ = handle.await;
+            }
+            supervisor
+                .stop()
+                .await
+                .map_err(|err| ErrorPayload::new("stop_failed", err.to_string()))?;
+            Ok(ResponsePayload::Stopped)
+        }
+        RequestKind::RunDiagnostics => {
+            let port = current_port(&state).await.ok_or_else(|| {
+                ErrorPayload::new("not_running", "diagnostics require a running proxy")
+            })?;
+            let report = run_diagnostics(port, &outbound)
+                .await
+                .map_err(|err| ErrorPayload::new("diagnostic_failed", err.to_string()))?;
+            Ok(ResponsePayload::Diagnostic(report))
+        }
+        RequestKind::RunLatencyTest { mode } => {
+            let port = current_port(&state).await.ok_or_else(|| {
+                ErrorPayload::new("not_running", "latency test requires a running proxy")
+            })?;
+            let report = run_latency(mode, port, &outbound)
+                .await
+                .map_err(|err| ErrorPayload::new("diagnostic_failed", err.to_string()))?;
+            Ok(ResponsePayload::Latency(report))
+        }
+        RequestKind::Shutdown => Ok(ResponsePayload::Ack),
+        _ => Err(ErrorPayload::new(
+            "unimplemented_method",
+            "this engine version does not implement the requested method",
+        )),
+    }
+}
+
+async fn start_proxy(
+    state: Arc<Mutex<EngineState>>,
+    binary_path: std::path::PathBuf,
+    config_path: std::path::PathBuf,
+    port: cool_tunnel_core::domain::Port,
+    events: mpsc::Sender<Event>,
+) -> Result<ResponsePayload, ErrorPayload> {
+    {
+        let guard = state.lock().await;
+        if guard.supervisor.is_some() {
+            return Err(ErrorPayload::new(
+                "already_running",
+                "proxy is already running",
+            ));
+        }
+    }
+
+    let supervisor = ProxySupervisor::spawn(&binary_path, &config_path, events.clone())
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "ProxySupervisor::spawn failed");
+            ErrorPayload::new(
+                "spawn_failed",
+                "failed to spawn the naive proxy binary; check the engine log for details",
+            )
+        })?;
+    let pid = supervisor.pid();
+
+    let mut guard = state.lock().await;
+    if guard.supervisor.is_some() {
+        let _ = supervisor.stop().await;
+        return Err(ErrorPayload::new(
+            "already_running",
+            "proxy is already running",
+        ));
+    }
+    guard.anomaly_debouncer.reset();
+    let monitor_handle = tokio::spawn(monitor_loop(pid, port, events, Arc::clone(&state)));
+    guard.supervisor = Some(supervisor);
+    guard.monitor_handle = Some(monitor_handle);
+    guard.active_port = Some(port);
+    Ok(ResponsePayload::Started { pid })
+}
+
+async fn monitor_loop(
+    pid: u32,
+    port: cool_tunnel_core::domain::Port,
+    events: mpsc::Sender<Event>,
+    state: Arc<Mutex<EngineState>>,
+) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+        match monitor::run(pid, port).await {
+            Ok(snapshot) => {
+                if let Some(anomaly) = snapshot.anomaly {
+                    let reason: AnomalyReason = (&anomaly).into();
+                    let admitted = {
+                        let mut guard = state.lock().await;
+                        guard
+                            .anomaly_debouncer
+                            .admit(reason, std::time::Instant::now())
+                    };
+                    if admitted {
+                        let _ = events
+                            .send(Event::Anomaly {
+                                reason,
+                                detail: anomaly.detail,
+                            })
+                            .await;
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "lsof probe failed");
+            }
+        }
+    }
+}
+
+async fn stdout_writer(mut rx: mpsc::Receiver<Outbound>) {
+    let mut stdout = tokio::io::stdout();
+    while let Some(frame) = rx.recv().await {
+        match serde_json::to_vec(&frame) {
+            Ok(mut bytes) => {
+                bytes.push(b'\n');
+                if stdout.write_all(&bytes).await.is_err() {
+                    break;
+                }
+                if stdout.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to serialize outbound frame");
+            }
+        }
+    }
+    let _ = stdout.flush().await;
+}
+
+async fn event_bridge(mut rx: mpsc::Receiver<Event>, outbound: mpsc::Sender<Outbound>) {
+    while let Some(event) = rx.recv().await {
+        if outbound.send(Outbound::Event(event)).await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn current_port(state: &Arc<Mutex<EngineState>>) -> Option<cool_tunnel_core::domain::Port> {
+    let guard = state.lock().await;
+    guard.active_port
+}
+
+async fn drain(state: Arc<Mutex<EngineState>>) {
+    let (supervisor, monitor_handle) = {
+        let mut guard = state.lock().await;
+        (guard.supervisor.take(), guard.monitor_handle.take())
+    };
+    if let Some(handle) = monitor_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+    if let Some(supervisor) = supervisor {
+        let _ = supervisor.stop().await;
+    }
+}
