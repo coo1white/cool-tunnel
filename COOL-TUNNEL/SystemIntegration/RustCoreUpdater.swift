@@ -135,7 +135,14 @@ public final class RustCoreUpdater {
     /// `/releases/latest` because pre-releases may be the only
     /// builds for a while.
     private static func resolveLatestAsset() async throws -> (String, URL) {
-        let apiURL = URL(string: "https://api.github.com/repos/coo1white/cool-tunnel/releases?per_page=20")!
+        // Compile-time constant URL — same audit-driven safe-unwrap
+        // pattern as `NaiveUpdater.resolveLatestStableTag`.
+        guard
+            let apiURL = URL(
+                string: "https://api.github.com/repos/coo1white/cool-tunnel/releases?per_page=20")
+        else {
+            throw RustUpdaterError.message("internal error: invalid hardcoded GitHub API URL")
+        }
         var request = URLRequest(url: apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-Updater", forHTTPHeaderField: "User-Agent")

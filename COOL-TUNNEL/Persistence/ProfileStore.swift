@@ -20,7 +20,10 @@ import Foundation
 /// Stores profiles + selection. Marked `@unchecked Sendable` because
 /// `UserDefaults` is documented thread-safe but does not yet conform
 /// to `Sendable`; the credential store's own conformance covers the
-/// other dependency.
+/// other dependency. Safety invariant: every method runs synchronously
+/// (no `await`), and the only owner is the MainActor-isolated
+/// `TunnelOrchestrator`, so no thread-crossing race can occur in
+/// the call sites this app actually exercises.
 public struct ProfileStore: @unchecked Sendable {
 
     private enum Keys {

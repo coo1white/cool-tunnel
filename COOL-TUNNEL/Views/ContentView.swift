@@ -12,6 +12,10 @@
 
 import SwiftUI
 
+/// Composition root for the single-window app. Swaps between the
+/// four-panel main stack and the inline Settings view based on
+/// `isShowingSettings`; renders the mode-aware pastel window
+/// background underneath both.
 public struct ContentView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
     @State private var isShowingSettings = false
