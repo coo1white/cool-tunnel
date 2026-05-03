@@ -1,7 +1,24 @@
 // Views/ControlPanelView.swift
 //
-// Action buttons: start in each mode, stop, run diagnostics, and the
-// settings sheet trigger. All actions delegate to the orchestrator.
+// v0.1.5.4: redesigned as a NewJeans-style mode picker.
+//
+// One row, four interaction surfaces:
+//
+//   [ Smart ] [ Global ] [ Local ]   ⏻ Stop   🩺 Diag   ⏱ Latency   ⚙ Settings
+//
+// The three mode chips are mutually exclusive (radio-style) — picking
+// one while the proxy is running calls `switchMode(to:)`, which
+// hot-swaps the active mode in place rather than forcing the user to
+// stop first. That removes the awkward "Start Smart is greyed out
+// because Global is running" state from earlier versions.
+//
+// macOS 26 features in use here:
+//   - `.glassEffect()` on the wrapper card (via `ganjiCard`)
+//   - `.symbolEffect(.bounce)` on the active chip's icon when the
+//     mode changes
+//   - `.sensoryFeedback(.selection, trigger:)` on chip taps
+//   - `.contentTransition(.symbolEffect(.replace))` on the run-state
+//     toggle icon
 
 import SwiftUI
 
@@ -14,56 +31,150 @@ public struct ControlPanelView: View {
     }
 
     public var body: some View {
-        HStack(spacing: 10) {
-            startButton(mode: .smart, label: "Start Smart", system: "bolt.horizontal.fill")
-            startButton(mode: .global, label: "Start Global", system: "globe")
-
-            Button(role: .destructive) {
-                Task { await orchestrator.stop() }
-            } label: {
-                Label("Stop", systemImage: "stop.fill")
-            }
-            .disabled(!orchestrator.isRunning)
-
-            Divider().frame(height: 22)
-
-            Button {
-                Task { await orchestrator.runDiagnostics() }
-            } label: {
-                Label("Diagnostics", systemImage: "stethoscope")
-            }
-            .disabled(!orchestrator.isRunning)
-
-            Menu {
-                Button("Smart") {
-                    Task { await orchestrator.runLatencyTest(mode: .smart) }
-                }
-                Button("Global") {
-                    Task { await orchestrator.runLatencyTest(mode: .global) }
-                }
-            } label: {
-                Label("Latency Test", systemImage: "speedometer")
-            }
-            .disabled(!orchestrator.isRunning)
-
+        HStack(spacing: 12) {
+            modePicker
+            Divider().frame(height: 28).opacity(0.3)
+            stopButton
+            diagnosticsButton
+            latencyMenu
             Spacer()
+            settingsButton
+        }
+        .padding(12)
+        .ganjiCard(cornerRadius: 20)
+        // Selection feedback on the trackpad — feels "genki" without
+        // being noisy. macOS only honours certain feedback kinds on
+        // hardware that supports them; the modifier no-ops elsewhere.
+        .sensoryFeedback(.selection, trigger: orchestrator.activeMode)
+        .sensoryFeedback(.success, trigger: orchestrator.isRunning) { _, new in new }
+    }
 
-            Button {
-                isShowingSettings = true
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
+    // MARK: - Mode picker (the headline change)
+
+    /// Three radio-style chips wrapped in a pill rail. Tapping a chip
+    /// while idle starts the proxy in that mode; while running, it
+    /// hot-swaps via [`TunnelOrchestrator.switchMode(to:)`].
+    private var modePicker: some View {
+        HStack(spacing: 8) {
+            modeChip(
+                .smart,
+                label: "Smart",
+                system: "bolt.horizontal.fill"
+            )
+            modeChip(
+                .global,
+                label: "Global",
+                system: "globe.americas.fill"
+            )
+            modeChip(
+                .localOnly,
+                label: "Local",
+                system: "house.fill"
+            )
+        }
+        .padding(4)
+        .background {
+            Capsule(style: .continuous).fill(.ultraThinMaterial)
+        }
+        .overlay {
+            Capsule(style: .continuous).strokeBorder(.white.opacity(0.30), lineWidth: 0.5)
         }
     }
 
-    private func startButton(mode: ProxyMode, label: String, system: String) -> some View {
-        Button {
+    /// One mode chip. `isActive` is true when the orchestrator is
+    /// running AND in this mode — so a chip never looks selected when
+    /// the proxy is actually stopped, even if it was the last-used
+    /// mode.
+    private func modeChip(_ mode: ProxyMode, label: String, system: String) -> some View {
+        let isActive = orchestrator.isRunning && orchestrator.activeMode == mode
+        let tint = CTPalette.accent(for: mode)
+        return Button {
             Task {
-                do { try await orchestrator.start(mode: mode) } catch { /* surfaced via lastError */  }
+                do {
+                    try await orchestrator.switchMode(to: mode)
+                } catch {
+                    // `lastError` carries the user-facing surface;
+                    // logging it here would be redundant.
+                }
             }
         } label: {
             Label(label, systemImage: system)
+                .symbolEffect(.bounce, options: .speed(1.3), value: isActive)
         }
-        .disabled(orchestrator.isRunning)
+        .buttonStyle(ModeChipStyle(isActive: isActive, tint: tint))
+        .help(modeHelp(for: mode))
+    }
+
+    private func modeHelp(for mode: ProxyMode) -> String {
+        switch mode {
+        case .smart:
+            "Route the direct-domains list around the proxy; everything else through SOCKS."
+        case .global:
+            "Route every TCP connection through the proxy."
+        case .localOnly:
+            "Run naive on 127.0.0.1; leave the system proxy untouched."
+        case .stopped:
+            ""
+        }
+    }
+
+    // MARK: - Secondary actions
+
+    private var stopButton: some View {
+        Button(role: .destructive) {
+            Task { await orchestrator.stop() }
+        } label: {
+            Label("Stop", systemImage: "stop.fill")
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(SoftButtonStyle(tint: orchestrator.isRunning ? CTPalette.cherryRose : .secondary))
+        .disabled(!orchestrator.isRunning)
+    }
+
+    private var diagnosticsButton: some View {
+        Button {
+            Task { await orchestrator.runDiagnostics() }
+        } label: {
+            Label("Diag", systemImage: "stethoscope")
+        }
+        .buttonStyle(SoftButtonStyle(tint: orchestrator.isRunning ? CTPalette.inkBlue : .secondary))
+        .disabled(!orchestrator.isRunning)
+    }
+
+    private var latencyMenu: some View {
+        Menu {
+            Button("Smart route") {
+                Task { await orchestrator.runLatencyTest(mode: .smart) }
+            }
+            Button("Global route") {
+                Task { await orchestrator.runLatencyTest(mode: .global) }
+            }
+        } label: {
+            Label("Latency", systemImage: "speedometer")
+        }
+        .menuStyle(.borderlessButton)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background {
+            Capsule(style: .continuous).fill(.ultraThinMaterial)
+        }
+        .overlay {
+            Capsule(style: .continuous).strokeBorder(
+                (orchestrator.isRunning ? CTPalette.lilac : .secondary).opacity(0.30),
+                lineWidth: 0.6
+            )
+        }
+        .foregroundStyle(orchestrator.isRunning ? CTPalette.inkBlue : .secondary)
+        .disabled(!orchestrator.isRunning)
+        .fixedSize()
+    }
+
+    private var settingsButton: some View {
+        Button {
+            isShowingSettings = true
+        } label: {
+            Label("Settings", systemImage: "gearshape.fill")
+        }
+        .buttonStyle(SoftButtonStyle(tint: CTPalette.inkBlue))
     }
 }
