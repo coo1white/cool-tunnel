@@ -185,7 +185,9 @@ public final class NaiveUpdater {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw UpdaterError.message("GitHub API returned an unexpected response")
+            throw UpdaterError.message(
+                "Couldn't reach GitHub to look up the latest NaiveProxy release. Check your internet connection and try again."
+            )
         }
 
         // GitHub's JSON uses snake_case, Swift wants camelCase for
@@ -213,7 +215,9 @@ public final class NaiveUpdater {
     private static func download(url: URL, to destination: URL) async throws -> URL {
         let (tempURL, response) = try await URLSession.shared.download(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw UpdaterError.message("download failed for \(url.lastPathComponent)")
+            throw UpdaterError.message(
+                "Couldn't download \(url.lastPathComponent). Check your internet connection and try Update again."
+            )
         }
         // Move into our temp dir so both downloads end up in
         // predictable filenames the rest of the pipeline can find.
@@ -244,7 +248,9 @@ public final class NaiveUpdater {
         )
         let binary = target.appendingPathComponent("naive")
         guard FileManager.default.fileExists(atPath: binary.path) else {
-            throw UpdaterError.message("extracted tarball did not contain a 'naive' executable")
+            throw UpdaterError.message(
+                "The downloaded NaiveProxy archive looked incomplete. Try Update again — the previous download was probably interrupted."
+            )
         }
         return binary
     }

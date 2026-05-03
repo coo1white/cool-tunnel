@@ -119,6 +119,13 @@ public struct ControlPanelView: View {
         .buttonStyle(ModeChipStyle(isActive: isActive, tint: tint))
         .disabled(isCurrent)
         .help(modeHelp(for: mode))
+        // VoiceOver hears the mode name + current state ("Smart,
+        // selected" or "Global, not selected"); the hint explains
+        // what the button does without spelling out the
+        // implementation.
+        .accessibilityLabel("\(label) mode")
+        .accessibilityValue(isActive ? "selected" : "not selected")
+        .accessibilityHint(modeHelp(for: mode))
     }
 
     private func modeHelp(for mode: ProxyMode) -> String {
@@ -145,6 +152,8 @@ public struct ControlPanelView: View {
         }
         .buttonStyle(SoftButtonStyle(tint: orchestrator.isRunning ? CTPalette.cherryRose : .secondary))
         .disabled(!orchestrator.isRunning)
+        .accessibilityLabel("Stop proxy")
+        .accessibilityHint("Stops the proxy and reverts the system network settings.")
     }
 
     private var diagnosticsButton: some View {
@@ -155,6 +164,8 @@ public struct ControlPanelView: View {
         }
         .buttonStyle(SoftButtonStyle(tint: orchestrator.isRunning ? CTPalette.inkBlue : .secondary))
         .disabled(!orchestrator.isRunning)
+        .accessibilityLabel("Run diagnostics")
+        .accessibilityHint("Sends a test request through the proxy and prints the timing in the live log.")
     }
 
     private var latencyMenu: some View {
@@ -183,6 +194,8 @@ public struct ControlPanelView: View {
         .foregroundStyle(orchestrator.isRunning ? CTPalette.inkBlue : .secondary)
         .disabled(!orchestrator.isRunning)
         .fixedSize()
+        .accessibilityLabel("Latency test")
+        .accessibilityHint("Measures DNS, connect, TLS, and first-byte timings to a couple of test URLs.")
     }
 
     private var settingsButton: some View {
@@ -192,5 +205,8 @@ public struct ControlPanelView: View {
             Label("Settings", systemImage: "gearshape.fill")
         }
         .buttonStyle(SoftButtonStyle(tint: CTPalette.inkBlue))
+        .accessibilityLabel("Settings")
+        .accessibilityHint(
+            "Opens the Settings panel with profile direct domains, naive binary, Rust core, and About.")
     }
 }
