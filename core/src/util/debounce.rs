@@ -12,7 +12,21 @@
 //! trailing-edge: every probe inside the window is dropped, then the
 //! first probe outside the window wins. That matches the user-facing
 //! semantics we want — "tell me again at most every 100 ms" — and
-//! keeps the implementation deterministic for the stress test below.
+//! keeps the implementation deterministic for the stress tests below.
+//!
+//! ## Memory
+//!
+//! Internally a `HashMap<K, Instant>`. Each [`admit`](Debouncer::admit)
+//! call performs a *bounded* lazy prune: when the map is small the
+//! prune is a no-op; once it grows past [`PRUNE_THRESHOLD`] we walk it
+//! and drop entries older than `2 × window`. That keeps the map size
+//! O(distinct active keys) without a separate timer task and without
+//! the allocation spike a periodic `clear` would cause.
+//!
+//! In production the only call site uses
+//! [`crate::protocol::AnomalyReason`] (5 variants) as the key, so the
+//! map maxes out at 5 entries and the pruning path never triggers —
+//! but the bound is documented for future callers.
 //!
 //! # Example
 //!
@@ -32,6 +46,13 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
+/// Map size at which [`admit`](Debouncer::admit) starts running its
+/// opportunistic prune. Below this we trust the caller's key set is
+/// small (the production case has 5 keys); above it we do an O(n)
+/// `retain` walk on every admit, which is cheap up to a few hundred
+/// keys and bounds the worst-case memory growth.
+const PRUNE_THRESHOLD: usize = 64;
+
 /// Filters bursts of identical events down to one per `window`.
 ///
 /// `K` is whatever uniquely identifies a burst — for the monitor loop
@@ -40,6 +61,7 @@ use std::time::{Duration, Instant};
 ///
 /// The debouncer is single-threaded by design. If you need to share it
 /// across tasks wrap it in a `tokio::sync::Mutex`.
+#[derive(Debug)]
 pub struct Debouncer<K> {
     window: Duration,
     last_admitted: HashMap<K, Instant>,
@@ -64,11 +86,25 @@ where
     /// it falls inside the suppression window of a previous admission
     /// for the same key.
     ///
-    /// Updates the per-key timestamp only on a `true` return. That
-    /// means a burst of 1000 dropped events does not extend the window
-    /// — the next admission still happens exactly `window` after the
-    /// most recent *admitted* event, not after the last *seen* event.
+    /// On a `true` return the per-key timestamp updates to `now`. A
+    /// burst of dropped events does **not** extend the window — the
+    /// next admission still happens exactly `window` after the most
+    /// recent *admitted* event, not after the last *seen* event.
+    ///
+    /// As a side effect, when the internal map exceeds
+    /// [`PRUNE_THRESHOLD`] entries this call also drops every key
+    /// whose timestamp is older than `2 × window` — those keys can no
+    /// longer affect any future decision (any admit for them would
+    /// trivially succeed) so keeping them costs memory for nothing.
     pub fn admit(&mut self, key: K, now: Instant) -> bool {
+        // Bounded lazy prune. Cheap when small, opportunistically
+        // shrinks when large. The `2 × window` cutoff is conservative:
+        // we keep entries one full window past their effective expiry
+        // so probes that arrive slightly out of order cannot suddenly
+        // re-admit a recently-suppressed key.
+        if self.last_admitted.len() >= PRUNE_THRESHOLD {
+            self.prune_stale(now);
+        }
         match self.last_admitted.get(&key) {
             Some(prev) if now.duration_since(*prev) < self.window => false,
             _ => {
@@ -78,22 +114,57 @@ where
         }
     }
 
+    /// Removes every key whose last admission is older than `2 ×
+    /// window`. Callers can invoke this proactively (e.g. on a slow
+    /// timer) to bound the map size without waiting for the
+    /// auto-prune in [`admit`](Self::admit) to fire.
+    ///
+    /// The cutoff is `2 × window` rather than `window` so a probe
+    /// arriving slightly out of order — for example, a delayed
+    /// scheduler tick that lands a few ms past expiry — cannot re-
+    /// admit a key whose suppression we still consider live.
+    pub fn prune_stale(&mut self, now: Instant) {
+        let cutoff = self.window.saturating_mul(2);
+        self.last_admitted
+            .retain(|_, prev| now.duration_since(*prev) < cutoff);
+    }
+
     /// Forgets every key. Useful when the supervised process restarts
     /// and stale anomaly state is no longer meaningful.
     pub fn reset(&mut self) {
         self.last_admitted.clear();
     }
 
+    /// Suppression window this debouncer was constructed with. Read-
+    /// only — changing the window after the fact would invalidate the
+    /// per-key timing semantics callers depend on.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.window
+    }
+
     /// How many keys are currently being tracked. The map grows by one
-    /// per *distinct* key admitted; it does not shrink between
-    /// admissions. In production the only call site uses
+    /// per *distinct* key admitted; lazy pruning in
+    /// [`admit`](Self::admit) keeps it bounded once it exceeds
+    /// [`PRUNE_THRESHOLD`]. In production the only call site uses
     /// [`crate::protocol::AnomalyReason`] as the key, which has a
     /// fixed five variants — so the map is bounded at five entries.
-    /// Call [`reset`] to clear it (e.g. on supervisor restart).
-    /// Tested by the stress suite below to confirm the bound holds.
     #[must_use]
     pub fn tracked_keys(&self) -> usize {
         self.last_admitted.len()
+    }
+}
+
+/// `Default` is a 100 ms window — matches the production
+/// [`crate::ANOMALY_DEBOUNCE`] constant in `main.rs`. Lets callers
+/// write `Debouncer::default()` for the common case and
+/// `Debouncer::new(other)` for everything else.
+impl<K> Default for Debouncer<K>
+where
+    K: Eq + Hash,
+{
+    fn default() -> Self {
+        Self::new(Duration::from_millis(100))
     }
 }
 
@@ -183,5 +254,84 @@ mod tests {
         d.reset();
         assert!(d.admit("k", t0 + Duration::from_millis(1)));
         assert_eq!(d.tracked_keys(), 1);
+    }
+
+    /// Default constructs a 100 ms debouncer — same as the production
+    /// `ANOMALY_DEBOUNCE` constant. Keeps the call-site short for the
+    /// common case.
+    #[test]
+    fn default_is_100ms_window() {
+        let d: Debouncer<&str> = Debouncer::default();
+        assert_eq!(d.window(), Duration::from_millis(100));
+        assert_eq!(d.tracked_keys(), 0);
+    }
+
+    /// Explicit `prune_stale` removes only entries older than
+    /// `2 × window`; recent ones survive so the suppression contract
+    /// is preserved.
+    #[test]
+    fn prune_stale_removes_only_expired_entries() {
+        let window = Duration::from_millis(100);
+        let mut d = Debouncer::new(window);
+        // Anchor "now" at one second past `Instant::now()` so we can
+        // express past timestamps via plain addition relative to a
+        // base — `Instant - Duration` is forbidden by clippy's
+        // `unchecked_time_subtraction` lint, which is on under
+        // `pedantic`.
+        let base = Instant::now();
+        let now = base + Duration::from_secs(1);
+
+        // Three keys at three ages, all expressed as `base + offset`.
+        d.admit("fresh", now);
+        d.admit("middle-aged", base + Duration::from_millis(850)); // 150 ms before now
+        d.admit("expired", base + Duration::from_millis(500)); // 500 ms before now
+        assert_eq!(d.tracked_keys(), 3);
+
+        // Prune at `now`: cutoff = 200 ms. "fresh" and "middle-aged"
+        // are within the cutoff; "expired" is not.
+        d.prune_stale(now);
+        assert_eq!(d.tracked_keys(), 2);
+
+        // After the prune, "expired" can re-admit immediately because
+        // its prior timestamp is gone.
+        assert!(d.admit("expired", now));
+        // But "fresh" still suppresses a same-window admit.
+        assert!(!d.admit("fresh", now + Duration::from_millis(10)));
+    }
+
+    /// Auto-prune kicks in once the map crosses `PRUNE_THRESHOLD`.
+    /// Confirm the map shrinks back below that bound after a single
+    /// `admit` call when most existing entries are stale.
+    #[test]
+    fn admit_lazy_prunes_when_over_threshold() {
+        let window = Duration::from_millis(100);
+        let mut d = Debouncer::new(window);
+        let base = Instant::now();
+        // Use `base` for the stale fill and `base + 60s` for the new
+        // admit so the difference exceeds the 2 × window cutoff
+        // without any `Instant - Duration` arithmetic.
+        let stale_time = base;
+        let now = base + Duration::from_secs(60);
+
+        for k in 0..PRUNE_THRESHOLD {
+            d.admit(k, stale_time);
+        }
+        assert_eq!(d.tracked_keys(), PRUNE_THRESHOLD);
+
+        // One more admit at `now` should trigger the lazy prune,
+        // drop every stale entry, and leave only the new one.
+        assert!(d.admit(usize::MAX, now));
+        assert_eq!(
+            d.tracked_keys(),
+            1,
+            "lazy prune should have dropped every stale entry"
+        );
+    }
+
+    /// Window is read-only and reflects the constructor argument.
+    #[test]
+    fn window_accessor_returns_constructor_value() {
+        let d: Debouncer<&str> = Debouncer::new(Duration::from_millis(250));
+        assert_eq!(d.window(), Duration::from_millis(250));
     }
 }
