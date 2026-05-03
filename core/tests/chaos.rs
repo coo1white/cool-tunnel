@@ -13,7 +13,17 @@
 //! `panic = "abort"` profile so any panic translates to a
 //! process exit which the harness can detect.
 
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::unused_async)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::unused_async,
+    clippy::panic,
+    clippy::cast_possible_truncation,
+    clippy::cast_lossless,
+    clippy::doc_markdown,
+    clippy::items_after_statements,
+    clippy::map_unwrap_or
+)]
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -191,22 +201,42 @@ async fn chaos_concurrent_start_proxy_does_not_double_spawn() {
     // when `naive` (here: /bin/sleep) launches. The multi-set of
     // (kind, code) values must be exactly:
     //   {response/started, error/already_running}
+    // v0.1.7.5 wire-ordering contract: every response is emitted
+    // BEFORE its associated state_changed event. Track that any
+    // state_changed:true event arrives AFTER the started
+    // response (not before). The previous behaviour (audit
+    // Ru#C4, fixed in v0.1.7.5) emitted state_changed from the
+    // supervisor on a different channel, racing the response.
     let mut seen: Vec<(String, String)> = Vec::new();
+    let mut state_changed_before_response = false;
+    let mut started_response_seen = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 2 && std::time::Instant::now() < deadline {
         let Ok(Some(line)) = timeout(Duration::from_secs(5), harness.recv_raw()).await else { break };
         let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
         let kind = frame["kind"].as_str().unwrap_or("?").to_owned();
         if kind == "event" {
-            continue; // not a reply, ignore
+            // If a state_changed:true event arrives BEFORE the
+            // started response, that's the Ru#C4 regression.
+            if frame["data"]["running"].as_bool() == Some(true) && !started_response_seen {
+                state_changed_before_response = true;
+            }
+            continue;
         }
         let code = if kind == "error" {
             frame["error"]["code"].as_str().unwrap_or("?").to_owned()
         } else {
             frame["result"]["type"].as_str().unwrap_or("?").to_owned()
         };
+        if kind == "response" && code == "started" {
+            started_response_seen = true;
+        }
         seen.push((kind, code));
     }
+    assert!(
+        !state_changed_before_response,
+        "Ru#C4 regression: state_changed:true event arrived before started response"
+    );
 
     // Send stop_proxy so we don't leak the sleep.
     harness
@@ -510,6 +540,293 @@ async fn chaos_shutdown_during_inflight_requests_exits_cleanly() {
     assert!(exit.is_ok(), "engine did not exit within 5s of shutdown-after-burst");
     let status = exit.unwrap().expect("wait succeeds");
     assert!(status.success(), "engine exited non-zero on shutdown: {status}");
+}
+
+// ---------------------------------------------------------------------
+// SIEGE — Scenario 13: Randomized rapid concurrent request burst
+// ---------------------------------------------------------------------
+// 50 validate_profile requests fired with no await between, then
+// drained with random 1–100 ms inter-recv delays to simulate a
+// slow Swift consumer. The engine must reply to all 50 and remain
+// responsive to a sentinel afterward.
+
+#[tokio::test]
+async fn siege_concurrent_request_burst_with_random_delays() {
+    let mut harness = spawn().await;
+    let mut rng = XorShift::seeded();
+
+    const SALVO_SIZE: u64 = 50;
+    for id in 1..=SALVO_SIZE {
+        harness
+            .send(&json!({
+                "id": id,
+                "method": "validate_profile",
+                "params": {"profile": sample_profile()},
+            }))
+            .await;
+    }
+
+    let mut received_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    while received_ids.len() < SALVO_SIZE as usize {
+        // Random 1–100 ms delay to simulate consumer back-pressure.
+        let delay_ms = rng.next_in_range(1, 100);
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        let frame = harness.recv().await;
+        let id = frame["id"].as_u64().expect("id present");
+        assert_eq!(frame["kind"], "response", "burst response was not a response: {frame}");
+        received_ids.insert(id);
+    }
+    assert_eq!(received_ids.len(), SALVO_SIZE as usize, "missing replies under siege");
+
+    // Engine still responsive.
+    harness
+        .send(&json!({
+            "id": 9_991,
+            "method": "validate_profile",
+            "params": {"profile": sample_profile()},
+        }))
+        .await;
+    let frame = harness.recv().await;
+    assert_eq!(frame["id"], 9_991);
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
+// SIEGE — Scenario 14: Start/stop cycle storm (FD-leak detector)
+// ---------------------------------------------------------------------
+// 100 start_proxy→stop_proxy cycles in series with random 1–30 ms
+// jitter between calls. /bin/sleep is the fake naive (kill_on_drop
+// reaps it on supervisor stop). Any FD leak from `Pipe`s, `lsof`
+// invocations, or tokio internals would surface as a spawn failure
+// somewhere past cycle 50 (default macOS ulimit -n is ~256 for
+// shell-spawned processes, lower under test runners). Survival
+// through 100 cycles plus a final responsive sentinel = no leak.
+
+#[tokio::test]
+async fn siege_start_stop_cycle_storm_no_fd_leak() {
+    let mut harness = spawn().await;
+    let mut rng = XorShift::seeded();
+    const CYCLES: u32 = 100;
+
+    for cycle in 0..CYCLES {
+        let start_id = (cycle as u64) * 2 + 1;
+        let stop_id = start_id + 1;
+
+        harness
+            .send(&json!({
+                "id": start_id,
+                "method": "start_proxy",
+                "params": {
+                    "binary_path": "/bin/sleep",
+                    "config_path": "60",
+                    "port": 1080
+                },
+            }))
+            .await;
+        // Drain frames until we see the start response (skipping
+        // any state_changed event the dispatcher emits after).
+        drain_until_response(&mut harness, start_id).await;
+
+        // Random 1–30 ms jitter to surface race conditions in the
+        // lock-held start_proxy → stop_proxy transition window.
+        tokio::time::sleep(Duration::from_millis(rng.next_in_range(1, 30))).await;
+
+        harness
+            .send(&json!({"id": stop_id, "method": "stop_proxy", "params": null}))
+            .await;
+        drain_until_response(&mut harness, stop_id).await;
+    }
+
+    // Engine still responsive after 100 cycles.
+    harness
+        .send(&json!({
+            "id": 99_999,
+            "method": "validate_profile",
+            "params": {"profile": sample_profile()},
+        }))
+        .await;
+    let frame = drain_until_response(&mut harness, 99_999).await;
+    assert_eq!(frame["kind"], "response");
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
+// SIEGE — Scenario 15: Race the start/stop with random delays
+// ---------------------------------------------------------------------
+// Fire start, sleep a random 1–50 ms, fire stop. Repeat 30 cycles.
+// The lock-across-spawn fix (Ru#C2) plus the stop-handle-abort
+// fix (Ru#C1) must hold under randomized timing.
+
+#[tokio::test]
+async fn siege_random_delay_race_start_stop() {
+    let mut harness = spawn().await;
+    let mut rng = XorShift::seeded();
+    const CYCLES: u32 = 30;
+
+    for cycle in 0..CYCLES {
+        let start_id = 10_000 + (cycle as u64) * 2;
+        let stop_id = start_id + 1;
+
+        harness
+            .send(&json!({
+                "id": start_id,
+                "method": "start_proxy",
+                "params": {
+                    "binary_path": "/bin/sleep",
+                    "config_path": "60",
+                    "port": 1080
+                },
+            }))
+            .await;
+
+        // Vary the inter-call delay across the full critical
+        // window. 1–50 ms covers the period when supervisor
+        // spawn + monitor task setup are interleaving with stop.
+        tokio::time::sleep(Duration::from_millis(rng.next_in_range(1, 50))).await;
+
+        harness
+            .send(&json!({"id": stop_id, "method": "stop_proxy", "params": null}))
+            .await;
+
+        // Drain both responses (and any events).
+        let _start_frame = drain_until_response(&mut harness, start_id).await;
+        let _stop_frame = drain_until_response(&mut harness, stop_id).await;
+    }
+
+    // Sentinel.
+    harness
+        .send(&json!({
+            "id": 88_888,
+            "method": "validate_profile",
+            "params": {"profile": sample_profile()},
+        }))
+        .await;
+    let frame = drain_until_response(&mut harness, 88_888).await;
+    assert_eq!(frame["kind"], "response");
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
+// SIEGE — Scenario 16: Wire ordering under burst (Ru#C4 stress)
+// ---------------------------------------------------------------------
+// Fire 10 back-to-back start/stop cycles and verify EVERY
+// state_changed event arrives AFTER its associated response on
+// the wire. This is the stress version of scenario 4's ordering
+// check.
+
+#[tokio::test]
+async fn siege_wire_ordering_holds_under_burst() {
+    let mut harness = spawn().await;
+    const CYCLES: u32 = 10;
+
+    for cycle in 0..CYCLES {
+        let start_id = 20_000 + (cycle as u64) * 2;
+        let stop_id = start_id + 1;
+        harness
+            .send(&json!({
+                "id": start_id,
+                "method": "start_proxy",
+                "params": {
+                    "binary_path": "/bin/sleep",
+                    "config_path": "60",
+                    "port": 1080
+                },
+            }))
+            .await;
+        // Walk frames in arrival order, asserting the wire
+        // sequence: started response → state_changed:true event.
+        let mut saw_response = false;
+        loop {
+            let frame = harness.recv().await;
+            if frame["kind"] == "response" && frame["id"].as_u64() == Some(start_id) {
+                saw_response = true;
+                continue;
+            }
+            if frame["kind"] == "event" && frame["data"]["running"].as_bool() == Some(true) {
+                assert!(
+                    saw_response,
+                    "Ru#C4 regression in cycle {cycle}: state_changed:true arrived before started response"
+                );
+                break;
+            }
+        }
+
+        harness
+            .send(&json!({"id": stop_id, "method": "stop_proxy", "params": null}))
+            .await;
+        // Mirror invariant for the stop side.
+        let mut saw_stop_response = false;
+        loop {
+            let frame = harness.recv().await;
+            if frame["kind"] == "response" && frame["id"].as_u64() == Some(stop_id) {
+                saw_stop_response = true;
+                continue;
+            }
+            if frame["kind"] == "event" && frame["data"]["running"].as_bool() == Some(false) {
+                assert!(
+                    saw_stop_response,
+                    "Ru#C4 regression in cycle {cycle}: state_changed:false arrived before stopped response"
+                );
+                break;
+            }
+        }
+    }
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
+// Helpers — siege-specific
+// ---------------------------------------------------------------------
+
+/// Receive frames until one matches `expected_id` and return it.
+/// Skips intervening events (state_changed, etc.).
+async fn drain_until_response(harness: &mut Harness, expected_id: u64) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        let frame = harness.recv().await;
+        if frame["id"].as_u64() == Some(expected_id) {
+            return frame;
+        }
+        // Otherwise it's an event or an out-of-order reply — keep draining.
+    }
+    panic!("did not receive frame with id={expected_id} within 15s");
+}
+
+/// Tiny xorshift64 PRNG seeded from the system clock. Deterministic
+/// within a test run, varies across runs. Avoids pulling `rand` as
+/// a dev-dependency for the LTSC patch.
+struct XorShift {
+    state: u64,
+}
+
+impl XorShift {
+    fn seeded() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(1);
+        // Avoid a zero seed — xorshift's fixed point.
+        Self { state: nanos.max(1) }
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    /// Returns a value in `[lo, hi]` inclusive.
+    fn next_in_range(&mut self, lo: u64, hi: u64) -> u64 {
+        let span = hi - lo + 1;
+        lo + (self.next() % span)
+    }
 }
 
 // ---------------------------------------------------------------------
