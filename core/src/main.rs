@@ -330,7 +330,21 @@ async fn dispatch(
             }
             let supervisor = ProxySupervisor::spawn(&binary_path, &config_path, events.clone())
                 .await
-                .map_err(|err| ErrorPayload::new("spawn_failed", err.to_string()))?;
+                .map_err(|err| {
+                    // Log the full OS error to stderr (engine-side
+                    // tracing, audited surface) but only surface a
+                    // generic message over the wire. The raw
+                    // `std::io::Error` can include the config path —
+                    // which is harmless on its own but noise we don't
+                    // want in the UI's `lastError`. The error code
+                    // (`spawn_failed`) tells the user *what* failed;
+                    // the message tells them *what to check*.
+                    tracing::error!(error = %err, "ProxySupervisor::spawn failed");
+                    ErrorPayload::new(
+                        "spawn_failed",
+                        "failed to spawn the naive proxy binary; check the engine log for details",
+                    )
+                })?;
             let pid = supervisor.pid();
             let monitor_handle = tokio::spawn(monitor_loop(pid, port, events));
             guard.supervisor = Some(supervisor);
