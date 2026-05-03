@@ -148,7 +148,7 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
             throw FileCredentialError.io(error.localizedDescription)
         }
         do {
-            try writeRestrictedFile(data, to: url)
+            try RestrictedFile.write(data, to: url)
         } catch {
             throw FileCredentialError.io(error.localizedDescription)
         }

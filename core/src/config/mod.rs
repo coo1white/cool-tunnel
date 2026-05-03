@@ -7,3 +7,9 @@ pub mod pac;
 
 pub use naive_config::NaiveConfig;
 pub use pac::{generate_pac, DEFAULT_DIRECT_DOMAINS};
+
+/// IPv4 loopback address used for both the SOCKS listen socket
+/// (`naive_config`) and the PAC file's proxy targets (`pac`).
+/// Defining it once here prevents the literal from drifting
+/// across the two modules.
+pub(crate) const LOOPBACK_HOST: &str = "127.0.0.1";

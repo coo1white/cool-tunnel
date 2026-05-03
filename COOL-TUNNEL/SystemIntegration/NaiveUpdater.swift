@@ -98,12 +98,14 @@ public final class NaiveUpdater {
             // contention). `try await` on both surfaces whichever
             // fails first.
             state = .downloading(progress: 0.0)
+            let arm64URL = try Self.assetURL(tag: tag, arch: .arm64)
+            let x64URL = try Self.assetURL(tag: tag, arch: .x64)
             async let arm64Tarball = Self.download(
-                url: Self.assetURL(tag: tag, arch: .arm64),
+                url: arm64URL,
                 to: tempRoot.appendingPathComponent("arm64.tar.xz")
             )
             async let x64Tarball = Self.download(
-                url: Self.assetURL(tag: tag, arch: .x64),
+                url: x64URL,
                 to: tempRoot.appendingPathComponent("x64.tar.xz")
             )
             let arm64Path = try await arm64Tarball
@@ -151,16 +153,21 @@ public final class NaiveUpdater {
 
     private enum Arch { case arm64, x64 }
 
-    private static func assetURL(tag: String, arch: Arch) -> URL {
+    private static func assetURL(tag: String, arch: Arch) throws -> URL {
         let archToken = arch == .arm64 ? "arm64-arm64" : "x64-x64"
         let asset = "naiveproxy-\(tag)-mac-\(archToken).tar.xz"
         let urlString =
             "https://github.com/klzgrad/naiveproxy/releases/download/\(tag)/\(asset)"
-        // The GitHub release-download URL is well-formed by
-        // construction; if URL initialisation ever fails it is a
-        // programming error, not a runtime one.
+        // Surface as a thrown error rather than `fatalError` so a
+        // future maintainer who introduces an interpolation bug
+        // (e.g. an unsanitised version string) gets a friendly
+        // updater error in the UI instead of a process crash.
+        // Mirrors the safe-guard pattern in
+        // `resolveLatestStableTag` below.
         guard let url = URL(string: urlString) else {
-            fatalError("constructed invalid release URL: \(urlString)")
+            throw UpdaterError.message(
+                "internal error: constructed invalid release URL: \(urlString)"
+            )
         }
         return url
     }
@@ -208,10 +215,17 @@ public final class NaiveUpdater {
         return stable.tagName
     }
 
-    /// Streams a URL to disk via `URLSession.download`. Sets the
-    /// downloading-progress state every ~64 KB so the Settings UI
-    /// can animate a real progress bar instead of an indeterminate
-    /// spinner.
+    /// Streams a URL to disk via `URLSession.download`.
+    ///
+    /// **Progress reporting is currently indeterminate.** The
+    /// `URLSession.shared.download(from:)` async API does not
+    /// surface byte-level progress; the caller flips
+    /// `state = .downloading(progress: 0.0)` before calling and
+    /// jumps straight to `1.0` after. The Settings UI shows a
+    /// determinate-looking bar that is in fact a 0%-then-100% step.
+    /// A future patch can switch to `URLSessionDownloadDelegate` to
+    /// report real progress; deferred to keep the LTSC patch surface
+    /// small.
     private static func download(url: URL, to destination: URL) async throws -> URL {
         let (tempURL, response) = try await URLSession.shared.download(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {

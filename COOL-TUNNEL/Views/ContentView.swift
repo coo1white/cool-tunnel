@@ -99,7 +99,14 @@ public struct ContentView: View {
     }
 }
 
-#Preview {
-    ContentView()
-        .environment(TunnelOrchestrator.bootstrap())
-}
+#if DEBUG
+    // Wrapped in `#if DEBUG` so the preview's `bootstrap()` —
+    // which spawns its own `cool-tunnel-core` subprocess — is
+    // compiled out of Release. Without the guard the launched app
+    // would fork a *second* engine alongside the one
+    // `CoolTunnelApp` already owns, leaving two PIDs in `ps`.
+    #Preview {
+        ContentView()
+            .environment(TunnelOrchestrator.bootstrap())
+    }
+#endif
