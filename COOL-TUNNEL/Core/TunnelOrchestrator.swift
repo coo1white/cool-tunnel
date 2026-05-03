@@ -52,7 +52,13 @@ public final class TunnelOrchestrator {
 
     private var eventTask: Task<Void, Never>?
     private var didBootstrap: Bool = false
-    private let maxLogEntries: Int = 1000
+    /// Hardware-derived cap on retained log entries — 1000 on a
+    /// modern Apple Silicon, 600 on a mid-tier Mac, 300 on older
+    /// Intel hardware. A lower cap keeps the SwiftUI diff cheap on
+    /// every append, which is the hot path that gets noticeable
+    /// pause-spikes if naive starts streaming hundreds of lines a
+    /// second on a flaky network.
+    private let maxLogEntries: Int = PerformanceProfile.current.maxLogEntries
     /// Re-entrancy guard for [`refreshNaiveDescriptor`]. The Settings
     /// view's `.task` can fire two refreshes back-to-back if the user
     /// opens / dismisses / reopens the sheet quickly; without this

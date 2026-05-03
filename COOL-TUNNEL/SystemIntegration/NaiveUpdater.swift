@@ -180,15 +180,22 @@ public final class NaiveUpdater {
             throw UpdaterError.message("GitHub API returned an unexpected response")
         }
 
+        // GitHub's JSON uses snake_case, Swift wants camelCase for
+        // the property — `CodingKeys` does the bridge.
         struct Release: Decodable {
-            let tag_name: String
+            let tagName: String
             let prerelease: Bool
+
+            enum CodingKeys: String, CodingKey {
+                case tagName = "tag_name"
+                case prerelease
+            }
         }
         let releases = try JSONDecoder().decode([Release].self, from: data)
         guard let stable = releases.first(where: { !$0.prerelease }) ?? releases.first else {
             throw UpdaterError.message("no NaiveProxy releases found upstream")
         }
-        return stable.tag_name
+        return stable.tagName
     }
 
     /// Streams a URL to disk via `URLSession.download`. Sets the
