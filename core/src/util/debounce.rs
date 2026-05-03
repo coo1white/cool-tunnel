@@ -11,7 +11,7 @@
 //! The window is intentionally fixed-time rather than leading-edge or
 //! trailing-edge: every probe inside the window is dropped, then the
 //! first probe outside the window wins. That matches the user-facing
-//! semantics we want — "tell me again at most every 100 ms" — and
+//! semantics we want — "tell me again at most every N ms" — and
 //! keeps the implementation deterministic for the stress tests below.
 //!
 //! ## Memory
@@ -155,16 +155,26 @@ where
     }
 }
 
-/// `Default` is a 100 ms window — the canonical anomaly-debounce
-/// duration used by `client_mode::EngineState::default()`. Lets callers
-/// write `Debouncer::default()` for the common case and
-/// `Debouncer::new(other)` for everything else.
+/// `Default` is a 50 ms window — the canonical anomaly-debounce
+/// duration used by `client_mode::EngineState::default()`.
+///
+/// Tightened from 100 ms in v0.1.7.4 to halve the worst-case
+/// time between a real anomaly emission (e.g. naive starting to
+/// listen outside loopback) and the UI auto-stop kicking in. The
+/// suppression goal is unchanged — collapse a flapping-naive
+/// anomaly storm into one event per key — but the window is
+/// short enough to feel near-instant to the user. Burst-flooding
+/// the UI is bounded by the per-key map: distinct reasons admit
+/// independently; the same reason emits at most once per 50 ms.
+///
+/// Lets callers write `Debouncer::default()` for the common case
+/// and `Debouncer::new(other)` for everything else.
 impl<K> Default for Debouncer<K>
 where
     K: Eq + Hash,
 {
     fn default() -> Self {
-        Self::new(Duration::from_millis(100))
+        Self::new(Duration::from_millis(50))
     }
 }
 
@@ -256,13 +266,15 @@ mod tests {
         assert_eq!(d.tracked_keys(), 1);
     }
 
-    /// Default constructs a 100 ms debouncer — same as the production
-    /// `ANOMALY_DEBOUNCE` constant. Keeps the call-site short for the
-    /// common case.
+    /// Default constructs a 50 ms debouncer — the canonical
+    /// anomaly-debounce window used by `client_mode::EngineState`.
+    /// Tightened from 100 ms in v0.1.7.4 (LTSC patch) to halve
+    /// the worst-case latency between an emitted anomaly and the
+    /// orchestrator's auto-stop reaction.
     #[test]
-    fn default_is_100ms_window() {
+    fn default_is_50ms_window() {
         let d: Debouncer<&str> = Debouncer::default();
-        assert_eq!(d.window(), Duration::from_millis(100));
+        assert_eq!(d.window(), Duration::from_millis(50));
         assert_eq!(d.tracked_keys(), 0);
     }
 
