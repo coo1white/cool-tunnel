@@ -118,15 +118,15 @@ client side.
 ### Why two binaries (naive + cool-tunnel-core)?
 
 The architecture intentionally separates three concerns —
-**UI**, **glue**, **anti-tracking engine** — so each can evolve and
+**UI**, **glue**, **proxy** — so each can evolve and
 update independently. The same shape is meant to extend across
 platforms in the future:
 
-|                                  | **UI**                      | **Glue (cross-platform)** | **Anti-tracking engine** |
-| -------------------------------- | --------------------------- | ------------------------- | ------------------------ |
-| **Server**                       | Filament (PHP)              | **RUST**                  | Naïve Proxy              |
-| **Client (macOS today)**         | SwiftUI                     | **RUST**                  | Naïve Proxy              |
-| **Client (future Android/iOS/Win/Linux)** | Kotlin / Swift / C++ / GTK | **RUST**             | Naïve Proxy              |
+|                                  | **UI**                      | **Glue (cross-platform)** | **Proxy**     |
+| -------------------------------- | --------------------------- | ------------------------- | ------------- |
+| **Server**                       | Filament (PHP)              | **RUST**                  | Naïve Proxy   |
+| **Client (macOS today)**         | SwiftUI                     | **RUST**                  | Naïve Proxy   |
+| **Client (future Android/iOS/Win/Linux)** | Kotlin / Swift / C++ / GTK | **RUST**             | Naïve Proxy   |
 
 The middle column is the same Rust crate everywhere — that is the
 whole point of the design. Today on macOS it's `cool-tunnel-core`
