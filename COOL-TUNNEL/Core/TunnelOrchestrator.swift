@@ -74,6 +74,11 @@ public final class TunnelOrchestrator {
     /// of edits collapses into a single write.
     private var persistSettingsTask: Task<Void, Never>?
 
+    /// Single-flight guard for the `listeningOutsideLoopback`
+    /// auto-stop. A burst of anomaly events would otherwise queue
+    /// duplicate `stop()` tasks racing on `activeMode`.
+    private var autoStopTask: Task<Void, Never>?
+
     /// Cached descriptor for the naive binary the app is currently
     /// configured to spawn. Populated on bootstrap and after each
     /// settings change so the Settings view can render the chip / arch
@@ -508,6 +513,15 @@ public final class TunnelOrchestrator {
     }
 
     public func stop() async {
+        // Guard against re-entry when we're already stopped. A
+        // user spam-clicking the Stop button would otherwise loop
+        // back through `disableAll()` (which iterates every active
+        // network service and runs `networksetup` twice each) and
+        // then call `core.send(.stopProxy)` against an engine
+        // that no longer has a proxy to stop — surfacing as a
+        // misleading "stop failed: not_running" log line. Single
+        // exit point keeps the user-facing behaviour clean.
+        guard isRunning || activeMode != .stopped else { return }
         try? await proxyController.disableAll()
         do {
             _ = try await core.send(.stopProxy)
@@ -655,7 +669,17 @@ public final class TunnelOrchestrator {
             // here. The other anomalies (count thresholds) stay advisory.
             if reason == .listeningOutsideLoopback {
                 recordError("Critical: \(detail). Auto-stopping.")
-                Task { await self.stop() }
+                // Single-flight the auto-stop. Multiple anomalies
+                // arriving in quick succession would otherwise
+                // queue multiple `stop()` Tasks, each racing on
+                // `activeMode` / `isRunning` and each potentially
+                // logging a "stop failed: not_running" tail.
+                if autoStopTask == nil {
+                    autoStopTask = Task { [weak self] in
+                        await self?.stop()
+                        self?.autoStopTask = nil
+                    }
+                }
             }
         case .diagnosticProgress(let step, let ok, let elapsedMs):
             // `elapsedMs == 0` means the engine omitted timing (older
@@ -696,6 +720,12 @@ public final class TunnelOrchestrator {
 
     public func clearLogs() {
         logEntries.removeAll()
+        // Also clear `lastError` — a user clicking "Clear logs"
+        // expects the error pill to disappear too. The previous
+        // behaviour left a stale error visible after the log
+        // showed empty, leading users to think the clear didn't
+        // work or that the error reappeared.
+        lastError = nil
     }
 
     private func parsePort(_ raw: String) throws -> UInt16 {

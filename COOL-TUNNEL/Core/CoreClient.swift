@@ -29,6 +29,11 @@ public enum CoreClientError: Error, Sendable, Equatable {
     case decodingFailed(String)
     /// The engine exited before a pending request completed.
     case engineExited
+    /// The engine accepted the request but did not produce a
+    /// response within the per-request deadline. Surfaced as a
+    /// real error so the UI can recover instead of waiting on a
+    /// silent hang.
+    case requestTimeout
 }
 
 /// Long-lived actor that drives the `cool-tunnel-core` subprocess.
@@ -113,6 +118,14 @@ public actor CoreClient {
     /// to the engine's stdin, and parks the caller on a continuation until
     /// the engine answers with `Outbound::Response` or `Outbound::Error` for
     /// the same `id`.
+    /// Per-request hard deadline. The engine typically replies in
+    /// single-digit ms; nothing legitimate takes minutes. If a
+    /// future engine bug, GCD starvation, or signal-blocked syscall
+    /// stalls a response, the UI sees a real `requestTimeout`
+    /// error and can recover instead of an infinite spinner whose
+    /// only escape is Force Quit (which strands the system proxy).
+    private static let requestTimeoutNanos: UInt64 = 120_000_000_000
+
     public func send(_ request: CoreRequest) async throws -> CoreResponse {
         guard process != nil else { throw CoreClientError.notRunning }
         return try await sendUnchecked(request)
@@ -127,6 +140,17 @@ public actor CoreClient {
         var data = try encoder.encode(frame)
         data.append(0x0A)  // newline terminator
 
+        // Schedule a per-request timeout that resumes the
+        // continuation directly (and removes it from `pending` so
+        // a late dispatch doesn't double-resume). The Task is
+        // cancelled in `defer` if the response arrives in time.
+        let timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.requestTimeoutNanos)
+            guard !Task.isCancelled else { return }
+            await self?.expirePending(id: id)
+        }
+        defer { timeoutTask.cancel() }
+
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             do {
@@ -136,6 +160,15 @@ public actor CoreClient {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    /// Called by the per-request timeout Task when the deadline
+    /// expires. If the continuation is still in `pending`, fail it
+    /// with `requestTimeout`; otherwise the response already
+    /// landed and we no-op.
+    private func expirePending(id: UInt64) {
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: CoreClientError.requestTimeout)
     }
 
     // MARK: - Events

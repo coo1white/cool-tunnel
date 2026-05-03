@@ -3,6 +3,7 @@
 // Resolves the paths the app reads from and writes to. Centralising them
 // keeps the "where do these files live" knowledge in one place.
 
+import Darwin
 import Foundation
 
 /// Filesystem locations the app uses.
@@ -77,14 +78,67 @@ public struct AppSupportPaths: Sendable {
 /// `RestrictedFile.write(...)`.
 public enum RestrictedFile {
 
-    /// Writes `data` to `url` atomically and tightens permissions
-    /// to 0600.
+    /// Writes `data` to `url` atomically with 0600 permissions
+    /// established **before** the rename. The previous
+    /// implementation used `Data.write(.atomic)` (which writes a
+    /// temp file at the umask default — typically 0644 — then
+    /// renames) followed by `setAttributes` to 0600. That left a
+    /// race window where the file was on disk world-readable; if
+    /// the process crashed or hit ENOSPC between rename and
+    /// chmod, the credential file persisted at 0644.
+    ///
+    /// New flow: open a sibling `.tmp` file with `O_CREAT|O_EXCL`
+    /// and explicit `0600`, write all bytes, fsync, then rename.
+    /// `0600` is established at creation time; the rename is
+    /// atomic; no chmod-after-rename race exists.
     public static func write(_ data: Data, to url: URL) throws {
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: url.path
-        )
+        let parent = url.deletingLastPathComponent().path
+        // Use a randomised temp filename in the same directory so
+        // `rename(2)` stays on the same filesystem (atomic) and so
+        // a concurrent writer to the same destination doesn't
+        // collide on a fixed name.
+        let tempURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        let fd = open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
+        do {
+            // Write the full buffer; partial writes get retried.
+            try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                var remaining = raw.count
+                var cursor = base
+                while remaining > 0 {
+                    let written = Darwin.write(fd, cursor, remaining)
+                    if written < 0 {
+                        if errno == EINTR { continue }
+                        throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+                    }
+                    if written == 0 { break }
+                    remaining -= written
+                    cursor = cursor.advanced(by: written)
+                }
+            }
+            // fsync so a crash before journal flush doesn't leave
+            // the rename pointing at empty/partial bytes on disk.
+            _ = fsync(fd)
+            close(fd)
+            // rename(2) is atomic on the same filesystem. Any
+            // existing file at `url` is replaced atomically.
+            if rename(tempURL.path, url.path) != 0 {
+                let renameErrno = errno
+                _ = unlink(tempURL.path)
+                throw POSIXError(POSIXError.Code(rawValue: renameErrno) ?? .EIO)
+            }
+        } catch {
+            close(fd)
+            _ = unlink(tempURL.path)
+            throw error
+        }
+        // Touch the parent directory's mtime so directory-watching
+        // tools see the change. Not load-bearing; ignore failure.
+        _ = utimes(parent, nil)
     }
 
     /// UTF-8 string convenience over [`write(_:to:)`].

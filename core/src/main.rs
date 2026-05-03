@@ -188,10 +188,13 @@ fn init_tracing() {
     // stable, audited surface; raise the ceiling by editing this
     // line, not by setting an env var.
     let filter = tracing_subscriber::EnvFilter::new("info");
-    tracing_subscriber::fmt()
+    // `try_init` instead of `init` so a future code path that
+    // calls `init_tracing` twice (e.g. a test that drives both
+    // client and server modes) doesn't panic on the second call.
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_target(false)
         .compact()
-        .init();
+        .try_init();
 }

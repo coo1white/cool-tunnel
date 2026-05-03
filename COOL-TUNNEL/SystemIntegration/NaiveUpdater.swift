@@ -90,6 +90,18 @@ public final class NaiveUpdater {
         do {
             state = .resolvingTag
             let tag = try await Self.resolveLatestStableTag()
+            // Validate the tag before interpolating it into a URL
+            // path. GitHub release tags are typically `vN.N.N-N`
+            // but the API returns whatever upstream pushed —
+            // characters like `..`, spaces, `?`, `#`, `/` would
+            // produce a URL that points outside the intended
+            // release directory. Reject anything that doesn't
+            // match the canonical version-tag shape.
+            guard Self.isValidReleaseTag(tag) else {
+                throw UpdaterError.message(
+                    "GitHub returned an unexpected release tag (\(tag)). Refusing to download — check upstream and try again."
+                )
+            }
 
             let tempRoot = try Self.makeTempDirectory()
             defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -152,6 +164,19 @@ public final class NaiveUpdater {
     // MARK: - Pipeline steps (all run off-main)
 
     private enum Arch { case arm64, x64 }
+
+    /// Whether `tag` matches the canonical NaiveProxy release-tag
+    /// shape (`v131.0.6778.85-1`, `v147.0.7727.49-1`, etc.). Used
+    /// as a defense-in-depth check before path interpolation —
+    /// see [`assetURL`].
+    static func isValidReleaseTag(_ tag: String) -> Bool {
+        // Allow `v` + 1-4 numeric segments + optional `-N` suffix.
+        // NaiveProxy uses Chromium's 4-segment scheme; the upstream
+        // build counter is appended as `-1`, `-2`, etc.
+        guard !tag.isEmpty, tag.count <= 64 else { return false }
+        let pattern = #"^v?\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?$"#
+        return tag.range(of: pattern, options: .regularExpression) != nil
+    }
 
     private static func assetURL(tag: String, arch: Arch) throws -> URL {
         let archToken = arch == .arm64 ? "arm64-arm64" : "x64-x64"
