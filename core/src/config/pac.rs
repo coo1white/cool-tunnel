@@ -96,13 +96,25 @@ fn normalise_domains(input: &[String]) -> Vec<String> {
 fn encode_js_string_array(values: &[String]) -> String {
     // serde_json produces a strict-JSON array of strings, which is
     // also a valid JavaScript expression — ideal for embedding in
-    // PAC content. The `unwrap_or_default` fallback is structurally
-    // unreachable: `serde_json::to_string` over `&[String]` cannot
-    // fail because `String` has no `Serialize` failure modes
-    // (no map keys, no NaN floats). Kept defensive so the function
-    // remains total without violating the crate's `unwrap_used`
-    // / `expect_used` lints.
-    serde_json::to_string(values).unwrap_or_default()
+    // PAC content. `serde_json::to_string` over `&[String]` is
+    // structurally infallible: `String` has no `Serialize` failure
+    // modes (no map keys, no NaN floats).
+    //
+    // **v0.1.7.12 (SM-7, R4):** previously we defended with
+    // `unwrap_or_default()` which silently returned `String::new()`
+    // on the unreachable path. If a future refactor swapped
+    // `&[String]` for a type that *can* fail to serialize (e.g.
+    // a wrapper carrying numeric metadata), the PAC body would
+    // become `var directDomains = ;` — invalid JS — emitted to
+    // a 200 response with zero diagnostic. `expect()` restores
+    // the failure signal: a panic here is safer than emitting
+    // malformed JS, and the message names the invariant for
+    // whoever is reading the trace.
+    #[allow(clippy::expect_used)]
+    {
+        serde_json::to_string(values)
+            .expect("serde_json::to_string over &[String] is structurally infallible")
+    }
 }
 
 #[cfg(test)]

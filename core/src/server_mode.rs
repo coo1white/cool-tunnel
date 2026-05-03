@@ -173,6 +173,20 @@ pub fn router() -> Router {
     // ceiling against a slowloris / oversized-body attack.
     // Default `Json<T>` extractor cap is 2 MiB which is far
     // larger than anything we actually accept.
+    //
+    // **SM-10 (R3):** `ConcurrencyLimitLayer` caps the total
+    // number of in-flight requests across all routes at 64.
+    // This is far above any legitimate UI workload (a Filament
+    // admin UI with one operator clicking through a config
+    // form) and bounds the worst-case for a slow-loris client
+    // dripping bytes into a 64 KiB body — the connection still
+    // has to wait, but the server can't be made to hold more
+    // than 64 simultaneously. Combined with hyper's default
+    // keepalive timeout, the resource exhaustion path is
+    // capped without needing the `tower::timeout::TimeoutLayer`
+    // boilerplate (which introduces a non-Infallible error
+    // type and requires `HandleErrorLayer` plumbing). A proper
+    // body-read timeout is deferred to a later cycle.
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
@@ -180,6 +194,7 @@ pub fn router() -> Router {
         .route("/naive/config", post(naive_config))
         .route("/naive/pac", post(naive_pac))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(64))
 }
 
 // MARK: - Handlers
@@ -286,10 +301,58 @@ struct NaivePacResponse {
     js: String,
 }
 
+/// **SM-4 (R2, R3):** caps on the PAC request shape. The 64 KiB
+/// router-wide body limit is the outer ceiling, but inside that
+/// envelope a single request could still carry ~16k single-char
+/// domain entries — each becomes a `to_lowercase()` allocation in
+/// `normalise_domains`, then a `serde_json::to_string` pass in
+/// `encode_js_string_array`, then is embedded in a `format!` —
+/// pushing PAC generation past the R3 ≤10 ms target on a busy
+/// worker. With these caps the total work per request is
+/// bounded well under 10 ms (1024 entries × 253 bytes ≈ 256 KiB
+/// of string data, processed linearly).
+const MAX_PAC_DOMAINS: usize = 1024;
+/// RFC 1035 hostname maximum byte length. PAC entries are
+/// matched as suffixes (`dnsDomainIs(host, domain)`) so anything
+/// longer than a real hostname is wasted — and provides an
+/// inflation vector in `format!`.
+const MAX_PAC_DOMAIN_BYTES: usize = 253;
+
 async fn naive_pac(
     body: Result<Json<NaivePacRequest>, JsonRejection>,
 ) -> Result<Json<NaivePacResponse>, ApiError> {
     let Json(request) = body.map_err(ApiError::from_json_rejection)?;
+    // SM-4 caps. Enforced at the handler boundary rather than in
+    // the deserializer because `Vec<String>` has no native serde
+    // attribute for max-items / max-byte-len; a custom
+    // `deserialize_with` would have to duplicate the type. Inline
+    // is clearer.
+    if request.direct_domains.len() > MAX_PAC_DOMAINS {
+        tracing::warn!(
+            count = request.direct_domains.len(),
+            cap = MAX_PAC_DOMAINS,
+            "naive_pac: direct_domains over cap"
+        );
+        return Err(ApiError::BadRequest);
+    }
+    if let Some(too_long) = request
+        .direct_domains
+        .iter()
+        .find(|d| d.len() > MAX_PAC_DOMAIN_BYTES)
+    {
+        tracing::warn!(
+            len = too_long.len(),
+            cap = MAX_PAC_DOMAIN_BYTES,
+            "naive_pac: domain entry over per-entry byte cap"
+        );
+        return Err(ApiError::BadRequest);
+    }
+    // **SM-6 (R3) — resolved by SM-4.** With the caps above,
+    // the synchronous `generate_pac` cost is bounded under
+    // 10 ms on a current-gen worker; no `spawn_blocking` is
+    // needed. (The audit explicitly warned against
+    // `spawn_blocking`-without-cap, which would just move the
+    // unbounded work elsewhere.)
     let js = generate_pac(&request.direct_domains, request.port);
     Ok(Json(NaivePacResponse { js }))
 }

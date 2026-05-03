@@ -262,22 +262,38 @@ final class AppUpdater {
         }
     }
 
-    /// Synchronously flips `state` to `.checking`. Used by the
-    /// Settings click handler to defeat the click → Task-spawn
-    /// → state-update race that would otherwise let multiple
-    /// rapid clicks each pass their own re-entry guard. The
-    /// `Task` that follows then re-runs the same check
-    /// internally and is a no-op if state is already `.checking`.
-    func markEnteringCheck() {
-        guard !isInFlight else { return }
+    /// Synchronously flips `state` to `.checking` and returns
+    /// `true` IFF the caller should proceed to spawn the async
+    /// follow-up `Task`. Returning the gate decision (rather
+    /// than just flipping state and trusting the caller's own
+    /// `isInFlight` check) closes the AU-13 race: previously
+    /// the click handler called
+    ///     guard !appUpdater.isInFlight else { return }
+    ///     appUpdater.markEnteringCheck()
+    ///     Task { await appUpdater.checkForUpdates() }
+    /// and a second click between the no-op `markEnteringCheck`
+    /// (which already saw in-flight) and the unconditional
+    /// `Task` spawn would still queue a second
+    /// `checkForUpdates` call, firing two concurrent network
+    /// requests. Now the spawn is conditional on the actual
+    /// flip succeeding — atomic from the call site since the
+    /// entire sequence runs on `@MainActor` without
+    /// suspension.
+    @discardableResult
+    func markEnteringCheck() -> Bool {
+        if isInFlight { return false }
         state = .checking
+        return true
     }
 
-    /// Synchronously flips `state` to `.downloading(progress: 0)`.
-    /// Same race-defeating role as `markEnteringCheck`.
-    func markEnteringDownload() {
-        guard !isInFlight else { return }
+    /// Synchronously flips `state` to `.downloading(progress: 0)`
+    /// and returns `true` IFF the caller should proceed. Same
+    /// AU-13 race-defeating role as `markEnteringCheck`.
+    @discardableResult
+    func markEnteringDownload() -> Bool {
+        if isInFlight { return false }
         state = .downloading(progress: 0.0)
+        return true
     }
 
     // MARK: - Pipeline (off-main; nonisolated by design)
@@ -536,11 +552,20 @@ final class AppUpdater {
             )
         }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            // **AU-8 (R1):** the user-visible message no longer
+            // names the failing artifact (.zip vs .sha256) or
+            // the HTTP status. The asset name is not directly
+            // attacker-controlled but the stage tells an
+            // observer-on-the-wire which artifact failed,
+            // helping calibrate a partial-block attack against
+            // the manifest specifically (which is the SHA-pin
+            // root of trust). Stage-specific detail goes to
+            // os_log for support.
             updaterLog(
-                "download non-200 for \(url.lastPathComponent): \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                "AU-8 download non-200 for \(url.lastPathComponent): \((response as? HTTPURLResponse)?.statusCode ?? -1)"
             )
             throw UpdaterError.message(
-                "GitHub didn't return the update file \(url.lastPathComponent). Try again later."
+                "GitHub didn't return the update files. Try again later."
             )
         }
         // **v0.1.7.10 (Sw-H3):** size cap. By the time
@@ -791,11 +816,27 @@ final class AppUpdater {
     /// Walks the extraction directory looking for a single .app
     /// bundle. Refuses if zero or more than one is present —
     /// either is a sign the archive isn't what we expected.
+    ///
+    /// **AU-14 fix:** the filter now also asserts the entry is
+    /// a directory. A malicious zip can contain an entry named
+    /// `Cool tunnel.app` that is a regular file or symlink (not
+    /// a bundle directory). Without this check, the next step
+    /// (`verifyExtractedApp` reading `Contents/Info.plist`)
+    /// would fail with the generic "Couldn't read Info.plist"
+    /// message instead of a clean "structural shape wrong"
+    /// reject. Validating the bundle-shape assumption at the
+    /// boundary surfaces the right diagnosis.
     nonisolated private static func locateAppBundle(in directory: URL) throws -> URL {
         let items = try FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: nil
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey]
         )
-        let apps = items.filter { $0.pathExtension == "app" }
+        let apps = items.filter { url in
+            guard url.pathExtension == "app" else { return false }
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey])
+                .isDirectory) ?? false
+            return isDir
+        }
         guard apps.count == 1 else {
             throw UpdaterError.message(
                 "Update archive contained \(apps.count) .app bundles; expected exactly 1."
@@ -828,27 +869,34 @@ final class AppUpdater {
             .appendingPathComponent("Info.plist", isDirectory: false)
         let info = try await readAppInfo(at: infoURL)
 
-        let runningBundleID = await MainActor.run { Bundle.main.bundleIdentifier ?? "" }
-        // **v0.1.7.10 (Sw-H1):** defence-in-depth bundle-ID
-        // comparison. Apple bundle IDs are ASCII by convention,
-        // but a malicious release whose `CFBundleIdentifier`
-        // contained a Unicode confusable (e.g. Cyrillic 'е' for
-        // ASCII 'e') would have compared unequal pre-fix and
-        // gone through the rejection branch — but if SHA pinning
-        // were ever defeated and an attacker wrote the running
-        // bundle ID with the same confusable, the byte-compare
-        // would silently accept it. Reject anything non-ASCII
-        // outright.
+        // **AU-6 (R2, R4):** compare the new bundle ID against
+        // the **hard-coded canonical constant**, not against
+        // `Bundle.main.bundleIdentifier`. The latter reads from
+        // the running process's plist — which an attacker who
+        // ever managed to substitute the running app would also
+        // have written, anchoring the trust comparison in
+        // attacker-controlled input. A constant baked into the
+        // binary cannot be re-shaped by anyone who hasn't already
+        // compromised the build; it is the only thing about the
+        // running process safe to use as a comparison anchor.
+        // ASCII-only check is preserved as defence-in-depth
+        // against Unicode confusable releases that some
+        // future code path might handle differently
+        // (`==` on `String` is byte-equal, but a future
+        // case-insensitive compare or display rendering
+        // would not be).
         let newBundleID = info.bundleIdentifier.precomposedStringWithCanonicalMapping
-        let normalizedRunning = runningBundleID.precomposedStringWithCanonicalMapping
-        guard newBundleID.allSatisfy(\.isASCII), normalizedRunning.allSatisfy(\.isASCII) else {
+        guard newBundleID.allSatisfy(\.isASCII) else {
             throw UpdaterError.message(
                 "Bundle identifier contains non-ASCII characters. Refusing to install for safety."
             )
         }
-        guard newBundleID == normalizedRunning else {
+        guard newBundleID == Self.canonicalBundleID else {
+            updaterLog(
+                "AU-6 bundle-ID mismatch: got=\(newBundleID) expected=\(Self.canonicalBundleID)"
+            )
             throw UpdaterError.message(
-                "New app's bundle identifier does not match. Refusing to install."
+                "New app's bundle identifier does not match Cool Tunnel. Refusing to install."
             )
         }
         // **AU-7:** the version-mismatch error no longer
@@ -917,15 +965,56 @@ final class AppUpdater {
     }
 
     /// Refuse to install if the running app is on a read-only
-    /// volume — that's a DMG mount or a quarantine staging area.
-    /// The user needs to drag-install at least once before the
-    /// updater can replace in place.
+    /// volume (DMG mount, quarantine staging) OR if the install
+    /// directory or the bundle itself is non-writable for the
+    /// current user.
+    ///
+    /// **AU-9 fix:** previously this only checked
+    /// `parentDirectory.volumeIsReadOnlyKey`. Two failure modes
+    /// slipped through pre-terminate, leaving the user with no
+    /// app and no UI to report the failure once
+    /// `NSApp.terminate` had fired:
+    ///
+    ///   1. The bundle was on a writable volume but the user's
+    ///      account didn't have write access to /Applications
+    ///      (admin ACL, MDM lockdown). The relaunch helper would
+    ///      fail at `mv "$OLD_APP" "$BACKUP"`.
+    ///   2. The bundle was on a writable volume in a writable
+    ///      folder but the bundle itself was immutable (Get Info
+    ///      → Locked, or `chflags uchg`). Same failure mode.
+    ///
+    /// Now: also test `parentDirectory.isWritableKey` and
+    /// `appURL.isWritableKey`. Both checks happen *before* the
+    /// `NSApp.terminate` so the error round-trips back to the
+    /// Settings panel with a recovery hint.
     nonisolated private static func refuseReadOnlyInstall(at appURL: URL) throws {
         let parentDirectory = appURL.deletingLastPathComponent()
-        let values = try parentDirectory.resourceValues(forKeys: [.volumeIsReadOnlyKey])
-        if values.volumeIsReadOnly == true {
+        let parentValues = try parentDirectory.resourceValues(
+            forKeys: [.volumeIsReadOnlyKey, .isWritableKey]
+        )
+        if parentValues.volumeIsReadOnly == true {
             throw UpdaterError.message(
                 "Cool Tunnel must be installed in /Applications before it can self-update. Drag the app from the disk image to Applications, then try Update again."
+            )
+        }
+        // AU-9 part 1: parent folder writable for this user?
+        if parentValues.isWritable == false {
+            updaterLog(
+                "AU-9 parent not writable: \(parentDirectory.path)"
+            )
+            throw UpdaterError.message(
+                "Cool Tunnel can't write to its install location. Check your folder permissions and try Update again."
+            )
+        }
+        // AU-9 part 2: bundle itself writable (not Locked /
+        // chflags-immutable)?
+        let bundleValues = try appURL.resourceValues(forKeys: [.isWritableKey])
+        if bundleValues.isWritable == false {
+            updaterLog(
+                "AU-9 bundle not writable: \(appURL.path)"
+            )
+            throw UpdaterError.message(
+                "Cool Tunnel's bundle is locked. Right-click the app, choose Get Info, uncheck the Locked checkbox, then try Update again."
             )
         }
     }
@@ -979,14 +1068,30 @@ final class AppUpdater {
             STAGED="${OLD_APP}.new"
             BACKUP="${OLD_APP}.old-update"
 
-            # Always-run cleanup: the temp tree (which now
-            # contains the helper script itself, AU-1) is removed
-            # on any exit path. .new and .old are only present
-            # mid-flight; the swap section cleans them as it goes.
-            cleanup() {
-                rm -rf "$TEMP_ROOT" 2>/dev/null || true
+            # AU-11 (R4): pre-swap trap. Until step 4 commits the
+            # swap, an unexpected exit MUST preserve the recovery
+            # materials — both the verified-good extracted copy
+            # under $TEMP_ROOT and the $BACKUP if rollback failed
+            # mid-step. The user (or a support engineer) can then
+            # restore manually. Once the swap commits, this trap
+            # is replaced with the destructive cleanup.
+            #
+            # Previously a single `trap cleanup EXIT` installed
+            # at the top removed $TEMP_ROOT on ANY exit, including
+            # the path where step 3's rollback ALSO failed —
+            # leaving the user with neither the new app nor the
+            # known-good staged copy.
+            preswap_trap() {
+                {
+                    echo "Cool Tunnel update aborted before swap committed."
+                    echo "Recovery materials retained at:"
+                    echo "  Verified-good update: $TEMP_ROOT"
+                    if [ -d "$BACKUP" ]; then
+                        echo "  Backup of old app:    $BACKUP"
+                    fi
+                } >&2
             }
-            trap cleanup EXIT
+            trap preswap_trap EXIT
 
             # Wait for the parent process to exit so we can replace
             # the bundle without "file in use" errors. 30 s ceiling.
@@ -1014,8 +1119,8 @@ final class AppUpdater {
 
             # 2. Move old → .old-update (atomic rename — the user
             #    has no app for a single rename's worth of time).
-            #    If this fails, the staged copy is removed by
-            #    cleanup; the original old app is intact.
+            #    If this fails, the staged copy is removed; the
+            #    original old app is intact; preswap_trap fires.
             if ! mv "$OLD_APP" "$BACKUP" 2>/dev/null; then
                 rm -rf "$STAGED"
                 exit 1
@@ -1025,6 +1130,7 @@ final class AppUpdater {
             #    If this fails, restore the backup. Order matters:
             #    move BACKUP back BEFORE removing STAGED, so even
             #    if STAGED removal fails, the user has an app.
+            #    preswap_trap will fire; $TEMP_ROOT preserved.
             if ! mv "$STAGED" "$OLD_APP" 2>/dev/null; then
                 mv "$BACKUP" "$OLD_APP" 2>/dev/null || true
                 rm -rf "$STAGED" 2>/dev/null || true
@@ -1032,11 +1138,25 @@ final class AppUpdater {
             fi
 
             # 4. Remove the backup (the swap succeeded; old app
-            #    no longer needed).
+            #    no longer needed). After this point the new app
+            #    is in place — switch to the destructive cleanup
+            #    trap so $TEMP_ROOT gets removed on exit. AU-11.
             rm -rf "$BACKUP" 2>/dev/null || true
 
+            cleanup() {
+                rm -rf "$TEMP_ROOT" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
             # 5. Relaunch the freshly-installed copy.
-            open -a "$OLD_APP"
+            #    AU-10: use `open PATH` (path-based bundle launch)
+            #    rather than `open -a NAME` (name-based app
+            #    lookup). With bundle paths containing spaces
+            #    ("/Applications/Cool tunnel.app") the `-a` form
+            #    treats "Cool" as the app name and "tunnel.app"
+            #    as a document, misfiring the relaunch. The
+            #    bareword form opens the bundle directly.
+            open "$OLD_APP"
             """
 
         try writeRelaunchScript(script, to: scriptURL)
@@ -1186,6 +1306,20 @@ final class AppUpdater {
     nonisolated private static func shellQuote(_ arg: String) -> String {
         "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
+
+    // MARK: - Identity constants
+
+    /// **AU-6:** the canonical Cool Tunnel bundle identifier,
+    /// hard-coded so `verifyExtractedApp` has an attacker-
+    /// independent comparison anchor. Reading
+    /// `Bundle.main.bundleIdentifier` would compare against the
+    /// running app's plist — which an attacker who ever managed
+    /// to substitute the running app could rewrite. The value
+    /// here matches `PRODUCT_BUNDLE_IDENTIFIER` in
+    /// `COOL-TUNNEL.xcodeproj/project.pbxproj`. If the bundle
+    /// identifier ever legitimately changes (a renaming, a
+    /// fork), update both in lock-step.
+    nonisolated fileprivate static let canonicalBundleID = "space.coolwhite.naive"
 
     // MARK: - URL trust boundary (AU-2 / AU-3)
 
