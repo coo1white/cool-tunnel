@@ -9,6 +9,42 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.4] — 2026-05-03 (LTSC patch)
+
+LTSC in-line patch — debounce-design audit. Single-line tuning
+change with two-doc-comment touch-up: anomaly debouncer window
+tightened from 100 ms to **50 ms**.
+
+The audit inventoried every coalescing/throttle/debounce site
+across both crates. Only one site is semantically a "debouncer"
+in the user's sense (anomaly suppression in the security
+monitor); the other timing sites are animations, signal-grace
+windows, request deadlines, or UI-typing coalescers — each
+correctly scaled to its own concern and left unchanged:
+
+| Site | Window | Role | Decision |
+| --- | --- | --- | --- |
+| Anomaly `Debouncer::default()` | **100ms → 50ms** | per-key suppression | tightened |
+| `persistSettings` task sleep | 250ms | UserDefaults coalesce | unchanged (typing) |
+| LogConsole scroll `withAnimation` | 100ms | render duration | unchanged (animation) |
+| AppDelegate terminate watchdog | 5s | shutdown ceiling | unchanged (safety) |
+| Subprocess kill-escalation grace | 250ms | TERM→INT→KILL spacing | unchanged (signal) |
+| `CoreClient.send` per-request deadline | 120s | engine timeout | unchanged |
+
+The 50 ms anomaly window halves the worst-case latency between
+naive emitting a real anomaly (e.g. starting to listen outside
+loopback) and the orchestrator's auto-stop reaction. The
+suppression goal is unchanged — collapse a flapping-naive
+anomaly storm into one event per key per window — but the
+window is now tight enough to feel near-instant. Burst-flooding
+the UI is bounded by the per-key map: distinct reasons admit
+independently; the same reason emits at most once per 50 ms.
+
+The existing `Debouncer` test suite (single-key suppression,
+distinct-key independence, 100k-event stress, prune semantics,
+default-window assertion) all continue to pass; only the
+default-window assertion was retargeted from 100 ms to 50 ms.
+
 ## [0.1.7.3] — 2026-05-03 (LTSC patch)
 
 LTSC in-line patch — robustness audit pass. Two parallel audits

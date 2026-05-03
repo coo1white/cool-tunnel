@@ -31,8 +31,9 @@ const MONITOR_INTERVAL_SECS: u64 = 5;
 // `ANOMALY_DEBOUNCE` and the previous "Per-anomaly-reason
 // suppression window" doc-comment have been removed: the
 // `Debouncer::default()` impl in `util::debounce` is now the
-// single source of truth (100 ms). Two declarations would risk
-// drift across the LTSC window.
+// single source of truth (50 ms — tightened from 100 ms in
+// v0.1.7.4 to halve auto-stop latency). Two declarations would
+// risk drift across the LTSC window.
 
 /// Hard cap on a single inbound JSON frame (one stdin line), in
 /// bytes. Frames larger than this are dropped with an
