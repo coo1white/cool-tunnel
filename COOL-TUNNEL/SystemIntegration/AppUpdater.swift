@@ -137,9 +137,15 @@ public final class AppUpdater {
             // Spawning the helper has been initiated; the
             // helper now waits on our PID. Set state and quit.
             state = .relaunching
-            // Brief delay so the .relaunching state can render
-            // in the UI before we tear down.
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            // 1.2-second delay so the `.relaunching` subtitle
+            // ("The app will close in a moment.") actually
+            // renders before AppKit starts the
+            // `applicationShouldTerminate` flow. The previous
+            // 500 ms was below SwiftUI's render cycle on
+            // slower hardware — users on Intel Macs often
+            // never saw the state transition before the
+            // window vanished.
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
             await MainActor.run { NSApp.terminate(nil) }
         } catch let UpdaterError.message(reason) {
             state = .failed(message: reason)
@@ -157,13 +163,35 @@ public final class AppUpdater {
 
     // MARK: - Pipeline (off-main wherever possible)
 
-    private var isInFlight: Bool {
+    /// `true` when a phase is in flight that further user input
+    /// should not interrupt. Made `public` so the Settings UI
+    /// can synchronously short-circuit double-clicks before the
+    /// async machinery flips `state`.
+    public var isInFlight: Bool {
         switch state {
         case .checking, .downloading, .verifying, .extracting, .relaunching:
             true
         default:
             false
         }
+    }
+
+    /// Synchronously flips `state` to `.checking`. Used by the
+    /// Settings click handler to defeat the click → Task-spawn
+    /// → state-update race that would otherwise let multiple
+    /// rapid clicks each pass their own re-entry guard. The
+    /// `Task` that follows then re-runs the same check
+    /// internally and is a no-op if state is already `.checking`.
+    public func markEnteringCheck() {
+        guard !isInFlight else { return }
+        state = .checking
+    }
+
+    /// Synchronously flips `state` to `.downloading(progress: 0)`.
+    /// Same race-defeating role as `markEnteringCheck`.
+    public func markEnteringDownload() {
+        guard !isInFlight else { return }
+        state = .downloading(progress: 0.0)
     }
 
     /// Bare release metadata — tag, version, html URL, and the
