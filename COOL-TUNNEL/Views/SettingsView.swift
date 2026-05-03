@@ -145,7 +145,7 @@ public struct SettingsView: View {
                     Text(host.architecture.displayName)
                         .font(.body.weight(.semibold))
                     Text("(\(host.architecture.machOArchName))")
-                        .font(.system(.caption, design: .monospaced))
+                        .font(CTTypography.monoSmall)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -169,7 +169,7 @@ public struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
             Text(value)
-                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
+                .font(monospaced ? CTTypography.monoSmall : .caption)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -378,7 +378,7 @@ public struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .leading)
             Text(value)
-                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
+                .font(monospaced ? CTTypography.monoSmall : .caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -495,7 +495,7 @@ public struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     Text(draft.customNaiveBinaryPath)
-                        .font(.system(.body, design: .monospaced))
+                        .font(CTTypography.mono)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -538,7 +538,7 @@ public struct SettingsView: View {
             ForEach(draft.directDomains, id: \.self) { domain in
                 HStack {
                     Text(domain)
-                        .font(.system(.body, design: .monospaced))
+                        .font(CTTypography.mono)
                     Spacer()
                     Button(role: .destructive) {
                         draft.directDomains.removeAll { $0 == domain }

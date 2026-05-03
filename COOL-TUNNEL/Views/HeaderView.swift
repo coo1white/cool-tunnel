@@ -40,10 +40,13 @@ public struct HeaderView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("COOL TUNNEL")
-                    .font(.system(.title2, design: .rounded).weight(.bold))
+                    .font(CTTypography.title)
                     .foregroundStyle(
+                        // Classic Mac blue → ink. Less candy than the
+                        // earlier pink-to-ink gradient; reads as
+                        // "System 7 about box" with a modern fade.
                         LinearGradient(
-                            colors: [CTPalette.inkBlue, CTPalette.cherryRose],
+                            colors: [CTPalette.macBlue, CTPalette.bodyInk],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
@@ -63,7 +66,7 @@ public struct HeaderView: View {
             }
         }
         .padding(14)
-        .pupCard(cornerRadius: 22, tint: CTPalette.accent(for: activeMode))
+        .pupCard(cornerRadius: 10, tint: CTPalette.accent(for: activeMode))
     }
 
     private var subtitle: String {
