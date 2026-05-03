@@ -91,14 +91,29 @@ public final class AppUpdater {
 
     /// Performs steps 1–2: hits GitHub, decides whether an update
     /// exists. Cheap; safe to call from `Settings.onAppear`.
+    ///
+    /// **Order of operations matters here.** v0.1.7.7 had a bug
+    /// where this method asked `fetchLatestRelease` to validate
+    /// every required asset (.zip + .sha256) BEFORE comparing
+    /// versions. If the latest release was missing the .sha256
+    /// (release-process oversight), users on the same version
+    /// got a misleading "Update failed: missing manifest" error
+    /// instead of the correct "You're on the latest version"
+    /// message. Fixed: fetch metadata only, compare versions
+    /// first, then validate install assets only when there's
+    /// genuinely something to install.
     public func checkForUpdates() async {
         guard !isInFlight else { return }
         state = .checking
         do {
-            let release = try await Self.fetchLatestRelease()
+            let metadata = try await Self.fetchLatestReleaseMetadata()
             let current = AppVersion.current.marketingVersion
-            if Self.versionIsNewer(release.version, than: current) {
-                state = .available(latest: release)
+            if Self.versionIsNewer(metadata.version, than: current) {
+                // Newer release exists — now we MUST verify the
+                // install assets are present, because we're about
+                // to offer the user an Update button.
+                let validated = try Self.validateInstallAssets(metadata)
+                state = .available(latest: validated)
             } else {
                 state = .upToDate(currentVersion: current)
             }
@@ -151,12 +166,36 @@ public final class AppUpdater {
         }
     }
 
-    /// Hits GitHub `/releases/latest`. We use `/latest` (not
-    /// `/releases?per_page=20`) because for the .app updater we
-    /// only care about stable tags — `/latest` excludes
-    /// pre-releases which is the right policy for a user-facing
-    /// upgrade.
-    private static func fetchLatestRelease() async throws -> AvailableRelease {
+    /// Bare release metadata — tag, version, html URL, and the
+    /// raw asset list. Does NOT validate that install-time
+    /// assets (.zip + .sha256) are present; that's
+    /// `validateInstallAssets`'s job. Split out so the
+    /// "Check for Updates" path can compare versions and
+    /// short-circuit to "up to date" without erroring on a
+    /// missing manifest in the same-version case.
+    private struct ReleaseMetadata {
+        let tag: String
+        let version: String
+        let htmlURL: URL
+        let publishedAt: Date?
+        let assets: [GHAsset]
+    }
+
+    private struct GHAsset: Decodable {
+        let name: String
+        let browserDownloadURL: URL
+        enum CodingKeys: String, CodingKey {
+            case name
+            case browserDownloadURL = "browser_download_url"
+        }
+    }
+
+    /// Hits GitHub `/releases/latest` and returns metadata. We
+    /// use `/latest` (not `/releases?per_page=20`) because for
+    /// the .app updater we only care about stable tags;
+    /// `/latest` excludes pre-releases which is the right
+    /// policy for a user-facing upgrade.
+    private static func fetchLatestReleaseMetadata() async throws -> ReleaseMetadata {
         guard
             let api = URL(
                 string: "https://api.github.com/repos/coo1white/cool-tunnel/releases/latest"
@@ -183,19 +222,11 @@ public final class AppUpdater {
             )
         }
 
-        struct Asset: Decodable {
-            let name: String
-            let browserDownloadURL: URL
-            enum CodingKeys: String, CodingKey {
-                case name
-                case browserDownloadURL = "browser_download_url"
-            }
-        }
         struct Release: Decodable {
             let tagName: String
             let htmlURL: URL
             let publishedAt: Date?
-            let assets: [Asset]
+            let assets: [GHAsset]
             enum CodingKeys: String, CodingKey {
                 case tagName = "tag_name"
                 case htmlURL = "html_url"
@@ -214,39 +245,52 @@ public final class AppUpdater {
         }
 
         // Validate the tag shape against the canonical
-        // `vN.N.N(.N)?` pattern before letting it anywhere
-        // near a path. Same defensive guard as
-        // NaiveUpdater.isValidReleaseTag.
+        // `vN.N.N(.N)?` pattern before letting it anywhere near
+        // a path. Defense-in-depth: even just rendering the tag
+        // in a UI string deserves a sanity check.
         let tag = release.tagName
         guard isValidVersionTag(tag) else {
             throw UpdaterError.message(
-                "GitHub returned an unexpected release tag (\(tag)). Refusing to download."
+                "GitHub returned an unexpected release tag (\(tag)). Refusing to proceed."
             )
         }
         let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
 
-        // Find the .zip and .sha256 assets that match this tag.
-        // `Cool-tunnel-vX.Y.Z.zip` and `Cool-tunnel-vX.Y.Z.sha256`.
-        let zipName = "Cool-tunnel-\(tag).zip"
-        let shaName = "Cool-tunnel-\(tag).sha256"
-        guard let zipAsset = release.assets.first(where: { $0.name == zipName }) else {
-            throw UpdaterError.message(
-                "Release \(tag) has no \(zipName) asset. The release may not be ready yet."
-            )
-        }
-        guard let shaAsset = release.assets.first(where: { $0.name == shaName }) else {
-            throw UpdaterError.message(
-                "Release \(tag) has no \(shaName) integrity manifest. Refusing to update without a hash to verify against."
-            )
-        }
-
-        return AvailableRelease(
+        return ReleaseMetadata(
             tag: tag,
             version: version,
+            htmlURL: release.htmlURL,
+            publishedAt: release.publishedAt,
+            assets: release.assets
+        )
+    }
+
+    /// Confirms the release exposes both the install .zip and
+    /// the matching .sha256 manifest. Called only when there's
+    /// genuinely a newer version to install — the missing-asset
+    /// case is then a real release-process bug worth surfacing
+    /// to the user, not noise on the same-version "check"
+    /// path.
+    private static func validateInstallAssets(_ meta: ReleaseMetadata) throws -> AvailableRelease {
+        let zipName = "Cool-tunnel-\(meta.tag).zip"
+        let shaName = "Cool-tunnel-\(meta.tag).sha256"
+        guard let zipAsset = meta.assets.first(where: { $0.name == zipName }) else {
+            throw UpdaterError.message(
+                "Release \(meta.tag) has no \(zipName) asset. The release may not be ready yet."
+            )
+        }
+        guard let shaAsset = meta.assets.first(where: { $0.name == shaName }) else {
+            throw UpdaterError.message(
+                "Release \(meta.tag) has no \(shaName) integrity manifest. Refusing to update without a hash to verify against."
+            )
+        }
+        return AvailableRelease(
+            tag: meta.tag,
+            version: meta.version,
             zipURL: zipAsset.browserDownloadURL,
             shaManifestURL: shaAsset.browserDownloadURL,
-            releaseNotesURL: release.htmlURL,
-            publishedAt: release.publishedAt
+            releaseNotesURL: meta.htmlURL,
+            publishedAt: meta.publishedAt
         )
     }
 
