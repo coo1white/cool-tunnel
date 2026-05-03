@@ -28,39 +28,38 @@ use tokio::task::JoinHandle;
 const OUTBOUND_BUFFER: usize = 256;
 const EVENT_BUFFER: usize = 256;
 const MONITOR_INTERVAL_SECS: u64 = 5;
-/// Per-anomaly-reason suppression window for [`monitor_loop`]. The
-/// same reason is forwarded to Swift at most once per window;
-/// distinct reasons are not blocked by each other. 100 ms balances
-/// responsive surfacing of new conditions against UI-flooding when
-/// the proxy is flapping.
-const ANOMALY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+// `ANOMALY_DEBOUNCE` and the previous "Per-anomaly-reason
+// suppression window" doc-comment have been removed: the
+// `Debouncer::default()` impl in `util::debounce` is now the
+// single source of truth (100 ms). Two declarations would risk
+// drift across the LTSC window.
+
 /// Hard cap on a single inbound JSON frame (one stdin line), in
 /// bytes. Frames larger than this are dropped with an
 /// `Outbound::Error` reply rather than buffered. 1 MiB is two
 /// orders of magnitude above any legitimate request the Swift app
 /// can produce.
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
-/// Maximum number of in-flight request handler tasks.
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of concurrent request handler tasks.
+///
+/// The Swift app issues requests serially today (each `await` on
+/// the response before sending the next), so the hard cap exists
+/// only to bound memory if a future caller pipelines: 32 ×
+/// `MAX_FRAME_BYTES` ≈ 32 MiB worst-case in-flight buffer plus 32
+/// `JoinHandle` allocations. The semaphore drops new requests
+/// rather than queuing, so a bursty caller sees `Outbound::Error`
+/// immediately instead of unbounded memory growth.
 const MAX_INFLIGHT_REQUESTS: usize = 32;
 
 /// Engine-wide mutable state. Wrapped in a [`Mutex`] and shared
 /// between the stdin reader and any background tasks.
+#[derive(Default)]
 struct EngineState {
     supervisor: Option<ProxySupervisor>,
     monitor_handle: Option<JoinHandle<()>>,
     active_port: Option<cool_tunnel_core::domain::Port>,
     anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer<AnomalyReason>,
-}
-
-impl Default for EngineState {
-    fn default() -> Self {
-        Self {
-            supervisor: None,
-            monitor_handle: None,
-            active_port: None,
-            anomaly_debouncer: cool_tunnel_core::util::debounce::Debouncer::new(ANOMALY_DEBOUNCE),
-        }
-    }
 }
 
 /// Entry point for client mode. Returns when stdin reaches EOF or
@@ -318,9 +317,20 @@ async fn dispatch(
             Ok(ResponsePayload::Latency(report))
         }
         RequestKind::Shutdown => Ok(ResponsePayload::Ack),
-        _ => Err(ErrorPayload::new(
+        // The lib crate defines `RequestKind` with
+        // `#[non_exhaustive]`; the binary crate (this file is a
+        // submodule of `main.rs`) imports it through the public
+        // surface, so the wildcard arm is structurally required
+        // even though every documented variant is matched above.
+        // Future variants land here as a forced compile failure
+        // *only* if added to `protocol.rs` without bumping the lib
+        // version — anyone adding a `RequestKind` variant should
+        // add a real arm above and let this fall through unused.
+        kind => Err(ErrorPayload::new(
             "unimplemented_method",
-            "this engine version does not implement the requested method",
+            format!(
+                "this engine version does not implement the requested method: {kind:?}"
+            ),
         )),
     }
 }
@@ -332,16 +342,28 @@ async fn start_proxy(
     port: cool_tunnel_core::domain::Port,
     events: mpsc::Sender<Event>,
 ) -> Result<ResponsePayload, ErrorPayload> {
-    {
-        let guard = state.lock().await;
-        if guard.supervisor.is_some() {
-            return Err(ErrorPayload::new(
-                "already_running",
-                "proxy is already running",
-            ));
-        }
+    // Hold the engine mutex across the entire spawn. The previous
+    // implementation released the lock between the "is already
+    // running?" check and the spawn, then re-acquired and tried
+    // to `stop()` the loser if the check now disagreed. Two
+    // concurrent `start_proxy` requests would both pass the first
+    // check, both spawn `naive` (two real PIDs!), and the loser's
+    // log lines and state-changed events would still ship to the
+    // Swift side because they're emitted via the event channel
+    // from `ProxySupervisor::spawn` *before* `stop()` is called
+    // on the loser.
+    //
+    // Holding the mutex across `.await` is exactly what
+    // `tokio::sync::Mutex` is designed for; the lock is single
+    // point of contention only for the proxy lifecycle, and
+    // double-spawn is a real correctness bug.
+    let mut guard = state.lock().await;
+    if guard.supervisor.is_some() {
+        return Err(ErrorPayload::new(
+            "already_running",
+            "proxy is already running",
+        ));
     }
-
     let supervisor = ProxySupervisor::spawn(&binary_path, &config_path, events.clone())
         .await
         .map_err(|err| {
@@ -352,15 +374,6 @@ async fn start_proxy(
             )
         })?;
     let pid = supervisor.pid();
-
-    let mut guard = state.lock().await;
-    if guard.supervisor.is_some() {
-        let _ = supervisor.stop().await;
-        return Err(ErrorPayload::new(
-            "already_running",
-            "proxy is already running",
-        ));
-    }
     guard.anomaly_debouncer.reset();
     let monitor_handle = tokio::spawn(monitor_loop(pid, port, events, Arc::clone(&state)));
     guard.supervisor = Some(supervisor);

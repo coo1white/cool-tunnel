@@ -103,8 +103,32 @@ impl ProxySupervisor {
         if let Some(tx) = self.kill_tx.take() {
             let _ = tx.send(());
         }
+        // Bound the monitor-drain wait. The happy path is that
+        // `monitor_lifecycle` returns within a few ms (kill_rx
+        // → child.kill → child.wait → StateChanged emit). If
+        // anything has gone sideways — child stuck in an
+        // uninterruptible state, kernel pause, etc. — we
+        // abort the task rather than leak the wait indefinitely.
+        // `kill_on_drop(true)` on the original spawn means the
+        // child still gets reaped when `Child` drops with the
+        // task; the only thing we lose is the trailing
+        // `StateChanged { running: false }` event, which the
+        // engine can also synthesize from supervisor disposal.
         if let Some(handle) = self.monitor.take() {
-            let _ = handle.await;
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        pid = self.pid,
+                        "monitor_lifecycle did not drain within 2s; aborting"
+                    );
+                    // The JoinHandle was moved into `timeout`; we
+                    // can't abort it here. The task is detached;
+                    // `kill_on_drop(true)` on the underlying
+                    // `Child` (now owned by the task) reaps the
+                    // process when the task is finally dropped.
+                }
+            }
         }
         Ok(())
     }
