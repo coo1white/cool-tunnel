@@ -288,6 +288,11 @@ public struct SoftButtonStyle: ButtonStyle {
         let shape = Capsule(style: .continuous)
         return configuration.label
             .font(.callout.weight(.medium))
+            // Same single-line guard as `ModeChipStyle` — without this
+            // the row's HStack would happily wrap "Settings" into
+            // "Set- / tings" once the form pushed it narrower.
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .foregroundStyle(tint)
