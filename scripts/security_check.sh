@@ -158,17 +158,34 @@ heading "6. Source-level secret scan"
 # without dragging in every test fixture.  We *exclude* `target/`, the
 # git directory, and the dist/ output so a previous build never trips
 # the check.
+# Specific historical leak — early dev scripts shipped a real password
+# before v0.1.5.3. Build the pattern from concatenated halves so this
+# script's source never contains the literal in one piece (otherwise
+# the scan would self-match every run).
+HISTORICAL_LEAK_HALF1='***REDACTED***'
+HISTORICAL_LEAK_HALF2='***REDACTED***'
+HISTORICAL_LEAK_PATTERN="${HISTORICAL_LEAK_HALF1}${HISTORICAL_LEAK_HALF2}"
+
 SECRET_PATTERNS=(
-    'AKIA[0-9A-Z]{16}'             # AWS access key id
-    'sk-[A-Za-z0-9]{20,}'          # OpenAI-style secret key
-    'ghp_[A-Za-z0-9]{20,}'         # GitHub PAT
-    'xox[baprs]-[A-Za-z0-9-]{20,}' # Slack token
-    '-----BEGIN[ A-Z]+PRIVATE KEY' # Embedded private key
+    'AKIA[0-9A-Z]{16}'              # AWS access key id
+    'sk-[A-Za-z0-9]{20,}'           # OpenAI-style secret key
+    'ghp_[A-Za-z0-9]{20,}'          # GitHub PAT
+    'xox[baprs]-[A-Za-z0-9-]{20,}'  # Slack token
+    '-----BEGIN[ A-Z]+PRIVATE KEY'  # Embedded private key
+    "${HISTORICAL_LEAK_PATTERN}"    # Pinned past-leak guard (see above)
+    # Catch literal `basic_auth <user> <password>` Caddyfile lines.
+    # The character class deliberately excludes `<` and `>` so the
+    # documentation's `basic_auth <USERNAME> <PASSWORD>` placeholder
+    # does *not* match — only real plaintext credentials trip this.
+    'basic_auth[[:space:]]+[A-Za-z0-9_.-]+[[:space:]]+[A-Za-z0-9._/+=-]{6,}'
 )
 SECRET_GLOBS=(
     "${REPO_ROOT}/COOL-TUNNEL"
     "${REPO_ROOT}/core/src"
     "${REPO_ROOT}/scripts"
+    "${REPO_ROOT}/NaiveProxy_Server_Setup.md"
+    "${REPO_ROOT}/Disclaimer.md"
+    "${REPO_ROOT}/README.md"
 )
 SCAN_OUTPUT=""
 for pattern in "${SECRET_PATTERNS[@]}"; do

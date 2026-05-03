@@ -71,13 +71,16 @@ mod tests {
     use super::*;
     use crate::domain::{Password, ProfileId, Username};
 
+    /// Test fixture. Uses an obviously-fake placeholder password —
+    /// real credentials must never land in test code, since git
+    /// history is forever and search engines do index test fixtures.
     fn sample_profile() -> Profile {
         Profile::new(
             ProfileId::new("default"),
             ServerAddress::parse("naive.example.com").unwrap(),
             Credentials::new(
                 Username::parse("alice").unwrap(),
-                Password::parse("***REMOVED***").unwrap(),
+                Password::parse("test-password-do-not-use").unwrap(),
             ),
             Port::new(1080).unwrap(),
         )
@@ -112,7 +115,7 @@ mod tests {
         assert_eq!(parsed["listen"], "socks://127.0.0.1:1080");
         assert_eq!(
             parsed["proxy"],
-            "https://alice:***REMOVED***@naive.example.com"
+            "https://alice:test-password-do-not-use@naive.example.com"
         );
     }
 
