@@ -1,7 +1,7 @@
 {
-  "upstream_tag": "v147.0.7727.49-1",
-  "arm64_tarball_sha256": "e85403f4fc99153bb892186b87a867ba9141dcae029d80e303303a50d3701cb0",
-  "x64_tarball_sha256":   "70c81a99cd2fab1f64d41a26d3d2b5eea8f88ec2859352c224e3280c5948dbba",
-  "merged_universal_sha256": "04966402132b724df02a1b42ee71d07aecc3a9c0a487239d711c93c0f8797dd0",
-  "fetched_at": "2026-05-02T18:19:24Z"
+  "upstream_tag": "v148.0.7778.96-2",
+  "arm64_tarball_sha256": "4bcf79d1ef2db3334a3c60d9424ee02a01d5b35db5df1cc779f50107dcf396a6",
+  "x64_tarball_sha256":   "9834dee5a26e7f4f62bfbe0f2ad655bed059156b34e4bb457de9e74be77eeb23",
+  "merged_universal_sha256": "424e17bebf42be97ffcd2372c8086bf8b3ff4eaf2f301c9f49a415baf9c83ed7",
+  "fetched_at": "2026-05-03T06:25:45Z"
 }
