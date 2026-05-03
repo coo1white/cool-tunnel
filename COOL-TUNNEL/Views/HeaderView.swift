@@ -46,19 +46,25 @@ public struct HeaderView: View {
                 Text("COOL TUNNEL")
                     .font(CTTypography.title)
                     .foregroundStyle(
-                        // Classic Mac blue → ink. Less candy than the
-                        // earlier pink-to-ink gradient; reads as
-                        // "System 7 about box" with a modern fade.
+                        // Classic Mac blue → primary text. The
+                        // second stop is `Color.primary` (not the
+                        // hardcoded `bodyInk` light-mode ink) so
+                        // the gradient remains legible in dark mode
+                        // — `bodyInk` is a near-black RGB literal
+                        // that disappears on dark backgrounds.
                         LinearGradient(
-                            colors: [CTPalette.macBlue, CTPalette.bodyInk],
+                            colors: [CTPalette.macBlue, .primary],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
+                    .lineLimit(1)
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .contentTransition(.opacity)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             Spacer()
@@ -70,7 +76,9 @@ public struct HeaderView: View {
             }
         }
         .padding(14)
-        .pupCard(cornerRadius: 10, tint: CTPalette.accent(for: activeMode))
+        // 8pt matches the rest of the design system; the older 10pt
+        // header was drift from the v0.1.5.7 platinum-theme pass.
+        .pupCard(cornerRadius: 8, tint: CTPalette.accent(for: activeMode))
     }
 
     private var subtitle: String {
@@ -114,7 +122,13 @@ public struct HeaderView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background {
-                Capsule(style: .continuous).fill(CTPalette.bunnyPink.opacity(0.20))
+                // Use the same `cherryRose` tint family as the
+                // foreground/border so the badge reads as a single
+                // alert colour. The previous `bunnyPink` background
+                // was a holdover from the v0.1.5.4 Maltese palette
+                // and disagreed with the rose stroke + ink-blue
+                // window after the v0.1.5.7 theme retune.
+                Capsule(style: .continuous).fill(CTPalette.cherryRose.opacity(0.12))
             }
             .overlay {
                 Capsule(style: .continuous).strokeBorder(CTPalette.cherryRose.opacity(0.4), lineWidth: 0.6)

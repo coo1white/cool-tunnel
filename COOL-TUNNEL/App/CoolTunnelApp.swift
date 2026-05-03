@@ -29,8 +29,13 @@ struct CoolTunnelApp: App {
         Window("Cool Tunnel", id: WindowID.main) {
             ContentView()
                 .environment(orchestrator)
+                // Min sizes guarantee the four-pane stack always
+                // fits without truncation. Ideal matches `defaultSize`
+                // below so the first-launch window opens at the
+                // intended dimensions; previous v0.1.7 had a 940 vs
+                // 820 mismatch that made first launch jump.
                 .frame(
-                    minWidth: 780, idealWidth: 940, maxWidth: .infinity,
+                    minWidth: 780, idealWidth: 820, maxWidth: .infinity,
                     minHeight: 700, idealHeight: 820, maxHeight: .infinity
                 )
                 .task {
@@ -44,8 +49,12 @@ struct CoolTunnelApp: App {
                     appDelegate.orchestrator = orchestrator
                 }
         }
-        .windowResizability(.contentSize)
-        .defaultSize(width: 820, height: 700)
+        // `.automatic` honours the content's min frame as the
+        // resize floor without using `maxWidth: .infinity` as the
+        // ceiling — `.contentSize` paired with `maxWidth: .infinity`
+        // lets the user drag the window to absurd dimensions.
+        .windowResizability(.automatic)
+        .defaultSize(width: 820, height: 820)
     }
 }
 

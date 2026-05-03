@@ -60,7 +60,17 @@ public struct LogConsoleView: View {
                         .strokeBorder(CTPalette.borderInk.opacity(0.40), lineWidth: 0.7)
                 }
                 .onChange(of: orchestrator.logEntries.count) { _, _ in
-                    withAnimation(.linear(duration: 0.1)) {
+                    // Skip the scroll animation on the `.light`
+                    // performance tier (older Intel hardware) — the
+                    // 100ms linear curve compounds badly under
+                    // high log volume because every appended line
+                    // queues another animated scroll. The static
+                    // jump-to-bottom keeps the UI usable.
+                    if PerformanceProfile.current.repeatingSymbolEffectsAllowed {
+                        withAnimation(.linear(duration: 0.1)) {
+                            proxy.scrollTo("__bottom__", anchor: .bottom)
+                        }
+                    } else {
                         proxy.scrollTo("__bottom__", anchor: .bottom)
                     }
                 }
@@ -80,8 +90,16 @@ public struct LogConsoleView: View {
         VStack(spacing: 8) {
             Image(systemName: "sparkles")
                 .font(.system(size: 28))
-                .foregroundStyle(CTPalette.bunnyPink)
-                .symbolEffect(.pulse, options: .repeating)
+                .foregroundStyle(CTPalette.cherryRose)
+                // Pulse is gated by the same performance tier the
+                // header status pill uses, so older Intel hardware
+                // doesn't burn GPU on a continuously animating
+                // empty-state placeholder.
+                .symbolEffect(
+                    .pulse,
+                    options: .repeating,
+                    isActive: PerformanceProfile.current.repeatingSymbolEffectsAllowed
+                )
             Text("Waiting for the first log line…")
                 .font(.callout)
                 .foregroundStyle(.secondary)
