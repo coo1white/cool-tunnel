@@ -1,44 +1,58 @@
 // Persistence/ProfileStore.swift
 //
-// Persists the user's saved `Profile`s and the currently selected profile
-// id. Identifier, server, username, and local port live in `UserDefaults`
-// (low-sensitivity); passwords live in the Keychain via `KeychainStore`.
+// Persists the user's saved `Profile`s and the currently selected
+// profile id. Identifier, server, username, and local port live in
+// `UserDefaults` (low-sensitivity); passwords live in the configured
+// [`CredentialStore`] (file-backed by default; Keychain available
+// behind a migrating wrapper for upgrades).
 //
-// On read, the two halves are recombined into a fully-populated `Profile`.
-// On write, the password is split out and the profile is persisted with an
-// empty password placeholder so a stale `UserDefaults` plist does not
-// re-leak credentials after the migration.
+// **Critical invariant for v0.1.5.5:** `loadProfiles()` does NOT
+// touch the credential store. Profiles are returned with empty
+// passwords; the orchestrator hydrates the password on demand from
+// `start(mode:)`. This is what guarantees the app never triggers a
+// system-password / "approve keychain access" prompt before the UI
+// appears — for upgraders, the only place a Keychain access can
+// fire is the migration path inside [`MigratingCredentialStore`],
+// which only runs on a user-initiated Start.
 
 import Foundation
 
 /// Stores profiles + selection. Marked `@unchecked Sendable` because
-/// `UserDefaults` is documented thread-safe but does not yet conform to
-/// `Sendable`; `KeychainStore` is `Sendable` already.
+/// `UserDefaults` is documented thread-safe but does not yet conform
+/// to `Sendable`; the credential store's own conformance covers the
+/// other dependency.
 public struct ProfileStore: @unchecked Sendable {
 
     private enum Keys {
         static let profiles = "profiles"
         static let selected = "selectedProfileID"
         /// Marker we set the first time we strip passwords out of an
-        /// existing `profiles` blob — used to skip the legacy migration on
-        /// subsequent loads.
+        /// existing `profiles` blob — used to skip the legacy
+        /// migration on subsequent loads.
         static let migrated = "profilesMigratedToKeychain"
     }
 
     private let defaults: UserDefaults
-    private let keychain: KeychainStore
+    private let credentials: any CredentialStore
 
     public init(
         defaults: UserDefaults = .standard,
-        keychain: KeychainStore = KeychainStore()
+        credentials: any CredentialStore
     ) {
         self.defaults = defaults
-        self.keychain = keychain
+        self.credentials = credentials
     }
 
-    /// Returns every saved profile with passwords filled in from the
-    /// Keychain. On first run after the migration, also rewrites the
-    /// `UserDefaults` blob with passwords stripped.
+    /// Returns every saved profile **without** filling in passwords.
+    /// Eager hydration would force a credential-store hit during app
+    /// launch — for the Keychain backend that's an OS prompt before
+    /// the UI even renders. The orchestrator pulls the password on
+    /// demand inside `start(mode:)`.
+    ///
+    /// Legacy passwords stored as plaintext inside the `UserDefaults`
+    /// blob (pre-Keychain era) are still adopted into the credential
+    /// store here, because we already have those bytes in memory and
+    /// adopting them is free of any prompt.
     public func loadProfiles() -> [Profile] {
         guard let data = defaults.data(forKey: Keys.profiles),
             let stored = try? JSONDecoder().decode([Profile].self, from: data),
@@ -47,47 +61,52 @@ public struct ProfileStore: @unchecked Sendable {
             return [.default]
         }
 
-        let alreadyMigrated = defaults.bool(forKey: Keys.migrated)
-
-        // Hydrate passwords from Keychain. If the legacy `UserDefaults`
-        // blob still carried a non-empty password (pre-migration) and
-        // Keychain has nothing for that id yet, we adopt the legacy value
-        // so the user does not silently lose access — then immediately
-        // upgrade by saving back through the Keychain path.
         var hydrated: [Profile] = []
-        var needsRewrite = !alreadyMigrated
+        var needsRewrite = false
         for var profile in stored {
             let storedSecret = profile.password
-            let keychainSecret = (try? keychain.password(forProfileID: profile.id)) ?? ""
-
             if !storedSecret.isEmpty {
-                // Migrate legacy plaintext password into Keychain.
-                if keychainSecret.isEmpty {
-                    try? keychain.setPassword(storedSecret, forProfileID: profile.id)
-                }
-                profile.password = storedSecret
+                // Legacy plaintext password lurking in UserDefaults.
+                // Promote it into the credential store now (no prompt
+                // for the file backend; for the migrating wrapper
+                // this is a free write since the file primary is
+                // local-only) and strip it from UserDefaults.
+                try? credentials.setPassword(storedSecret, forProfileID: profile.id)
                 needsRewrite = true
-            } else {
-                profile.password = keychainSecret
             }
+            // Always return profiles with empty passwords — the
+            // orchestrator hydrates from the credential store at
+            // start time.
+            profile.password = ""
             hydrated.append(profile)
         }
 
         if needsRewrite {
-            persist(profiles: hydrated)
+            persistStripped(profiles: hydrated)
             defaults.set(true, forKey: Keys.migrated)
         }
         return hydrated
     }
 
-    /// Persists the profile list. Each password is written to the Keychain;
-    /// the `UserDefaults` blob stores everything *except* the password.
+    /// Persists the profile list. Each non-empty password is written
+    /// to the credential store; the `UserDefaults` blob stores
+    /// everything *except* the password.
     public func save(profiles: [Profile]) {
-        persist(profiles: profiles)
+        for profile in profiles {
+            // Only write when there's something to save — empty means
+            // "no change since load" because the orchestrator never
+            // round-trips the password through the in-memory profile
+            // unless the user actually edited it.
+            if !profile.password.isEmpty {
+                try? credentials.setPassword(profile.password, forProfileID: profile.id)
+            }
+        }
+        persistStripped(profiles: profiles)
         defaults.set(true, forKey: Keys.migrated)
     }
 
-    /// Returns the currently selected profile id, or `nil` if none stored.
+    /// Returns the currently selected profile id, or `nil` if none
+    /// stored.
     public func loadSelectedID() -> String? {
         defaults.string(forKey: Keys.selected)
     }
@@ -101,24 +120,27 @@ public struct ProfileStore: @unchecked Sendable {
         }
     }
 
-    /// Deletes Keychain credentials for ids no longer present in `profiles`.
-    /// Called from the orchestrator after `removeSelectedProfile` so dead
-    /// passwords do not linger.
-    public func purgeKeychain(except keepIDs: Set<String>) {
-        // We do not enumerate the keychain (no kSecMatchLimitAll plumbing
-        // here); callers tell us the surviving ids and we no-op the rest
-        // by relying on `setPassword(_:forProfileID:)` to delete-on-empty
-        // when a profile is removed. This method is a no-op placeholder
-        // kept for symmetry with future enumeration support.
-        _ = keepIDs
+    /// On-demand password fetch for a profile. The orchestrator calls
+    /// this from `start(mode:)` immediately before validating, so a
+    /// credential-store access (and any OS prompt the migrating
+    /// wrapper may surface) happens after the user has already
+    /// committed to launching — never at app boot.
+    public func password(forProfileID id: String) -> String {
+        (try? credentials.password(forProfileID: id)) ?? ""
+    }
+
+    /// Removes the credential entry for a profile that's been deleted
+    /// from the list.
+    public func deletePassword(forProfileID id: String) {
+        try? credentials.deletePassword(forProfileID: id)
     }
 
     // MARK: - Private
 
-    private func persist(profiles: [Profile]) {
-        for profile in profiles {
-            try? keychain.setPassword(profile.password, forProfileID: profile.id)
-        }
+    /// Persists profiles to `UserDefaults` with passwords stripped.
+    /// The credential store is responsible for the secrets; this
+    /// helper only handles the low-sensitivity blob.
+    private func persistStripped(profiles: [Profile]) {
         let stripped = profiles.map { profile -> Profile in
             var p = profile
             p.password = ""
