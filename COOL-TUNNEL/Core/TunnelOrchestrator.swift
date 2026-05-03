@@ -309,18 +309,59 @@ public final class TunnelOrchestrator {
             return
         }
         if isRunning {
-            // Stop without surfacing a "stopped" error — this is one
-            // logical user action, not two.
-            await stop()
+            // One logical user action, one log line. The earlier
+            // implementation called the public `stop()` here, which
+            // emitted "stopped" before the subsequent "started in X" —
+            // so the live log read as a three-step dance for what the
+            // user experiences as one tap. Quiet-stop here and let the
+            // post-start switch line do the talking.
+            let from = activeMode
+            await stopQuiet()
+            try await startQuiet(mode: newMode)
+            appendInfo("switched from \(from.title) to \(newMode.title)")
+            return
         }
         try await start(mode: newMode)
+    }
+
+    /// Internal stop path used by `switchMode` — same teardown work as
+    /// `stop()`, no `appendInfo("stopped")`. Stays private; callers
+    /// outside the orchestrator should use `stop()` so the log is
+    /// always informative for explicit stops.
+    private func stopQuiet() async {
+        try? await proxyController.disableAll()
+        do {
+            _ = try await core.send(.stopProxy)
+        } catch {
+            recordError("stop failed: \(error)")
+        }
+        activeMode = .stopped
+        isRunning = false
+    }
+
+    /// Internal start path mirror of `start(mode:)` that omits the
+    /// trailing "started in X" log line so `switchMode` can replace
+    /// the pair of stop/start lines with a single "switched from X
+    /// to Y".
+    private func startQuiet(mode: ProxyMode) async throws {
+        try await startCore(mode: mode, log: false)
     }
 
     // MARK: - Lifecycle commands
 
     /// Validates the selected profile, writes config + PAC, spawns naive,
-    /// and applies the requested system-proxy configuration.
+    /// and applies the requested system-proxy configuration. Logs
+    /// "started in X" on success.
     public func start(mode: ProxyMode) async throws {
+        try await startCore(mode: mode, log: true)
+    }
+
+    /// Underlying start implementation. `log` controls whether the
+    /// trailing "started in X" line is appended — `switchMode` calls
+    /// this with `log: false` so it can emit a single "switched
+    /// from X to Y" line in the public log instead of the
+    /// stop/start pair the user sees as visual noise.
+    private func startCore(mode: ProxyMode, log: Bool) async throws {
         guard mode != .stopped else { return }
         guard var profile = selectedProfile else {
             throw OrchestratorError.noProfile
@@ -404,7 +445,9 @@ public final class TunnelOrchestrator {
 
         activeMode = mode
         isRunning = true
-        appendInfo("started in \(mode.title)")
+        if log {
+            appendInfo("started in \(mode.title)")
+        }
     }
 
     public func stop() async {

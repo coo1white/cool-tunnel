@@ -69,7 +69,11 @@ public struct ConnectionFormView: View {
             }
         }
         .padding(16)
-        .pupCard(cornerRadius: 8, tint: CTPalette.skyBlue)
+        // Mode-aware tint so the form pane reads the same colour as
+        // the header pill: Smart=blue, Global=pink, Local=green.
+        // Tracks `orchestrator.activeMode`, not the last-used mode,
+        // so the platinum-grey neutral wins when the proxy is idle.
+        .pupCard(cornerRadius: 8, tint: CTPalette.accent(for: orchestrator.activeMode))
     }
 
     /// Inline help banner that appears whenever the form still
