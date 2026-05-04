@@ -9,6 +9,167 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.17] — 2026-05-04 (LTSC patch — 100+ findings, 8 land)
+
+LTSC patch on v0.1.7 line. Eight specialized review agents in
+parallel returned **120 findings** across previously-untapped
+surfaces (persistence layer, app lifecycle + orchestrator,
+SystemIntegration utilities, Rust supervisor + monitor deep,
+diagnostics + redaction + protocol, domain types, real-user
+UX flows, build determinism + dep audit, subprocess +
+entitlements). 8 fixes land here, 112 deferred.
+
+One initial high-severity finding (Build-F#1: claimed `zmij`
+was a typo-squat in Cargo.lock) was investigated and
+**confirmed false-positive** — `zmij` is a real published
+crate ("A double-to-string conversion algorithm based on
+Schubfach and YY") that newer serde_json versions use in
+place of `ryu`. Cargo cache + checksum verified.
+
+### What landed (8 fixes)
+
+- **UX-F#1 (high) — `lastError` surfaced in HeaderView.**
+  `TunnelOrchestrator.recordError()` was setting `lastError`
+  on every failure (engine spawn fail, request timeout, naive
+  crash, stop fail, anomaly auto-stop, bootstrap disk-full)
+  but no view ever read it; errors only appeared as one
+  `[error]` line in the log console. The header now shows a
+  dismissible cherry-rose error banner directly under the
+  status pill — the same surface where users already look for
+  status. Added `TunnelOrchestrator.dismissLastError()` to keep
+  the public setter `private(set)`.
+- **Sup-F#6 (high) — lsof endpoint-aware loopback exclusion.**
+  v0.1.7.16 fixed IPv6 `[::1]` exclusion but used
+  substring-match against the entire line. A connection like
+  `127.0.0.1:54321 -> 1.2.3.4:443` (local client to remote
+  server) substring-matches `127.0.0.1` and got misclassified
+  as "not remote" — masking a genuine outbound flow that the
+  security monitor should be catching. Now: split on `->`,
+  check both endpoints separately, and only exclude when
+  BOTH are loopback.
+- **Domain-F#2 (high) — `Username::parse` rejects control
+  chars / `@` / `:`.** Previously the only validation was
+  "trimmed not empty"; a username like `"a@b:c\n/d"` parsed
+  successfully and produced ambiguous percent-encoding that
+  downstream HTTP-header writers could split on. Now: rejects
+  control chars (NUL, newlines, ANSI escapes) plus the
+  URL-userinfo metacharacters via new
+  `InvalidCredentials::IllegalUsernameChar(char)` variant.
+- **Diag-F#1 (high) — JSON / k=v credential redaction.**
+  Previously only URL userinfo + Authorization + Cookie were
+  redacted. naive's config-load errors dump partial JSON
+  like `"password":"…"`; curl -v emits `password: hunter2`
+  style banners. Both reached the UI verbatim. New
+  `JSON_KV_CRED_REGEX` covers `password`, `passwd`, `secret`,
+  `token`, `api_key`, `apikey`, `access_token`,
+  `refresh_token` — case-insensitive, optional surrounding
+  quotes on key + value.
+- **Build-F#6 (high) — `rust-toolchain.toml` pinned to
+  1.95.0.** Previously `channel = "stable"` floated, letting
+  rustc drift across CI runs. The LTSC posture pins
+  `Cargo.lock` with `--locked` but letting rustc itself
+  float is the inconsistent half. Bumps now require an
+  intentional version edit. Also added explicit
+  `targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]`
+  so universal builds don't need `rustup target add` in CI.
+- **Subproc-F#6 (high) — hardened runtime enabled.**
+  `pbxproj` had `ENABLE_APP_SANDBOX = NO` (correct — the app
+  needs to spawn `naive` and call `networksetup`) but no
+  `ENABLE_HARDENED_RUNTIME = YES`. Without it, ad-hoc-signed
+  builds run without library-validation gating; an attacker
+  with `DYLD_INSERT_LIBRARIES` access could inject. Now both
+  Debug and Release configs set `ENABLE_HARDENED_RUNTIME =
+  YES` + `OTHER_CODE_SIGN_FLAGS = "--options runtime"`.
+- **Pers-F#10 (high) — ProfileStore corrupt-JSON recovery.**
+  Previously `try? JSONDecoder().decode(...)` swallowed
+  decode errors and returned `[.default]`; the next
+  `save(profiles:)` then overwrote the corrupted-but-
+  recoverable blob with the default, **silently destroying
+  the user's profile list**. Now: on decode failure, copy the
+  corrupted blob to a backup key
+  (`profiles.broken.<ISO-timestamp>` in UserDefaults) and
+  `os_log` an error before falling back. The user (or
+  support) can recover via `defaults read`.
+
+### Deferred (112 findings)
+
+By severity tier:
+
+- **High (deferred ~10)**: SystemProxyController revert-on-
+  crash safety (sentinel file + LaunchAgent watcher) — needs
+  careful design across multiple files; targeted for v0.1.7.18.
+  Naive-crash auto-revert (UX-F#5). DNS hijack of
+  api.github.com lacks cert pinning (UX-F#11). Update
+  mid-connection 5s watchdog leaves system proxy enabled
+  (UX-F#8). Sleep/wake handler missing — naive can be a TCP
+  zombie with UI showing "Active". `setsocksfirewallproxy`
+  only covers SOCKS, not HTTP/HTTPS.
+- **Persistence security (~6)**: Password as Swift String
+  never zeroed (cred lifetime); Profile.password serialised
+  via Codable (storage surface); `selectedProfileID`
+  dangling references; `MigratingCredentialStore` orphan
+  duplicates; Keychain `WhenUnlocked` instead of
+  `ThisDeviceOnly`; SettingsStore `bool/stringArray`
+  unset-vs-false ambiguity.
+- **Subprocess + entitlement (~6)**: SIGTERM→SIGINT→SIGKILL
+  escalation order is suboptimal; env inheritance carries
+  DYLD_*/OBJC_* into children; CoreClient.start +
+  SystemProxyController.run bypass Subprocess.run; tar
+  extraction lacks `refuseExtractionEscapingSymlinks` (only
+  ditto path covered); `network.client/server` entitlements
+  unconstrained; quarantine xattr handling.
+- **Architectural (~5)**: pipeline extraction (Q-F#11
+  legacy); shared `Updater` protocol (don't); empty
+  `ViewModels/` directory; bundle ID legacy
+  `space.coolwhite.naive` vs `…cooltunnel`; build-time
+  `canonicalBundleID` from pbxproj.
+- **Test coverage (~10)**: NO Swift test target exists;
+  zero tests on persistence, SystemIntegration,
+  SystemProxyController.disableAll, server_mode HTTP API,
+  v0.1.7.13–.17 fixes; chaos suite is liveness-only.
+- **State-machine (~5)**: orchestrator transitions not
+  atomic; concurrent click handling; profile mutation
+  while connected uses stale credentials silently;
+  multiple orchestrator phase variables can drift; engine
+  death "click Start again" message tells users to do
+  something that throws notRunning.
+- **Performance (~6)**: log buffer `removeFirst(n)` is O(n);
+  `binding(for:)` round-trips on every keystroke; LazyVStack
+  autoscroll O(N) per log line; redaction regex without
+  `size_limit`; multiple `.lowercased()` calls already
+  redundant; `Logger.cooltunnel` reallocates per call.
+- **Documentation (~10)**: 23 MB → 45 MB drift caught in
+  v0.1.7.16; CONTRIBUTING references wrong package version;
+  NOTICE missing fonts; "macOS 26 Liquid Glass" aspirational
+  in SUPPORT.md; SECURITY.md "begins with 1999… ends with
+  Wry" hint; jurisdiction missing in Disclaimer.md;
+  AppUpdater self-updater documented in v0.1.7.16 already.
+- **Domain validation (~6)**: ProfileId accepts empty;
+  Username/Password no max length; Password trim mutation;
+  ServerAddress accepts RFC-violating hostnames; Port
+  accepts `+0001080`; ProxyMode lacks Default; serde
+  `deny_unknown_fields` missing; no `#[serde(alias)]` for
+  future renames.
+- **CI hygiene (~5)**: actions/cache restore-keys allows PR
+  cross-branch poisoning; `--all-features` on clippy/test
+  enables features that never ship; `taiki-e/install-action@v2`
+  not pinned to SHA; license allow-list confidence threshold
+  0.93 risks false positives; deny.toml multiple-versions
+  brittle.
+- **Style + naming (~10)**: audit-tag comment density
+  (89+ refs); magic numbers (1024, 100MB, 64KiB, 30s, 120s)
+  overloaded; `Refusing to install/update/proceed` verb
+  drift; force-unwraps; logger placement (file-scope vs
+  static member) inconsistent.
+- **Don't-do-it (~25)**: AsyncStream pipeline migration;
+  shared Updater protocol; bash heredoc → resource file;
+  exact-allowlist hostname; `AvailableRelease` asymmetry;
+  several others. Flagged so the next reviewer doesn't
+  propose them.
+
+The full per-finding output is preserved in the review-agent
+transcripts at the time of this commit.
+
 ## [0.1.7.16] — 2026-05-04 (LTSC patch — broad-surface deep audit)
 
 LTSC patch on v0.1.7 line. Seven specialized review agents in

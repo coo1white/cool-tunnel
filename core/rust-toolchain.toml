@@ -1,4 +1,11 @@
 [toolchain]
-channel = "stable"
+# **Build-F#6 (v0.1.7.17):** pinned to a specific stable
+# release rather than floating "stable". The LTSC posture
+# pins Cargo.lock with `--locked`, but letting rustc itself
+# drift across CI runs is the inconsistent half — every fresh
+# stable can introduce a new lint or an ICE on edge cases that
+# the lockfile can't insulate against. Bump intentionally.
+channel = "1.95.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
