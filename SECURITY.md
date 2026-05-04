@@ -74,20 +74,27 @@ into production.
   Apple Developer ID); the right-click → Open flow is the
   intended one-time approval. Anyone who can run code as you can
   also click that prompt.
-- **Bit-flips inside GitHub's release-asset CDN during a Naive
-  Binary or Rust Core update.** Both updaters verify the URL is
-  HTTPS + on a trusted GitHub-served host (`*.github.com` /
-  `*.githubusercontent.com`), constrain redirects to the same
-  list, and cap the download size at 100 MB — but neither
-  pins a SHA-256 hash against a Cool Tunnel-published manifest
-  today (deferred to v0.1.8). The .app's own Cool Tunnel →
-  Update flow IS SHA-pinned. If a CDN-internal byte tamper
-  occurred between the Cool Tunnel release publish and the
-  user's Update click, the redirect guard wouldn't catch it.
-  In practice the downloaded binary is then `codesign`-verified
-  before adoption (so a stranger's signature would fail), but
-  ad-hoc re-signing locally on tampered bytes would launder
-  them — a real residual risk acknowledged here for honesty.
+- **Bit-flips inside GitHub's release-asset CDN during a
+  NaiveProxy binary update.** `NaiveUpdater` downloads the
+  upstream NaiveProxy tarballs (klzgrad/naiveproxy) without a
+  Cool Tunnel-published SHA-256 manifest — we don't control
+  upstream's release process, so generating a trusted manifest
+  requires manual verification per release. The redirect
+  guard + 100 MB size cap close most of the threat surface,
+  but a CDN-internal byte tamper between upstream's publish
+  and the user's click would not be caught. **Targeted for
+  v0.1.8**: a Cool Tunnel-side manifest of "trusted Naive
+  versions and hashes" that the in-app updater pins against.
+
+  As of **v0.1.7.18**, the **Rust Core (`cool-tunnel-core`)
+  binary IS SHA-pinned**: the in-app updater downloads the
+  matching `Cool-tunnel-vX.Y.Z.sha256` manifest alongside
+  the binary, parses the line for
+  `cool-tunnel-core-vX.Y.Z-universal`, and refuses to install
+  on any hash mismatch. A release without the manifest is
+  skipped (not adopted unverified). This closes the equivalent
+  gap for the engine binary and matches the App self-updater
+  posture.
 
 ## Apple Developer ID
 

@@ -9,6 +9,98 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.18] — 2026-05-04 (LTSC patch — focused high-severity cluster)
+
+LTSC patch on v0.1.7 line. Focused release: 3 high-severity
+deferred items from prior audit cycles, all with real user
+impact, all coordinated rather than grab-bag. The other 3 of
+the 6 high-severity outstanding items (NaiveProxy SHA pinning,
+Password zeroize newtype, Swift test target) are explicitly
+deferred to v0.1.8 — each requires infrastructure that doesn't
+fit a single release window.
+
+### What landed (3 fixes)
+
+- **Lifecycle-F#16 (high) — system proxy crash recovery via
+  sentinel file.** Previously, if Cool Tunnel crashed (SIGKILL,
+  kernel panic, abrupt power loss) while the system proxy was
+  enabled, macOS would carry the proxy state across reboots —
+  pointing at `127.0.0.1:1080` where nothing was listening.
+  Result: every browser request stalled until the user
+  manually opened System Settings → Network → Proxies and
+  unticked the boxes. Now: when proxy is enabled, write a
+  JSON sentinel to `~/Library/Application Support/COOL-TUNNEL/
+  proxy-active.flag`. On clean disable, delete it. On every
+  app launch, before any other startup work, check if the
+  sentinel exists; if it does, the previous run died with
+  proxy enabled — force `disableAll()` immediately and clear
+  the flag. The user gets back into a working network state
+  with no manual recovery.
+  - New file: `SystemIntegration/ProxyActiveFlag.swift`
+  - Wired into `TunnelOrchestrator.startCore` (write),
+    `stop` / `stopQuiet` / `shutdown` (clear), and a new
+    `recoverFromCrashIfNeeded` called by `bootstrapIfNeeded`
+    BEFORE any other startup work
+- **UX-F#4 (high) — `NSWorkspace.didWakeNotification`
+  handler.** A Mac that sleeps for >30 minutes often has its
+  TCP keepalives dropped. Previously: `naive` was alive but
+  every browser request stalled because the upstream
+  connection was dead, and the UI kept showing "Active" with
+  no recovery hint. Now: AppDelegate subscribes to
+  `didWakeNotification`; on wake, the orchestrator sends a
+  light-touch probe through the engine pipe. If the probe
+  throws (engine pipe died), the orchestrator records a
+  `lastError` rendered in the HeaderView banner (per
+  v0.1.7.17 UX-F#1) telling the user to click Stop and
+  restart their mode.
+- **Sw#C4 partial (high) — Rust Core update SHA-256 pinning.**
+  Previously, only the `.app` self-updater pinned SHA. Now
+  RustCoreUpdater also: downloads the
+  `Cool-tunnel-vX.Y.Z.sha256` manifest in parallel with the
+  engine binary; parses the line for the
+  `cool-tunnel-core-vX.Y.Z-universal` asset; refuses to adopt
+  on hash mismatch or missing manifest. Releases without the
+  manifest are skipped, not adopted unverified. The
+  infrastructure side already shipped in v0.1.7.12's
+  `package_release.sh` — every release manifest from then on
+  has included the engine line. Closes the
+  equivalent-of-Sw#C4 gap for the engine surface.
+  - New file: `SystemIntegration/SHAVerifier.swift` — extracted
+    from AppUpdater so both updaters share the streaming-SHA
+    + manifest-parser primitives
+  - `RustCoreUpdater.resolveLatestAsset` returns
+    `(tag, downloadURL, manifestURL, assetName)` instead of
+    `(tag, downloadURL)` — minimal API surface change
+
+### Verification
+
+- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
+  concurrency
+- 104 lib + 18 chaos Rust tests still green (no Rust changes
+  this release)
+
+### Deferred from the 6-high cluster (3 items)
+
+These need infrastructure work that doesn't fit one session:
+
+- **NaiveProxy SHA pinning** — requires Cool Tunnel-published
+  manifest of "trusted upstream Naive versions and hashes".
+  Generating that manifest requires manual verification per
+  upstream release; the in-app updater would then download
+  both upstream's binary and our manifest. **Targeted for
+  v0.1.8.**
+- **Password Secret newtype + zeroize** — replaces Swift
+  `String` storage with a `Secret` newtype that holds bytes
+  and zeros them in deinit. Touches CredentialStore,
+  FileCredentialStore, KeychainStore, plus every caller. Risk
+  too high without test coverage to confirm no regression
+  (which is the next item). **Targeted for v0.1.8 after the
+  test target lands.**
+- **Swift test target** — Adding XCTest target requires
+  pbxproj editing that's risky to do without Xcode UI in a
+  single session. **Targeted for v0.1.8** as architectural
+  work, prerequisite for Password Secret newtype.
+
 ## [0.1.7.17] — 2026-05-04 (LTSC patch — 100+ findings, 8 land)
 
 LTSC patch on v0.1.7 line. Eight specialized review agents in

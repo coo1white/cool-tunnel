@@ -195,6 +195,14 @@ public final class TunnelOrchestrator {
     public func bootstrapIfNeeded() async {
         guard !didBootstrap else { return }
 
+        // **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep
+        // BEFORE any other startup work. If the previous run
+        // died with system proxy enabled, the user's network
+        // is currently broken — disable the proxy first so
+        // `firewall.currentState()` and any subsequent
+        // network-touching calls actually work.
+        await recoverFromCrashIfNeeded()
+
         profiles = profileStore.loadProfiles()
         selectedProfileID = profileStore.loadSelectedID() ?? profiles.first?.id
         settings = settingsStore.load()
@@ -266,6 +274,11 @@ public final class TunnelOrchestrator {
         eventTask?.cancel()
         eventTask = nil
         try? await proxyController.disableAll()
+        // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel after
+        // clean disable so next launch's recovery scan doesn't
+        // fire spuriously.
+        ProxyActiveFlag.clear(
+            at: ProxyActiveFlag.path(in: paths.supportDirectory))
         await core.stop()
         activeMode = .stopped
         isRunning = false
@@ -392,6 +405,10 @@ public final class TunnelOrchestrator {
     /// always informative for explicit stops.
     private func stopQuiet() async {
         try? await proxyController.disableAll()
+        // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
+        // clean stop. Same reasoning as `shutdown()`.
+        ProxyActiveFlag.clear(
+            at: ProxyActiveFlag.path(in: paths.supportDirectory))
         do {
             _ = try await core.send(.stopProxy)
         } catch {
@@ -497,10 +514,25 @@ public final class TunnelOrchestrator {
         switch mode {
         case .smart:
             try await proxyController.enableSmartPAC(pacURL: paths.pacFile)
+            // **Lifecycle-F#16 (v0.1.7.18):** write the
+            // proxy-active sentinel so a crash before
+            // `disableAll()` runs is recoverable on next launch.
+            ProxyActiveFlag.write(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory),
+                mode: "smart"
+            )
         case .global:
             try await proxyController.enableGlobalSOCKS(port: port)
+            ProxyActiveFlag.write(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory),
+                mode: "global"
+            )
         case .localOnly:
             try await proxyController.disableAll()
+            // local mode doesn't touch system proxy — clear
+            // any stale flag from a previous mode run.
+            ProxyActiveFlag.clear(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory))
         case .stopped:
             break
         }
@@ -523,6 +555,10 @@ public final class TunnelOrchestrator {
         // exit point keeps the user-facing behaviour clean.
         guard isRunning || activeMode != .stopped else { return }
         try? await proxyController.disableAll()
+        // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
+        // user-initiated stop.
+        ProxyActiveFlag.clear(
+            at: ProxyActiveFlag.path(in: paths.supportDirectory))
         do {
             _ = try await core.send(.stopProxy)
         } catch {
@@ -531,6 +567,51 @@ public final class TunnelOrchestrator {
         activeMode = .stopped
         isRunning = false
         appendInfo("stopped")
+    }
+
+    /// **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep.
+    /// Called by AppDelegate before any other startup work. If
+    /// the proxy-active sentinel exists, the previous run died
+    /// without disabling — force-disable the system proxy now
+    /// so the user gets a working network on launch.
+    public func recoverFromCrashIfNeeded() async {
+        let flagURL = ProxyActiveFlag.path(in: paths.supportDirectory)
+        guard ProxyActiveFlag.existsIndicatingCrash(at: flagURL) else {
+            return
+        }
+        let payload = ProxyActiveFlag.readPayload(at: flagURL)
+        appendInfo(
+            "previous run crashed with system proxy enabled" +
+            (payload.map { " (mode=\($0.mode))" } ?? "") +
+            " — reverting"
+        )
+        try? await proxyController.disableAll()
+        ProxyActiveFlag.clear(at: flagURL)
+    }
+
+    /// **UX-F#4 (v0.1.7.18):** called by AppDelegate when the
+    /// system wakes from sleep. If the proxy is still nominally
+    /// running, send a probe through it; if the probe fails the
+    /// connection became zombie during sleep (TCP keepalives
+    /// dropped, naive's upstream was reset). Surface a
+    /// `lastError` so the user sees the dead-proxy state in the
+    /// HeaderView banner instead of trusting the still-pink
+    /// status pill.
+    public func handleSystemDidWake() async {
+        guard isRunning, activeMode != .stopped, activeMode != .localOnly else {
+            return
+        }
+        appendInfo("system woke from sleep — probing engine health")
+        do {
+            // Light-touch probe: send a `Ping`-equivalent — the
+            // existing diagnostics is heavier than we need here.
+            // Use the same validate-profile path the start flow
+            // uses; if the engine pipe is dead, this throws.
+            guard let profile = selectedProfile else { return }
+            _ = try await core.send(.validateProfile(profile))
+        } catch {
+            recordError("connection became unresponsive while system slept — click Stop, then restart your mode")
+        }
     }
 
     public func runDiagnostics() async {
