@@ -53,10 +53,14 @@ software or the use or other dealings in the software.
 ## No data collection
 
 COOL TUNNEL does not collect, transmit, or analyse any user data. There is
-no telemetry, no analytics, and no remote configuration. Proxy credentials
-are stored on the user's device — passwords in the macOS Keychain, the rest
-in the standard `UserDefaults` store. The application does not contact any
-remote service except the SOCKS upstream you configure yourself.
+no telemetry, no analytics, and no remote configuration. Credentials are
+stored on the user's device in
+`~/Library/Application Support/COOL-TUNNEL/credentials.json` (POSIX mode
+0600, parent directory mode 0700) — no Keychain entries, no `UserDefaults`
+password storage. The application does not contact any remote service
+except the NaiveProxy server you configure yourself, plus
+`api.github.com` / `objects.githubusercontent.com` when you click the
+in-app Update buttons in Settings.
 
 ## Bundled components
 

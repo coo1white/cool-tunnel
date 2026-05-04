@@ -35,16 +35,24 @@
 
 import Foundation
 import Observation
+import os
+
+/// Module-level logger. **Cross-F#2 (v0.1.7.16):** added so
+/// security-relevant rejects (untrusted host, oversize, network
+/// failure) leave a trace support can find via
+/// `log show --predicate 'subsystem == "space.coolwhite.cooltunnel"
+/// AND category == "RustCoreUpdater"'`.
+private let rustCoreUpdaterLogger = Logger.cooltunnel("RustCoreUpdater")
 
 /// Live state of an in-flight or finished Rust core update.
 /// `@Observable` so the Settings view re-renders as the updater
 /// advances through the pipeline without manual binding plumbing.
 @MainActor
 @Observable
-public final class RustCoreUpdater {
+final class RustCoreUpdater {
 
     /// What the updater is doing right now.
-    public enum State: Sendable, Equatable {
+    enum State: Sendable, Equatable {
         case idle
         case resolvingRelease
         case downloading(progress: Double)
@@ -56,22 +64,22 @@ public final class RustCoreUpdater {
         case failed(message: String)
     }
 
-    public private(set) var state: State = .idle
-    public private(set) var lastInstalledTag: String?
+    private(set) var state: State = .idle
+    private(set) var lastInstalledTag: String?
 
     private let supportDirectory: URL
 
-    public init(supportDirectory: URL) {
+    init(supportDirectory: URL) {
         self.supportDirectory = supportDirectory
     }
 
-    public convenience init(paths: AppSupportPaths) {
+    convenience init(paths: AppSupportPaths) {
         self.init(supportDirectory: paths.supportDirectory)
     }
 
     /// Stable target path. Used by Settings as the value to write
     /// into `customRustCorePath` after a successful update.
-    public var installedURL: URL {
+    var installedURL: URL {
         supportDirectory.appendingPathComponent(
             "cool-tunnel-core-managed",
             isDirectory: false
@@ -81,7 +89,7 @@ public final class RustCoreUpdater {
     /// Kicks off the update. Re-entry while a previous run is
     /// in flight is a no-op so the state machine stays monotonic.
     @discardableResult
-    public func update() async -> URL? {
+    func update() async -> URL? {
         switch state {
         case .resolvingRelease, .downloading, .installing:
             return nil
@@ -119,7 +127,7 @@ public final class RustCoreUpdater {
         }
     }
 
-    public func reset() {
+    func reset() {
         switch state {
         case .resolvingRelease, .downloading, .installing:
             return
@@ -215,15 +223,24 @@ public final class RustCoreUpdater {
     private static func download(url: URL, to destination: URL) async throws -> URL {
         do {
             return try await GitHubRedirectGuard.download(url: url, to: destination)
-        } catch is UntrustedGitHubHostError {
+        } catch let untrusted as UntrustedGitHubHostError {
+            rustCoreUpdaterLogger.error(
+                "untrusted host: \(untrusted.url.absoluteString, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."
             )
-        } catch is OversizeDownloadError {
+        } catch let oversize as OversizeDownloadError {
+            rustCoreUpdaterLogger.error(
+                "oversize download: actual=\(oversize.actual, privacy: .public) cap=\(oversize.cap, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "Download exceeded the size limit; refusing to install."
             )
         } catch {
+            rustCoreUpdaterLogger.warning(
+                "download failure: \(error.localizedDescription, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "Couldn't download the engine binary. Check your internet connection and try Update again."
             )

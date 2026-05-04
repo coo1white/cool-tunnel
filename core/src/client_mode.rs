@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use cool_tunnel_core::config::{generate_pac, NaiveConfig};
 use cool_tunnel_core::diagnostics::{run_diagnostics, run_latency};
+use cool_tunnel_core::domain::Profile;
 use cool_tunnel_core::monitor;
 use cool_tunnel_core::protocol::{
     AnomalyReason, ErrorPayload, Event, Outbound, Request, RequestKind, ResponsePayload,
@@ -321,11 +322,28 @@ async fn dispatch(
     events: mpsc::Sender<Event>,
 ) -> Result<ResponsePayload, ErrorPayload> {
     match kind {
-        RequestKind::ValidateProfile { profile: _ } => {
-            Ok(ResponsePayload::Validation(ValidationReport {
-                ok: true,
-                reason: None,
-            }))
+        // **Rust-F#1 (v0.1.7.16):** previously this arm took
+        // `profile: Profile` (already-validated by serde at
+        // deserialization time), which made the `ok: false`
+        // branch of `ValidationReport` structurally unreachable
+        // — exactly the SM-3 issue server_mode.rs hardened. The
+        // wire variant now carries a `RawProfile`; the validator
+        // runs here, returning a real `ok: false` with a
+        // scrubbed reason on failure (full error to logs only).
+        RequestKind::ValidateProfile { profile: raw } => {
+            match Profile::try_from(raw) {
+                Ok(_) => Ok(ResponsePayload::Validation(ValidationReport {
+                    ok: true,
+                    reason: None,
+                })),
+                Err(err) => {
+                    tracing::warn!(error = %err, "validate_profile: rejected");
+                    Ok(ResponsePayload::Validation(ValidationReport {
+                        ok: false,
+                        reason: Some("invalid profile".to_owned()),
+                    }))
+                }
+            }
         }
         RequestKind::GenerateNaiveConfig { profile } => {
             let config = NaiveConfig::from_profile(&profile);
@@ -412,12 +430,22 @@ async fn dispatch(
         // *only* if added to `protocol.rs` without bumping the lib
         // version — anyone adding a `RequestKind` variant should
         // add a real arm above and let this fall through unused.
-        kind => Err(ErrorPayload::new(
-            "unimplemented_method",
-            format!(
-                "this engine version does not implement the requested method: {kind:?}"
-            ),
-        )),
+        // **Rust-F#4 (v0.1.7.16):** the wildcard previously
+        // returned `format!("...{kind:?}")`, embedding the
+        // entire (unknown future) `RequestKind` Debug
+        // representation in the wire payload. Today's variants
+        // carry redacted types (Profile, paths, ports), but
+        // the wildcard exists for forward-compat — the case
+        // where Debug content is unknown. Now the wire body is
+        // a stable, payload-free string; the unknown variant
+        // goes to logs only.
+        kind => {
+            tracing::warn!(?kind, "unimplemented_method requested by client");
+            Err(ErrorPayload::new(
+                "unimplemented_method",
+                "this engine version does not implement the requested method".to_owned(),
+            ))
+        }
     }
 }
 

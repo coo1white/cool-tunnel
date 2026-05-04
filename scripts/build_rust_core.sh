@@ -83,7 +83,13 @@ build_target() {
     # Bash 3.2 (the macOS default) chokes on `${arr[@]}` when the array
     # is empty under `set -u`; the `${arr[@]+"${arr[@]}"}` idiom expands
     # to nothing in that case instead of raising "unbound variable".
-    if ! "${CARGO}" build ${FLAGS[@]+"${FLAGS[@]}"} --target "${target}" --bin cool-tunnel-core; then
+    # **Shell-F#5 (v0.1.7.16):** `--locked` makes the build refuse
+    # to silently regenerate `Cargo.lock` if it's out of date.
+    # The LTSC posture treats Cargo.lock as a release artefact;
+    # without `--locked`, a missing or stale lockfile would be
+    # silently regenerated against newer transitive deps,
+    # defeating reproducibility.
+    if ! "${CARGO}" build --locked ${FLAGS[@]+"${FLAGS[@]}"} --target "${target}" --bin cool-tunnel-core; then
         echo "error: cargo build failed for ${target}" >&2
         exit 2
     fi
