@@ -13,84 +13,94 @@
 // it exists, currently only on AppUpdater) protects the *content*
 // of the .zip but anchors trust in the manifest URL — and the
 // manifest URL itself was being followed through unrestricted
-// redirects until v0.1.7.11. v0.1.7.13 (R-F#4) extracts the
-// AppUpdater-only fix into this shared module so the sibling
-// updaters get the same trust boundary for free.
+// redirects until v0.1.7.11.
 //
 // What this module provides:
 //
 //   - `isTrustedGitHubURL(_:)`: HTTPS + host-suffix check.
 //     Acceptable hosts: `*.github.com`, `*.githubusercontent.com`,
-//     and the bare suffixes themselves. Used at TWO seams:
-//     1. After decoding `browser_download_url` JSON, before
-//        passing it to `URLSession.download`. (AU-2 / R-F#4.)
-//     2. Inside `GitHubRedirectGuard` for any HTTP redirect
-//        encountered mid-flight. (AU-3 / R-F#4.)
+//     and the bare suffixes themselves. Used at the JSON-decode
+//     seam (validate `browser_download_url` before any download)
+//     and inside `GitHubRedirectGuard` for any HTTP redirect.
 //
-//   - `GitHubRedirectGuard`: a `URLSessionTaskDelegate` that
-//     constrains redirect targets to the same host-suffix list.
-//     Pass to `URLSession.shared.data(for:delegate:)` /
+//   - `GitHubRedirectGuard.shared`: a stateless singleton
+//     `URLSessionTaskDelegate` that constrains redirect targets
+//     to the same host-suffix list. Pass to
+//     `URLSession.shared.data(for:delegate:)` /
 //     `URLSession.shared.download(for:delegate:)` (per-task
 //     delegate, macOS 12+).
 //
-// A single `Sendable` instance is shared across all callers — the
-// class has zero stored properties, so re-allocating per request
-// (which the code did before E-F#3) was wasted work.
+//   - `GitHubRedirectGuard.download(url:to:)`: full
+//     host-validated, redirect-guarded download into a per-pipeline
+//     `tempRoot`. NaiveUpdater + RustCoreUpdater share the
+//     primitive; AppUpdater stays bespoke because it adds a
+//     per-asset size cap (.sha256 1 MB / .zip 100 MB) that the
+//     other two don't need.
 
 import Foundation
 import os
 
-/// Shared logger for cross-updater trust events. Subsystem
-/// matches the project-wide `space.coolwhite.cooltunnel` used by
-/// `CoreClient`; category is dedicated so support filtering via
-/// `log show --predicate 'category == "GitHubTrust"'` surfaces
-/// only the trust-boundary trace and not the per-updater chatter.
-private let trustLogger = Logger(
-    subsystem: "space.coolwhite.cooltunnel",
-    category: "GitHubTrust"
-)
+extension Logger {
+    /// **R-F#1:** project-wide Logger factory. Three sites
+    /// previously spelled out
+    /// `Logger(subsystem: "space.coolwhite.cooltunnel", category: ...)`
+    /// — `CoreClient.logger`, `AppUpdater.appUpdaterLogger`, and
+    /// `GitHubTrust.trustLogger` — each carrying the subsystem
+    /// string as a literal. The orphan-subsystem regression that
+    /// R-F#2 just fixed (the legacy `"com.cool-tunnel.app"`
+    /// string) becomes structurally impossible when there's only
+    /// one place that knows the subsystem identifier.
+    static func cooltunnel(_ category: String) -> Logger {
+        Logger(subsystem: "space.coolwhite.cooltunnel", category: category)
+    }
+}
+
+/// Thrown by `GitHubRedirectGuard.download` when the supplied
+/// URL fails `isTrustedGitHubURL`. Distinct from generic
+/// `URLError` so callers can pattern-match on the trust-boundary
+/// reject specifically.
+struct UntrustedGitHubHostError: Error, Sendable {
+    let url: URL
+}
 
 /// Hosts we trust to serve GitHub release assets. Matched as
 /// case-insensitive suffixes (entry equals host, OR host ends in
 /// `"." + entry`). Keep this list short and explicit — every
 /// addition expands the trust boundary.
-///
-/// `static let` so the literal allocates once at first use and
-/// every call site shares the storage. (E-F#3 fix — the prior
-/// AppUpdater-internal copy was a function-local `let suffixes
-/// = [...]` that re-allocated on every redirect callback and
-/// every asset URL validation.)
 private let trustedHostSuffixes: [String] = [
     "github.com",
     "githubusercontent.com",
 ]
 
 /// Returns true if `url` is HTTPS and its host is on the trusted
-/// GitHub-served suffix list. Used by all three updaters before
-/// handing a URL to `URLSession.download`, AND inside
-/// `GitHubRedirectGuard` for mid-flight redirect decisions.
+/// GitHub-served suffix list.
 ///
 /// The HTTPS check is non-negotiable: a release URL that
 /// downgrades to `http://` or any non-https scheme is rejected
-/// outright, regardless of host. This defends against an upstream
-/// API response that opts users into plaintext (TLS-strip /
-/// downgrade attacks).
+/// outright. This defends against an upstream API response that
+/// opts users into plaintext (TLS-strip / downgrade attacks).
+///
+/// **E-F#3 (v0.1.7.14):** dropped the `.lowercased()` calls on
+/// `url.scheme` and `url.host`. Both are already canonicalised
+/// to lowercase by Foundation per RFC 3986 §3.1 (scheme) and
+/// §3.2.2 (host); the explicit lowercase was wasted allocation.
 func isTrustedGitHubURL(_ url: URL) -> Bool {
-    guard url.scheme?.lowercased() == "https" else { return false }
-    guard let host = url.host?.lowercased() else { return false }
+    guard url.scheme == "https" else { return false }
+    guard let host = url.host else { return false }
     return trustedHostSuffixes.contains { host == $0 || host.hasSuffix("." + $0) }
 }
 
 /// `URLSessionTaskDelegate` that constrains HTTP redirects to the
-/// trusted GitHub-served host suffix list.
+/// trusted GitHub-served host suffix list, AND a static
+/// `download(url:to:)` helper that does the full host-validated +
+/// redirect-guarded download.
 ///
-/// Why this matters: SHA pinning protects the .zip's *content*
-/// but TRUSTS the manifest URL (which defines the expected
-/// hash). A CDN takeover, misconfigured GitHub edge redirect,
-/// or attacker-shaped API response that pointed the manifest
-/// fetch at a non-GitHub host would defeat SHA pinning by
-/// substituting the verification root-of-trust. This delegate
-/// rejects any redirect whose target isn't on the trusted list.
+/// Why the redirect guard matters: SHA pinning protects the
+/// .zip's *content* but TRUSTS the manifest URL. A CDN takeover,
+/// misconfigured GitHub edge redirect, or attacker-shaped API
+/// response that pointed the manifest fetch at a non-GitHub host
+/// would defeat SHA pinning by substituting the verification
+/// root-of-trust.
 ///
 /// NaiveUpdater + RustCoreUpdater don't currently SHA-pin
 /// (deferred to v0.2.0 per `AppUpdater.swift` Sw#C4 comment) but
@@ -98,13 +108,11 @@ func isTrustedGitHubURL(_ url: URL) -> Bool {
 /// takeover for `objects.githubusercontent.com` could substitute
 /// the binary entirely, with the user-visible URL unchanged.
 ///
-/// Class is `final` and stateless; a single shared instance
-/// (`GitHubRedirectGuard.shared`) services every URLSession task
-/// across all three updaters.
+/// Class is `final` and stateless; `GitHubRedirectGuard.shared`
+/// is a singleton servicing every URLSession task across all
+/// three updaters.
 final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    /// Shared singleton. Stateless `final` class with no stored
-    /// properties — sharing is sound and avoids the per-request
-    /// allocation E-F#3 flagged. The `@unchecked` is required by
+    /// Shared singleton. The `@unchecked` is required by
     /// `NSObject` ancestor (which is not itself `Sendable`); it
     /// is safe here because there is no mutable state.
     static let shared = GitHubRedirectGuard()
@@ -125,14 +133,51 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
         if let url = request.url, isTrustedGitHubURL(url) {
             completionHandler(request)
         } else {
-            // Reject the redirect. URLSession surfaces this as
-            // the response that *would have been* the redirect
-            // (the 3xx) — the caller's status check (we want
-            // 200) catches it.
-            trustLogger.info(
+            Logger.cooltunnel("GitHubTrust").info(
                 "redirect rejected: \(request.url?.absoluteString ?? "<nil>", privacy: .public)"
             )
             completionHandler(nil)
         }
+    }
+
+    /// **R-F#2 (v0.1.7.14):** shared host-validated, redirect-
+    /// guarded download. Replaces the line-for-line-twin
+    /// `download(url:to:)` methods that NaiveUpdater and
+    /// RustCoreUpdater carried. AppUpdater keeps its own
+    /// inline because it layers a per-asset size cap that
+    /// these callers don't need.
+    ///
+    /// Validates `url` against `isTrustedGitHubURL`, builds a
+    /// URLRequest, downloads via the shared redirect guard,
+    /// asserts HTTP 200, and moves the temp file into
+    /// `destination`. `destination` is assumed to live in a
+    /// per-pipeline `tempRoot` (each call site pre-creates a
+    /// fresh `mkdtemp`-style directory) — the move is
+    /// unconditional, no `fileExists`/`removeItem` pre-check
+    /// (E-F#6 anti-pattern eliminated here too).
+    ///
+    /// Throws `UntrustedGitHubHostError` if the host check
+    /// fails; otherwise propagates `URLSession`/`FileManager`
+    /// errors to the caller for them to wrap in their own
+    /// updater error type.
+    static func download(url: URL, to destination: URL) async throws -> URL {
+        guard isTrustedGitHubURL(url) else {
+            throw UntrustedGitHubHostError(url: url)
+        }
+        let request = URLRequest(url: url)
+        let (tempURL, response) = try await URLSession.shared.download(
+            for: request, delegate: GitHubRedirectGuard.shared
+        )
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(
+                .badServerResponse,
+                userInfo: [
+                    NSURLErrorFailingURLErrorKey: url,
+                    "statusCode": (response as? HTTPURLResponse)?.statusCode ?? -1,
+                ]
+            )
+        }
+        try FileManager.default.moveItem(at: tempURL, to: destination)
+        return destination
     }
 }
