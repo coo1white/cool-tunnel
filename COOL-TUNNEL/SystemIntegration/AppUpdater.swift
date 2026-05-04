@@ -711,20 +711,11 @@ final class AppUpdater {
         }
     }
 
-    /// Streams `fileURL` through CryptoKit's incremental SHA-256
-    /// in 64 KiB chunks. AU-4: avoids `Data(contentsOf:)` which
-    /// loads the full file into memory and (when this method ran
-    /// on @MainActor) froze the UI on slow disks.
+    /// **v0.1.7.18:** delegates to `SHAVerifier.sha256(of:)`,
+    /// extracted so RustCoreUpdater can share the same
+    /// streaming-hash primitive for its own manifest pinning.
     nonisolated private static func sha256(of fileURL: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while true {
-            let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()
-            if chunk.isEmpty { break }
-            hasher.update(data: chunk)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        try SHAVerifier.sha256(of: fileURL)
     }
 
     /// Uses `/usr/bin/ditto -x -k` to extract the .zip preserving

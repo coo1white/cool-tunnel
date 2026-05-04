@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated override init() { super.init() }
 
     private var commandWMonitor: Any?
+    private var wakeObserver: NSObjectProtocol?
 
     /// Set by the SwiftUI scene's `.task` once bootstrap finishes.
     /// `applicationWillTerminate` reads it to perform a clean
@@ -30,6 +31,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installCommandWHandler()
+        installSleepWakeHandlers()
+    }
+
+    /// **UX-F#4 (v0.1.7.18):** subscribe to
+    /// `NSWorkspace.didWakeNotification` so the orchestrator
+    /// can probe engine health after the system returns from
+    /// sleep. Without this, a Mac that sleeps for >30 minutes
+    /// often has its TCP keepalives dropped — `naive` is alive
+    /// but every browser request stalls because the upstream
+    /// connection is dead, and the UI keeps showing "Active"
+    /// with no recovery hint. The orchestrator surfaces a
+    /// clear `lastError` (rendered in `HeaderView` per
+    /// v0.1.7.17 UX-F#1) so the user knows to restart the mode.
+    private func installSleepWakeHandlers() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // The closure is delivered on `.main` queue.
+            // Hop into a `@MainActor` Task so the
+            // `self?.orchestrator` read is actor-isolated
+            // (Swift 6 strict concurrency forbids the read
+            // directly inside this Sendable closure).
+            Task { @MainActor [weak self] in
+                guard let orchestrator = self?.orchestrator else { return }
+                await orchestrator.handleSystemDidWake()
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -132,6 +162,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 && window.styleMask.contains(.titled)
         }
     }
+
+    // **UX-F#4 (v0.1.7.18):** no `deinit`-based observer
+    // cleanup. Swift 6 strict concurrency forbids accessing
+    // `@MainActor`-isolated stored properties from a
+    // `nonisolated` deinit, and AppDelegate is process-lived
+    // so the observer leak is purely theoretical (it goes
+    // away when the process exits anyway). If we ever build
+    // a test harness that creates/destroys AppDelegate
+    // instances, add a `tearDown(_:)` method that explicitly
+    // removes the observer on the main actor.
 
     private func installCommandWHandler() {
         commandWMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { @MainActor event in
