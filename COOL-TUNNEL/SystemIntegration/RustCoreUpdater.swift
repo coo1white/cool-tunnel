@@ -147,7 +147,15 @@ public final class RustCoreUpdater {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-Updater", forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        // **R-F#4 (v0.1.7.13):** redirect guard from
+        // `GitHubTrust.swift`. Same threat model as
+        // `NaiveUpdater`: no SHA pinning today (deferred to
+        // v0.2.0 per AppUpdater Sw#C4), so the redirect guard is
+        // the only barrier against a compromised CDN or upstream
+        // redirect serving a substituted engine binary.
+        let (data, response) = try await URLSession.shared.data(
+            for: request, delegate: GitHubRedirectGuard.shared
+        )
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw RustUpdaterError.message(
                 "Couldn't reach GitHub to look up the latest Cool Tunnel release. Check your internet connection and try again."
@@ -176,6 +184,18 @@ public final class RustCoreUpdater {
             if let asset = release.assets.first(where: {
                 $0.name.hasPrefix("cool-tunnel-core-v") && $0.name.hasSuffix("-universal")
             }) {
+                // **R-F#4:** validate the asset URL is on a
+                // trusted GitHub-served host before returning.
+                // `browser_download_url` is attacker-influenceable
+                // through a compromised API response; without
+                // this check (or SHA pinning, which RustCore
+                // doesn't have yet), a wrong host could substitute
+                // the engine binary entirely.
+                guard isTrustedGitHubURL(asset.browserDownloadURL) else {
+                    throw RustUpdaterError.message(
+                        "GitHub returned an engine asset URL on an unexpected host. Refusing to update."
+                    )
+                }
                 return (release.tagName, asset.browserDownloadURL)
             }
         }
@@ -185,7 +205,16 @@ public final class RustCoreUpdater {
     }
 
     private static func download(url: URL, to destination: URL) async throws -> URL {
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
+        // **R-F#4:** redirect guard + host check.
+        guard isTrustedGitHubURL(url) else {
+            throw RustUpdaterError.message(
+                "Refusing to download from non-GitHub host."
+            )
+        }
+        let request = URLRequest(url: url)
+        let (tempURL, response) = try await URLSession.shared.download(
+            for: request, delegate: GitHubRedirectGuard.shared
+        )
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw RustUpdaterError.message(
                 "Couldn't download the engine binary. Check your internet connection and try Update again."
