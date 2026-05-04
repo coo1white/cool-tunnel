@@ -91,7 +91,14 @@ public enum RestrictedFile {
     /// and explicit `0600`, write all bytes, fsync, then rename.
     /// `0600` is established at creation time; the rename is
     /// atomic; no chmod-after-rename race exists.
-    public static func write(_ data: Data, to url: URL) throws {
+    /// **v0.1.7.13 (R-F#1):** added `mode` parameter so callers
+    /// that need a different POSIX mode (e.g. an executable
+    /// helper script at `0o700`) can reuse the atomic
+    /// `O_CREAT|O_EXCL` + write + fsync + rename primitive
+    /// instead of reimplementing it. Default `0o600` preserves
+    /// the credentials-file behaviour every existing caller
+    /// expects.
+    public static func write(_ data: Data, to url: URL, mode: mode_t = 0o600) throws {
         let parent = url.deletingLastPathComponent().path
         // Use a randomised temp filename in the same directory so
         // `rename(2)` stays on the same filesystem (atomic) and so
@@ -99,7 +106,7 @@ public enum RestrictedFile {
         // collide on a fixed name.
         let tempURL = url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
-        let fd = open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        let fd = open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL, mode)
         guard fd >= 0 else {
             throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
         }

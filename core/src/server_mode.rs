@@ -87,7 +87,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use cool_tunnel_core::config::{generate_pac, NaiveConfig};
-use cool_tunnel_core::domain::{Port, Profile};
+use cool_tunnel_core::domain::{Port, Profile, ServerAddress};
 use cool_tunnel_core::protocol::ValidationReport;
 use serde::{Deserialize, Serialize};
 
@@ -316,7 +316,14 @@ const MAX_PAC_DOMAINS: usize = 1024;
 /// matched as suffixes (`dnsDomainIs(host, domain)`) so anything
 /// longer than a real hostname is wasted — and provides an
 /// inflation vector in `format!`.
-const MAX_PAC_DOMAIN_BYTES: usize = 253;
+///
+/// **v0.1.7.13 (R-F#3):** delegates to
+/// [`ServerAddress::MAX_LEN`] so the RFC limit lives in exactly
+/// one place. The `domain` crate's `ServerAddress::parse` already
+/// enforces the same number against the `Profile`'s `server`
+/// field; pinning both call sites to the same constant
+/// eliminates drift if the limit is ever revised.
+const MAX_PAC_DOMAIN_BYTES: usize = ServerAddress::MAX_LEN;
 
 async fn naive_pac(
     body: Result<Json<NaivePacRequest>, JsonRejection>,

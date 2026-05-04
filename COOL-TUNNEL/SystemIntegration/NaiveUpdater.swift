@@ -194,6 +194,17 @@ public final class NaiveUpdater {
                 "internal error: constructed invalid release URL: \(urlString)"
             )
         }
+        // **R-F#4:** defence-in-depth check that the URL we
+        // constructed (or any future upstream-derived URL plumbed
+        // through here) is HTTPS and on a GitHub-served host.
+        // Today the URL template is hardcoded so this is
+        // belt-and-braces; cheap, and aligns with the
+        // AppUpdater AU-2 trust boundary.
+        guard isTrustedGitHubURL(url) else {
+            throw UpdaterError.message(
+                "internal error: release URL is not on a trusted GitHub host: \(urlString)"
+            )
+        }
         return url
     }
 
@@ -215,7 +226,17 @@ public final class NaiveUpdater {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-Updater", forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        // **R-F#4 (v0.1.7.13):** the redirect guard from
+        // `GitHubTrust.swift` constrains any HTTP redirect this
+        // request encounters to trusted GitHub-served hosts.
+        // Without it, a CDN takeover or upstream redirect
+        // misconfiguration could substitute the response body —
+        // and NaiveUpdater has no SHA pinning today (deferred to
+        // v0.2.0 per Sw#C4), so the redirect guard is the ONLY
+        // line of defence between an attacker and the binary.
+        let (data, response) = try await URLSession.shared.data(
+            for: request, delegate: GitHubRedirectGuard.shared
+        )
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw UpdaterError.message(
                 "Couldn't reach GitHub to look up the latest NaiveProxy release. Check your internet connection and try again."
@@ -252,7 +273,18 @@ public final class NaiveUpdater {
     /// report real progress; deferred to keep the LTSC patch surface
     /// small.
     private static func download(url: URL, to destination: URL) async throws -> URL {
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
+        // **R-F#4:** redirect guard + host check. See the
+        // `assetURL` and `resolveLatestStableTag` notes for
+        // why this matters even without SHA pinning.
+        guard isTrustedGitHubURL(url) else {
+            throw UpdaterError.message(
+                "Refusing to download from non-GitHub host."
+            )
+        }
+        let request = URLRequest(url: url)
+        let (tempURL, response) = try await URLSession.shared.download(
+            for: request, delegate: GitHubRedirectGuard.shared
+        )
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw UpdaterError.message(
                 "Couldn't download \(url.lastPathComponent). Check your internet connection and try Update again."

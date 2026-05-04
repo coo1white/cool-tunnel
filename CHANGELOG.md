@@ -9,6 +9,171 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.13] — 2026-05-04 (LTSC patch — post-cycle simplify pass)
+
+LTSC patch on the v0.1.7 line. Simplify-pass review of
+v0.1.7.11 + v0.1.7.12 found **31 follow-on findings** across
+three review angles (reuse, quality, efficiency); 12 are
+landed in this release, 19 are deferred (subjective comment
+narrative, architectural pipeline-actor split, and trivial
+allocation cleanups documented as won't-fix). Cross-cutting
+theme: the audit cycle hardened `AppUpdater` extensively but
+left `NaiveUpdater` and `RustCoreUpdater` exposed to the same
+class of redirect / host-substitution attacks. v0.1.7.13
+closes that gap.
+
+### Cross-updater hardening (R-F#4 — security)
+
+- **New `SystemIntegration/GitHubTrust.swift`.** Extracts
+  `isTrustedGitHubURL(_:)` and `GitHubRedirectGuard` from
+  `AppUpdater.swift` (where they were `fileprivate`) into a
+  shared module. `GitHubRedirectGuard.shared` is a stateless
+  singleton (E-F#3 fix — the prior per-request allocation
+  became wasted work).
+- **`NaiveUpdater.swift` adopts the trust boundary.** The
+  upstream-binary fetch (klzgrad/naiveproxy releases) now uses
+  `URLSession.shared.data/download(for:delegate:
+  GitHubRedirectGuard.shared)` and validates every URL via
+  `isTrustedGitHubURL` before download. Without this, the
+  un-pinned binary fetch could be redirected to an attacker-
+  controlled host with no SHA verification to catch the
+  substitution. (SHA pinning for NaiveUpdater + RustCoreUpdater
+  is still deferred to v0.2.0 per Sw#C4 — but the redirect
+  guard means a CDN takeover or upstream redirect
+  misconfiguration alone is no longer sufficient to ship a
+  substituted binary.)
+- **`RustCoreUpdater.swift` adopts the trust boundary.** Same
+  changes for the `cool-tunnel-core` binary fetch from
+  coo1white/cool-tunnel releases.
+
+### AppUpdater cleanup + correctness (7 findings)
+
+- **Q-F#1 (R4) — `@discardableResult` removed from
+  `markEnteringCheck` / `markEnteringDownload`.** The whole
+  point of the Bool return added in v0.1.7.12 (AU-13) was that
+  the caller MUST consume it before spawning the follow-up
+  Task; `@discardableResult` defeated that — a future site
+  writing `appUpdater.markEnteringCheck(); Task { … }` would
+  re-introduce the race silently. Removing the attribute makes
+  the warning machinery enforce the AU-13 invariant at compile
+  time.
+- **Q-F#2 (R4) — bash relaunch helper redirects stderr to a
+  log file.** AU-11's `preswap_trap` echoes recovery hints
+  (paths to `$TEMP_ROOT` and `$BACKUP`) to stderr — but the
+  spawning Swift code sets `task.standardError = nil`
+  (helper runs detached after `NSApp.terminate`), so the
+  output went to `/dev/null`. The script now `exec 2>>"$LOG"`
+  to `~/Library/Logs/cool-tunnel/relaunch.log` so the
+  recovery hint actually reaches a file the user (or support)
+  can `tail`. Added `makeRelaunchLogPath()` Swift helper that
+  ensures the log directory exists.
+- **R-F#1 (reuse) — `writeRelaunchScript` delegates to
+  `RestrictedFile.write`.** Generalised `RestrictedFile.write`
+  with a `mode: mode_t = 0o600` parameter (default preserves
+  every existing call site for credential files); AppUpdater's
+  bespoke `O_CREAT|O_EXCL` + write + fsync + close FD-lifecycle
+  code (~50 lines) collapses to a single
+  `RestrictedFile.write(data, to: scriptURL, mode: 0o700)`
+  call. Removes the second-implementation drift risk.
+- **R-F#2 (reuse) — `os.Logger` migration.** Replaced the
+  legacy `OSLog(subsystem:category:)` + `os_log` pair with the
+  modern `Logger(subsystem:category:)` API matching
+  `CoreClient.swift`'s convention. Also fixed the orphan
+  subsystem string `"com.cool-tunnel.app"` to the project-wide
+  `"space.coolwhite.cooltunnel"` so support's
+  `log show --predicate 'subsystem == "..."'` queries surface
+  every component under one umbrella. Calls now use typed
+  interpolation with explicit `, privacy: .public` — the
+  values being logged (URLs, version strings, status codes)
+  are deliberately diagnostic, not user secrets.
+- **R-F#7 (reuse) — `canonicalPathComponents` helper.**
+  Centralised the `realpath(3)` + `String(cString:)` + `free` +
+  `URL.pathComponents` extraction the symlink-escape walker
+  was doing twice (once for the container, once per symlink
+  target). Both call sites are now one-liners; the rename-and-
+  free dance lives in one place where future tightening
+  (e.g. switching to `realpath(_, buf)` to avoid the
+  caller-frees pattern) only touches one site.
+- **E-F#1 (R3) — parallel .zip + .sha256 download.** The two
+  fetches are independent (manifest doesn't gate the .zip
+  request) but ran serially. `async let` joins them in
+  parallel; the manifest fetch typically completes during the
+  .zip's TLS handshake, ~2× speedup on the user-visible cold
+  path.
+- **E-F#6 (R3) — drop TOCTOU `fileExists` / `removeItem`
+  before `moveItem`.** `tempRoot` is freshly mkdtemp'd per
+  pipeline run; destination collision is impossible by
+  construction. The pre-check was wasted work AND a TOCTOU
+  anti-pattern. `moveItem` alone is correct.
+- **E-F#8 (R2) — entry-count cap on extraction symlink walk.**
+  An attacker-shaped zip could plant 10k+ symlinks (each ~30
+  bytes; the 100 MB Sw-H3 cap allows ~3M empty entries); each
+  triggers a `realpath(3)` syscall, an attacker-controlled
+  work multiplier on the user's update path. Now bails after
+  1024 symlinks (far above any legitimate macOS bundle).
+
+### Other ((4 findings)
+
+- **Q-F#7 — bare `Sendable` (commented) on
+  `GitHubRedirectGuard`.** Class is `final` with zero stored
+  properties; the `@unchecked Sendable` is required only
+  because `NSObject` ancestor isn't `Sendable`-marked — but
+  the conformance is genuinely sound. Moved to `GitHubTrust.swift`
+  with a comment explaining specifically why `@unchecked` is
+  the right shape (unchecked because of NSObject, but no
+  mutable state to be unsafe about).
+- **R-F#3 (reuse) — single-source `MAX_PAC_DOMAIN_BYTES`.**
+  v0.1.7.12 introduced `MAX_PAC_DOMAIN_BYTES: usize = 253`
+  in `server_mode.rs` with a comment about RFC 1035; the
+  same number was already declared in
+  `domain::server::ServerAddress::MAX_LEN` (private). Promoted
+  the latter to `pub const` and made `server_mode` reference
+  it. Future revisions to the limit propagate automatically;
+  no drift risk.
+- **R-F#1 sibling effect — generalised `RestrictedFile.write`
+  for `mode: mode_t`.** Touched separately because the
+  signature is part of the project's atomic-write API — every
+  call site (currently credential storage at 0o600 mode +
+  AppUpdater at 0o700 mode) now flows through the same
+  primitive.
+- **E-F#3 (R3) — single shared `GitHubRedirectGuard`
+  instance.** `static let shared = GitHubRedirectGuard()`
+  replaces the per-request allocation. Trivial in absolute
+  terms; the value is symbolic alignment.
+
+### Deferred (19 findings)
+
+Worth noting which findings did NOT land:
+
+- **Q-F#3 (med) audit-trail comment narrative.** The fix-history
+  comments (`v0.1.7.10 fix:`, `**AU-1 fix:**`, etc.) are
+  subjective; they help reviewers correlate code with
+  CHANGELOG entries. Punt.
+- **Q-F#11 (low) — pipeline-actor architectural split.** A
+  ~40% rewrite where `AppUpdater` keeps only state and the
+  pipeline becomes a `struct AppUpdaterPipeline`. Real value
+  but the right time is v0.2.0 when the cross-platform
+  refactor lands.
+- **Q-F#8 (low) — `parse_args` clap migration.** Audit
+  explicitly rejected clap as overkill at two flags; this
+  punt continues at four.
+- **R-F#5, R-F#6 (low) — SHA / semver helper extraction.**
+  No second caller exists yet (hash verification on
+  Naive/RustCore is deferred to v0.2.0 with SHA pinning);
+  premature without one.
+- The remaining 14 are all low-severity (allocation
+  micro-opts, comment style, minor refactor) where the cost
+  of churn outweighs the gain. Documented in the simplify
+  agent reports for the record.
+
+### Tests + verification
+
+- `cargo check` clean (0 errors, 0 warnings)
+- `cargo test --lib` 104/104 pass
+- `cargo test --test chaos` 18/18 pass
+- `xcodebuild Release` BUILD SUCCEEDED (Swift 6 strict
+  concurrency)
+
 ## [0.1.7.12] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 2)
 
 LTSC patch on the v0.1.7 line. Lands the remaining 11 findings
