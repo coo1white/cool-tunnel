@@ -266,20 +266,19 @@ final class AppUpdater {
     /// `true` IFF the caller should proceed to spawn the async
     /// follow-up `Task`. Returning the gate decision (rather
     /// than just flipping state and trusting the caller's own
-    /// `isInFlight` check) closes the AU-13 race: previously
-    /// the click handler called
-    ///     guard !appUpdater.isInFlight else { return }
-    ///     appUpdater.markEnteringCheck()
-    ///     Task { await appUpdater.checkForUpdates() }
-    /// and a second click between the no-op `markEnteringCheck`
-    /// (which already saw in-flight) and the unconditional
-    /// `Task` spawn would still queue a second
-    /// `checkForUpdates` call, firing two concurrent network
-    /// requests. Now the spawn is conditional on the actual
-    /// flip succeeding — atomic from the call site since the
-    /// entire sequence runs on `@MainActor` without
-    /// suspension.
-    @discardableResult
+    /// `isInFlight` check) closes the AU-13 race: a second
+    /// click between the no-op `markEnteringCheck` and the
+    /// `Task` spawn would otherwise queue two concurrent
+    /// network requests.
+    ///
+    /// **Q-F#1:** `@discardableResult` is intentionally absent
+    /// — the caller MUST consume the bool. Without this
+    /// constraint a future site that wrote
+    /// `appUpdater.markEnteringCheck(); Task { … }` would
+    /// reintroduce the race silently (no compiler warning).
+    /// Now the type system enforces the design: `Bool` returns
+    /// that aren't bound or branched on emit `result of call
+    /// is unused` warnings, surfacing the bug at review time.
     func markEnteringCheck() -> Bool {
         if isInFlight { return false }
         state = .checking
@@ -288,8 +287,8 @@ final class AppUpdater {
 
     /// Synchronously flips `state` to `.downloading(progress: 0)`
     /// and returns `true` IFF the caller should proceed. Same
-    /// AU-13 race-defeating role as `markEnteringCheck`.
-    @discardableResult
+    /// AU-13 race-defeating role as `markEnteringCheck`; same
+    /// Q-F#1 reasoning for the missing `@discardableResult`.
     func markEnteringDownload() -> Bool {
         if isInFlight { return false }
         state = .downloading(progress: 0.0)
@@ -342,10 +341,12 @@ final class AppUpdater {
 
         // **AU-3:** per-task delegate constrains any HTTP
         // redirect to the trusted GitHub host suffixes.
+        // **E-F#3 / R-F#4:** shared singleton (no per-request
+        // allocation), shared with NaiveUpdater + RustCoreUpdater.
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await URLSession.shared.data(
-                for: request, delegate: GitHubRedirectGuard())
+                for: request, delegate: GitHubRedirectGuard.shared)
         } catch {
             throw UpdaterError.message(
                 "Couldn't reach GitHub. Check your internet connection and try again."
@@ -426,13 +427,17 @@ final class AppUpdater {
         // shaped API response or an upstream change we should
         // pause for, not trust silently.
         guard isTrustedGitHubURL(zipAsset.browserDownloadURL) else {
-            updaterLog("AU-2 reject: zip URL not GitHub-hosted: \(zipAsset.browserDownloadURL)")
+            appUpdaterLogger.info(
+                "zip URL not GitHub-hosted: \(zipAsset.browserDownloadURL, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "GitHub returned a release archive URL on an unexpected host. Refusing to update."
             )
         }
         guard isTrustedGitHubURL(shaAsset.browserDownloadURL) else {
-            updaterLog("AU-2 reject: sha URL not GitHub-hosted: \(shaAsset.browserDownloadURL)")
+            appUpdaterLogger.info(
+                "sha URL not GitHub-hosted: \(shaAsset.browserDownloadURL, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "GitHub returned a SHA-256 manifest URL on an unexpected host. Refusing to update."
             )
@@ -480,12 +485,17 @@ final class AppUpdater {
         let zipURL = tempRoot.appendingPathComponent(release.zipURL.lastPathComponent)
         let shaURL = tempRoot.appendingPathComponent(release.shaManifestURL.lastPathComponent)
 
-        // 3. Download .zip.
-        try await download(release.zipURL, to: zipURL)
+        // **E-F#1:** the .zip and .sha256 fetches are independent
+        // (the manifest doesn't gate the .zip request — both URLs
+        // come from the already-validated GitHub release JSON).
+        // Previously they ran serially, costing ~12 MB + ~250 B
+        // back-to-back ≈ same wall-time as the .zip alone × 2.
+        // `async let` joins them in parallel; the manifest fetch
+        // typically completes during the .zip's TLS handshake.
+        async let zipDownload: () = download(release.zipURL, to: zipURL)
+        async let shaDownload: () = download(release.shaManifestURL, to: shaURL)
+        try await (zipDownload, shaDownload)
         await MainActor.run { report(.verifying) }
-
-        // 4. Download SHA manifest.
-        try await download(release.shaManifestURL, to: shaURL)
 
         // 5–6. Verify SHA-256 against manifest line for the .zip name.
         try verifyZipAgainstManifest(
@@ -534,18 +544,15 @@ final class AppUpdater {
     nonisolated private static let maxDownloadBytes: Int64 = 100 * 1024 * 1024
 
     nonisolated private static func download(_ url: URL, to destination: URL) async throws {
-        // **AU-3:** per-task delegate constrains any redirect to
-        // a trusted GitHub-served host. The browser_download_url
-        // for a release asset has always been served via a
-        // redirect to objects.githubusercontent.com; without
-        // this guard, a CDN takeover or misconfigured GitHub
-        // edge could substitute the asset (or, for the .sha256,
-        // the verification root-of-trust itself).
+        // **AU-3 / R-F#4:** per-task delegate constrains any
+        // redirect to trusted GitHub-served hosts. Shared
+        // singleton with NaiveUpdater + RustCoreUpdater so
+        // the trust boundary lives in one place.
         let request = URLRequest(url: url)
         let (tempURL, response): (URL, URLResponse)
         do {
             (tempURL, response) = try await URLSession.shared.download(
-                for: request, delegate: GitHubRedirectGuard())
+                for: request, delegate: GitHubRedirectGuard.shared)
         } catch {
             throw UpdaterError.message(
                 "Download failed for \(url.lastPathComponent). Check your internet connection and try again."
@@ -554,15 +561,10 @@ final class AppUpdater {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             // **AU-8 (R1):** the user-visible message no longer
             // names the failing artifact (.zip vs .sha256) or
-            // the HTTP status. The asset name is not directly
-            // attacker-controlled but the stage tells an
-            // observer-on-the-wire which artifact failed,
-            // helping calibrate a partial-block attack against
-            // the manifest specifically (which is the SHA-pin
-            // root of trust). Stage-specific detail goes to
+            // the HTTP status. Stage-specific detail goes to
             // os_log for support.
-            updaterLog(
-                "AU-8 download non-200 for \(url.lastPathComponent): \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+            appUpdaterLogger.info(
+                "download non-200 for \(url.lastPathComponent, privacy: .public): \((response as? HTTPURLResponse)?.statusCode ?? -1, privacy: .public)"
             )
             throw UpdaterError.message(
                 "GitHub didn't return the update files. Try again later."
@@ -587,9 +589,12 @@ final class AppUpdater {
                 "\(url.lastPathComponent) exceeded the \(cap / (1024 * 1024)) MB size limit; refusing to install."
             )
         }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try? FileManager.default.removeItem(at: destination)
-        }
+        // **E-F#6:** drop the fileExists/removeItem pre-check
+        // pair (TOCTOU + redundant). `tempRoot` is freshly
+        // mkdtemp'd per pipeline run; destination collision
+        // is impossible by construction. If a future caller
+        // ever passes a pre-existing destination, switch to
+        // `replaceItemAt(_:with:)` which is atomic.
         try FileManager.default.moveItem(at: tempURL, to: destination)
     }
 
@@ -733,38 +738,31 @@ final class AppUpdater {
         try refuseExtractionEscapingSymlinks(in: destination)
     }
 
+    /// **E-F#8 (R2):** hard cap on the number of symbolic links
+    /// the extraction-walker will canonicalise per archive. An
+    /// attacker-shaped zip could plant 10k+ symlinks (each ~30
+    /// bytes; the 100 MB Sw-H3 zip cap allows ~3M empty-target
+    /// entries). Without a count cap the loop performs one
+    /// `realpath(3)` syscall per entry, an attacker-controlled
+    /// work multiplier on the user's update path. 1024 is far
+    /// above any legitimate macOS .app bundle (counts in the
+    /// low double digits) — exceeding it is a structural
+    /// anomaly that justifies a refuse-and-bail.
+    nonisolated private static let maxExtractionSymlinks: Int = 1024
+
     /// Walks `directory` recursively. If any entry is a symbolic
-    /// link whose realpath escapes `directory`, throws.
-    ///
-    /// **AU-5 fix:** the previous implementation used
-    /// `String.hasPrefix(containerPath)`, which produced two
-    /// classes of false negatives:
-    ///   1. Sibling-path collision: `/extracted-evil` passes the
-    ///      prefix check against `/extracted` because there's no
-    ///      trailing separator.
-    ///   2. Symlink target traversal: `URL.resolvingSymlinksInPath()`
-    ///      on a symlink resolves the link itself but does not
-    ///      normalise `..` traversal *through* the resolved
-    ///      target.
-    ///
-    /// Both are fixed by switching to `realpath(3)` (which
-    /// returns a fully-canonical absolute path with all
-    /// interior symlinks resolved and `..` collapsed) and a
-    /// component-wise ancestor check.
+    /// link whose realpath escapes `directory`, throws. AU-5
+    /// (path-component ancestor check) + E-F#8 (entry-count cap)
+    /// + R-F#7 (extracted realpath helper).
     nonisolated private static func refuseExtractionEscapingSymlinks(in directory: URL) throws {
         // Resolve the container to its canonical absolute path
         // so the ancestor check is robust against any symlinks
         // in the tempdir hierarchy (e.g. /var → /private/var on
         // macOS).
-        guard let containerC = realpath(directory.path, nil) else {
-            throw UpdaterError.message(
-                "Couldn't canonicalise extraction directory; refusing to install."
-            )
-        }
-        let containerComponents = URL(
-            fileURLWithPath: String(cString: containerC)
-        ).pathComponents
-        free(containerC)
+        let containerComponents = try canonicalPathComponents(
+            of: directory.path,
+            errorMessage: "Couldn't canonicalise extraction directory; refusing to install."
+        )
 
         guard
             let walker = FileManager.default.enumerator(
@@ -777,6 +775,7 @@ final class AppUpdater {
             // already succeeded) would have noticed the same.
             return
         }
+        var symlinksSeen = 0
         for case let item as URL in walker {
             let isSymlink: Bool
             do {
@@ -786,22 +785,28 @@ final class AppUpdater {
                 continue
             }
             if !isSymlink { continue }
-
-            // realpath follows the link AND resolves all interior
-            // links + `..` segments — the only way to detect a
-            // target like `link/../../etc/passwd`. Returns nil
-            // for broken links; treat that as a reject (we don't
-            // need dangling symlinks in an update bundle).
-            guard let targetC = realpath(item.path, nil) else {
+            // E-F#8: bail before doing the realpath syscall on a
+            // pathologically symlinked archive.
+            symlinksSeen += 1
+            if symlinksSeen > Self.maxExtractionSymlinks {
+                appUpdaterLogger.info(
+                    "extraction symlink-count cap exceeded: \(symlinksSeen, privacy: .public) > \(Self.maxExtractionSymlinks, privacy: .public)"
+                )
                 throw UpdaterError.message(
-                    "Update archive contains a broken symbolic link; refusing to install."
+                    "Update archive contains an unreasonable number of symbolic links; refusing to install."
                 )
             }
-            let targetComponents = URL(
-                fileURLWithPath: String(cString: targetC)
-            ).pathComponents
-            free(targetC)
-
+            // realpath follows the link AND resolves all interior
+            // links + `..` segments — the only way to detect a
+            // target like `link/../../etc/passwd`. Broken-link
+            // case (realpath returns nil) is treated as reject:
+            // an update bundle has no business carrying dangling
+            // symlinks.
+            let targetComponents = try canonicalPathComponents(
+                of: item.path,
+                errorMessage:
+                    "Update archive contains a broken symbolic link; refusing to install."
+            )
             // Component-wise ancestor check. Defeats both the
             // trailing-slash false positive (`/extracted-evil` vs
             // `/extracted`) and any symlink-traversal-via-target.
@@ -811,6 +816,26 @@ final class AppUpdater {
                 )
             }
         }
+    }
+
+    /// **R-F#7:** shared realpath wrapper for `refuseExtraction
+    /// EscapingSymlinks`. Wraps the `realpath(3)` syscall +
+    /// `String(cString:)` conversion + `free` + `URL.path
+    /// Components` extraction in one place; used for both the
+    /// container path (once per call) and each symlink target
+    /// (per-entry, capped by `maxExtractionSymlinks`). The
+    /// `errorMessage` parameter lets the two callers attribute
+    /// failure differently while sharing the canonicalisation
+    /// primitive.
+    nonisolated private static func canonicalPathComponents(
+        of path: String,
+        errorMessage: String
+    ) throws -> [String] {
+        guard let cStr = realpath(path, nil) else {
+            throw UpdaterError.message(errorMessage)
+        }
+        defer { free(cStr) }
+        return URL(fileURLWithPath: String(cString: cStr)).pathComponents
     }
 
     /// Walks the extraction directory looking for a single .app
@@ -892,8 +917,8 @@ final class AppUpdater {
             )
         }
         guard newBundleID == Self.canonicalBundleID else {
-            updaterLog(
-                "AU-6 bundle-ID mismatch: got=\(newBundleID) expected=\(Self.canonicalBundleID)"
+            appUpdaterLogger.info(
+                "bundle-ID mismatch: got=\(newBundleID, privacy: .public) expected=\(Self.canonicalBundleID, privacy: .public)"
             )
             throw UpdaterError.message(
                 "New app's bundle identifier does not match Cool Tunnel. Refusing to install."
@@ -907,7 +932,9 @@ final class AppUpdater {
         // string and have it rendered into the Settings panel.
         // The actual mismatch detail goes to os_log for support.
         guard info.shortVersion == expectedVersion else {
-            updaterLog("AU-7 version mismatch: got=\(info.shortVersion) expected=\(expectedVersion)")
+            appUpdaterLogger.info(
+                "version mismatch: got=\(info.shortVersion, privacy: .public) expected=\(expectedVersion, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "New app's version does not match the release tag \(expectedVersion). Refusing to install."
             )
@@ -999,8 +1026,8 @@ final class AppUpdater {
         }
         // AU-9 part 1: parent folder writable for this user?
         if parentValues.isWritable == false {
-            updaterLog(
-                "AU-9 parent not writable: \(parentDirectory.path)"
+            appUpdaterLogger.info(
+                "parent not writable: \(parentDirectory.path, privacy: .public)"
             )
             throw UpdaterError.message(
                 "Cool Tunnel can't write to its install location. Check your folder permissions and try Update again."
@@ -1010,8 +1037,8 @@ final class AppUpdater {
         // chflags-immutable)?
         let bundleValues = try appURL.resourceValues(forKeys: [.isWritableKey])
         if bundleValues.isWritable == false {
-            updaterLog(
-                "AU-9 bundle not writable: \(appURL.path)"
+            appUpdaterLogger.info(
+                "bundle not writable: \(appURL.path, privacy: .public)"
             )
             throw UpdaterError.message(
                 "Cool Tunnel's bundle is locked. Right-click the app, choose Get Info, uncheck the Locked checkbox, then try Update again."
@@ -1042,12 +1069,23 @@ final class AppUpdater {
         let scriptURL = tempRootToClean
             .appendingPathComponent("cool-tunnel-relaunch.sh", isDirectory: false)
 
+        // **Q-F#2:** the helper script's stderr previously went
+        // nowhere — `task.standardError = nil` (in the spawn
+        // section below) discards it, so AU-11's `preswap_trap`
+        // recovery hint never reached the user. The script now
+        // redirects its own stderr to a stable log path under
+        // `~/Library/Logs/cool-tunnel/relaunch.log` so support
+        // can `tail` it after a failed update without needing to
+        // know which `/var/folders/.../T/` tempRoot was in
+        // play.
+        let logURL = try Self.makeRelaunchLogPath()
+
         // Bash relaunch dance:
         //   1. Wait up to 30 s for parent to exit (poll kill -0).
         //   2. ditto into a sibling `.new` directory.
         //   3. Atomic-rename pair: old → .old, .new → old.
-        //   4. open -a the new app.
-        //   5. Clean .old + temp tree + self.
+        //   4. Promote staged copy.
+        //   5. open the new app.
         //
         // **v0.1.7.10 fix:** the previous flow was
         //   `rm -rf "$OLD_APP" && ditto "$NEW_APP" "$OLD_APP"`,
@@ -1065,8 +1103,18 @@ final class AppUpdater {
             OLD_APP=\(shellQuote(oldAppURL.path))
             NEW_APP=\(shellQuote(newAppURL.path))
             TEMP_ROOT=\(shellQuote(tempRootToClean.path))
+            LOG=\(shellQuote(logURL.path))
             STAGED="${OLD_APP}.new"
             BACKUP="${OLD_APP}.old-update"
+
+            # Q-F#2: redirect script stderr to the user-visible
+            # log path. Without this, every `>&2` line in the
+            # preswap_trap (and the warm-up echo below) would go
+            # to /dev/null because the parent set
+            # task.standardError = nil before exiting.
+            mkdir -p "$(dirname "$LOG")"
+            exec 2>>"$LOG"
+            echo "[$(date '+%FT%T%z')] cool-tunnel-relaunch starting (parent=$PARENT_PID)"
 
             # AU-11 (R4): pre-swap trap. Until step 4 commits the
             # swap, an unexpected exit MUST preserve the recovery
@@ -1075,19 +1123,12 @@ final class AppUpdater {
             # mid-step. The user (or a support engineer) can then
             # restore manually. Once the swap commits, this trap
             # is replaced with the destructive cleanup.
-            #
-            # Previously a single `trap cleanup EXIT` installed
-            # at the top removed $TEMP_ROOT on ANY exit, including
-            # the path where step 3's rollback ALSO failed —
-            # leaving the user with neither the new app nor the
-            # known-good staged copy.
             preswap_trap() {
                 {
-                    echo "Cool Tunnel update aborted before swap committed."
-                    echo "Recovery materials retained at:"
-                    echo "  Verified-good update: $TEMP_ROOT"
+                    echo "[$(date '+%FT%T%z')] update aborted before swap committed."
+                    echo "  recovery: $TEMP_ROOT"
                     if [ -d "$BACKUP" ]; then
-                        echo "  Backup of old app:    $BACKUP"
+                        echo "  backup:   $BACKUP"
                     fi
                 } >&2
             }
@@ -1188,54 +1229,30 @@ final class AppUpdater {
     /// real). `O_EXCL` refuses if the file already exists,
     /// which would be a sign of a pre-existing attacker-planted
     /// file in tempRoot — bail in that case.
+    /// Atomic, race-free helper-script writer.
+    ///
+    /// **R-F#1:** delegates to `RestrictedFile.write` — the
+    /// shared `O_CREAT|O_EXCL` + write + fsync + atomic-rename
+    /// primitive used elsewhere for credential files. Pass
+    /// `mode: 0o700` (the only knob this site needs that the
+    /// credentials default `0o600` doesn't cover) and the same
+    /// race-free guarantees apply: the script is born with the
+    /// restrictive mode and the rename is atomic. Replaces ~50
+    /// lines of bespoke FD-lifecycle code that mirrored
+    /// `RestrictedFile`'s implementation almost line-for-line —
+    /// removing the second-implementation drift risk.
     nonisolated private static func writeRelaunchScript(_ contents: String, to scriptURL: URL) throws {
         guard let data = contents.data(using: .utf8) else {
             throw UpdaterError.message(
                 "Internal error: relaunch script not encodable as UTF-8."
             )
         }
-        let path = scriptURL.path
-        let fd = path.withCString { Darwin.open($0, O_CREAT | O_EXCL | O_WRONLY, 0o700) }
-        guard fd >= 0 else {
-            let captured = errno
+        do {
+            try RestrictedFile.write(data, to: scriptURL, mode: 0o700)
+        } catch {
             throw UpdaterError.message(
-                "Couldn't create the relaunch helper script (errno \(captured))."
+                "Couldn't create the relaunch helper script: \(error.localizedDescription)"
             )
-        }
-        // FileHandle wraps the fd for the buffered write API,
-        // but we own the lifetime — `closeOnDealloc: false` so
-        // we control when the close happens (defer below).
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-        var didClose = false
-        defer {
-            if !didClose {
-                try? handle.close()
-            }
-        }
-        do {
-            try handle.write(contentsOf: data)
-        } catch {
-            try? FileManager.default.removeItem(at: scriptURL)
-            throw UpdaterError.message("Couldn't write relaunch helper.")
-        }
-        // fsync — the bash subprocess that opens this file
-        // immediately may otherwise read pre-flush garbage on
-        // a busy system. `synchronize()` returns void on success
-        // and throws on failure; treat failure as fatal here.
-        do {
-            try handle.synchronize()
-        } catch {
-            try? FileManager.default.removeItem(at: scriptURL)
-            throw UpdaterError.message("Couldn't fsync relaunch helper.")
-        }
-        do {
-            try handle.close()
-            didClose = true
-        } catch {
-            // The bytes are already written and fsync'd; close
-            // failure is unusual but not security-critical. Log
-            // and continue.
-            updaterLog("AU-1 relaunch-script close failed (non-fatal): \(error)")
         }
     }
 
@@ -1244,6 +1261,27 @@ final class AppUpdater {
             .appendingPathComponent("cool-tunnel-app-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    /// Q-F#2: returns the path to `~/Library/Logs/cool-tunnel/
+    /// relaunch.log` and ensures the parent directory exists.
+    /// The bash helper redirects its stderr to this file so
+    /// AU-11's `preswap_trap` recovery hint actually reaches a
+    /// place the user (or support) can tail. Single fixed path
+    /// (not timestamped) so users only ever have one file to
+    /// look at; the helper appends rather than truncating, so
+    /// successive failed updates leave a chronological audit
+    /// trail capped only by manual `truncate(1)`.
+    nonisolated private static func makeRelaunchLogPath() throws -> URL {
+        let dir = FileManager.default
+            .urls(for: .libraryDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("cool-tunnel", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        return dir.appendingPathComponent("relaunch.log", isDirectory: false)
     }
 
     // MARK: - Version + tag parsing
@@ -1321,74 +1359,31 @@ final class AppUpdater {
     /// fork), update both in lock-step.
     nonisolated fileprivate static let canonicalBundleID = "space.coolwhite.naive"
 
-    // MARK: - URL trust boundary (AU-2 / AU-3)
-
-    /// Returns true if `url` is HTTPS and its host is on the
-    /// trusted GitHub-served suffix list. Used by
-    /// `validateInstallAssets` (AU-2) to gate the asset URLs
-    /// before download, and by `GitHubRedirectGuard` (AU-3) to
-    /// gate any HTTP redirects mid-download.
-    nonisolated fileprivate static func isTrustedGitHubURL(_ url: URL) -> Bool {
-        guard url.scheme?.lowercased() == "https" else { return false }
-        guard let host = url.host?.lowercased() else { return false }
-        let suffixes = ["github.com", "githubusercontent.com"]
-        return suffixes.contains { host == $0 || host.hasSuffix("." + $0) }
-    }
+    // **R-F#4:** the URL trust boundary (`isTrustedGitHubURL`)
+    // and `GitHubRedirectGuard` previously defined here have
+    // moved to `SystemIntegration/GitHubTrust.swift` and are
+    // now shared with `NaiveUpdater` and `RustCoreUpdater`,
+    // which had the same threat model and no protection until
+    // v0.1.7.13.
 }
 
 // MARK: - Logging
 
-/// Module-level OSLog handle for the updater. Used to capture
+/// Module-level `os.Logger` for the updater. Used to capture
 /// detail (failing URLs, version-mismatch values, status codes)
-/// that AU-2/AU-7/AU-8 deliberately strip from user-facing
-/// errors — the support workflow can still recover the real
-/// values from `log show --predicate 'subsystem == "..."'`.
-private let updaterOSLog = OSLog(
-    subsystem: "com.cool-tunnel.app",
+/// that AU-2 / AU-7 / AU-8 deliberately strip from user-facing
+/// errors — the support workflow recovers real values via
+/// `log show --predicate 'subsystem == "space.coolwhite.cooltunnel"
+/// AND category == "AppUpdater"'`.
+///
+/// **R-F#2:** migrated from `OSLog` + `os_log("%{public}@", ...)`
+/// (the legacy macOS 10.12+ API) to `os.Logger` (macOS 11+),
+/// matching the convention `CoreClient.swift` already used. Also
+/// fixed the subsystem from the orphan
+/// `"com.cool-tunnel.app"` to the project-wide
+/// `"space.coolwhite.cooltunnel"` so support's `log show`
+/// predicates surface every component under one umbrella.
+private let appUpdaterLogger = Logger(
+    subsystem: "space.coolwhite.cooltunnel",
     category: "AppUpdater"
 )
-
-private func updaterLog(_ message: String) {
-    os_log("%{public}@", log: updaterOSLog, type: .info, message)
-}
-
-// MARK: - GitHub redirect guard (AU-3)
-
-/// URLSession per-task delegate that constrains HTTP redirects
-/// to the trusted GitHub-served host suffix list.
-///
-/// Why this matters: SHA pinning protects the .zip's *content*
-/// but TRUSTS the manifest URL (which defines the expected
-/// hash). A CDN takeover, misconfigured GitHub edge redirect,
-/// or attacker-shaped API response that pointed the manifest
-/// fetch at a non-GitHub host would defeat SHA pinning by
-/// substituting the verification root-of-trust. This delegate
-/// rejects any redirect whose target isn't on the same trusted
-/// list `validateInstallAssets` already enforces (AU-2).
-///
-/// Used via the `delegate:` parameter of
-/// `URLSession.download(for:delegate:)` and
-/// `URLSession.data(for:delegate:)` — the per-task delegate
-/// pattern (macOS 12+) avoids long-lived shared session state.
-private final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    nonisolated func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        if let url = request.url, AppUpdater.isTrustedGitHubURL(url) {
-            completionHandler(request)
-        } else {
-            // Reject the redirect. URLSession surfaces this as
-            // the response that *would have been* the redirect
-            // (the 3xx) — the caller's status check (we want
-            // 200) catches it.
-            updaterLog(
-                "AU-3 redirect rejected: \(request.url?.absoluteString ?? "<nil>")"
-            )
-            completionHandler(nil)
-        }
-    }
-}

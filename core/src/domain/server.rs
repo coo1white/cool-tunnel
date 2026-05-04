@@ -26,7 +26,13 @@ use super::port::Port;
 pub struct ServerAddress(String);
 
 impl ServerAddress {
-    const MAX_LEN: usize = 253;
+    /// RFC 1035 fully-qualified domain name byte cap. **v0.1.7.13
+    /// (R-F#3):** promoted from `const` (private) to `pub const`
+    /// so `server_mode::MAX_PAC_DOMAIN_BYTES` can reference it
+    /// instead of duplicating the literal `253`. Single source
+    /// of truth — a future bump (e.g. for an IDN edge case) only
+    /// needs to change this one number.
+    pub const MAX_LEN: usize = 253;
     const FORBIDDEN: &'static [&'static str] = &["://", "@", "/", "?", "#"];
 
     /// Parses and validates a server address.
