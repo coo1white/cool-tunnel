@@ -11,18 +11,78 @@ import SwiftUI
 /// any firewall warning. Inputs are plain values rather than the
 /// full orchestrator so the view stays cheap to re-render and
 /// trivially previewable.
+///
+/// **UX-F#1 (v0.1.7.17):** added `lastError` input + dismiss
+/// callback. Previously `TunnelOrchestrator.recordError()` set
+/// `lastError` on every failure but no view ever read it; errors
+/// only appeared as a single buried `[error]` line in the log
+/// console. The header now shows a dismissible error banner —
+/// the same surface where the user already looks for status.
 public struct HeaderView: View {
     public let isRunning: Bool
     public let activeMode: ProxyMode
     public let firewallState: FirewallState
+    public let lastError: String?
+    public let onDismissError: () -> Void
 
-    public init(isRunning: Bool, activeMode: ProxyMode, firewallState: FirewallState) {
+    public init(
+        isRunning: Bool,
+        activeMode: ProxyMode,
+        firewallState: FirewallState,
+        lastError: String?,
+        onDismissError: @escaping () -> Void
+    ) {
         self.isRunning = isRunning
         self.activeMode = activeMode
         self.firewallState = firewallState
+        self.lastError = lastError
+        self.onDismissError = onDismissError
     }
 
     public var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            mainRow
+            if let lastError = lastError, !lastError.isEmpty {
+                errorBanner(message: lastError)
+            }
+        }
+    }
+
+    /// **UX-F#1 (v0.1.7.17):** dismissible error banner. Background
+    /// uses `cherryRose` to read distinct from the mode-themed
+    /// status pill, with a contrast-safe foreground.
+    @ViewBuilder
+    private func errorBanner(message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.white)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Button {
+                onDismissError()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss error")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(CTPalette.cherryRose.opacity(0.85))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Error: \(message). Double-tap to dismiss.")
+    }
+
+    private var mainRow: some View {
         HStack(alignment: .center, spacing: 14) {
             // App icon on a pastel gradient circle. The gradient
             // tracks the active mode so the icon itself becomes a

@@ -24,13 +24,31 @@ pub struct Username(String);
 impl Username {
     /// Parses and validates a username.
     ///
+    /// **Domain-F#2 (v0.1.7.17):** rejects control characters
+    /// (NUL, newlines, ANSI escapes) and the URL-userinfo
+    /// metacharacters `@` and `:` that would make the percent-
+    /// encoded output ambiguous downstream. Previously `parse`
+    /// only checked emptiness, so `"a@b:c\n/d"` parsed as a
+    /// valid username and produced a syntactically odd
+    /// percent-encoding that downstream HTTP-header writers
+    /// could split on.
+    ///
     /// # Errors
     ///
-    /// Returns [`InvalidCredentials::EmptyUsername`] if the trimmed input is empty.
+    /// - [`InvalidCredentials::EmptyUsername`] if trimmed input
+    ///   is empty.
+    /// - [`InvalidCredentials::IllegalUsernameChar`] if the
+    ///   trimmed input contains a control char, `@`, or `:`.
     pub fn parse(input: &str) -> Result<Self, InvalidCredentials> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err(InvalidCredentials::EmptyUsername);
+        }
+        if let Some(bad) = trimmed
+            .chars()
+            .find(|c| c.is_control() || *c == '@' || *c == ':')
+        {
+            return Err(InvalidCredentials::IllegalUsernameChar(bad));
         }
         Ok(Self(trimmed.to_owned()))
     }
@@ -233,6 +251,11 @@ pub enum InvalidCredentials {
     /// The trimmed password was empty.
     #[error("password must not be empty")]
     EmptyPassword,
+    /// **Domain-F#2 (v0.1.7.17):** username contained a
+    /// control character, `@`, or `:` — characters that would
+    /// make the URL-userinfo percent-encoding ambiguous.
+    #[error("username contains an illegal character")]
+    IllegalUsernameChar(char),
 }
 
 /// Percent-encodes a string against the URL userinfo character set used by
