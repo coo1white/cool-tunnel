@@ -1318,16 +1318,29 @@ final class AppUpdater {
         }
     }
 
-    /// **Edge-F#11 (v0.1.7.16):** uses Spotlight (`mdfind`) to
-    /// locate every `.app` whose bundle identifier matches the
-    /// canonical ID. If more than one is registered, refuses
-    /// the update and asks the user to keep only one. The
-    /// failure mode that motivates this check: the user has
-    /// two installs (e.g. /Applications + ~/Applications), the
+    /// **Edge-F#11 (v0.1.7.16) + v0.1.7.20 false-positive fix:**
+    /// uses Spotlight (`mdfind`) to locate every `.app` whose
+    /// bundle identifier matches the canonical ID. The failure
+    /// mode this check defends against: the user has two real
+    /// installs (e.g. `/Applications` + `~/Applications`), the
     /// helper updates one, LaunchServices launches the other
-    /// next time — and the user thinks the update silently
-    /// failed. Spotlight is the canonical macOS index for this
-    /// query.
+    /// next time — user thinks the update silently failed.
+    ///
+    /// **v0.1.7.20:** filter out paths that are clearly NOT
+    /// user installs:
+    ///   - `~/Library/Developer/Xcode/DerivedData/...` —
+    ///     Xcode rebuild caches; LaunchServices won't pick
+    ///     these as the canonical install.
+    ///   - Any path containing `/DerivedData/` (catches
+    ///     project-local DerivedData configs).
+    ///   - Any path containing `/Build/Products/` (Xcode
+    ///     build products under non-default DerivedData).
+    /// Without these filters, ANY developer who has Cool
+    /// Tunnel checked out and has run `xcodebuild` even once
+    /// false-positives this check — the v0.1.7.16 cycle
+    /// shipped with this gap. The error message also lists
+    /// the surviving paths so users (and support) know
+    /// exactly which copies are still considered installs.
     nonisolated private static func refuseIfMultipleInstalls() async throws {
         let result: SubprocessResult
         do {
@@ -1352,18 +1365,73 @@ final class AppUpdater {
             )
             return
         }
+        // **v0.1.7.20:** filter Xcode build artifacts before
+        // counting. Spotlight indexes everything; for a
+        // developer the index includes 5+ DerivedData entries
+        // by default, none of which are real installs.
         let paths = result.stdout
             .split(whereSeparator: \.isNewline)
             .map(String.init)
             .filter { !$0.isEmpty }
+            .filter { Self.isPlausibleUserInstall($0) }
         if paths.count > 1 {
             appUpdaterLogger.error(
-                "multiple installs detected: \(paths.joined(separator: ", "), privacy: .public)"
+                "multiple real installs detected: \(paths.joined(separator: ", "), privacy: .public)"
             )
+            // List the actual paths so the user knows where
+            // to look — without this, the v0.1.7.16 message
+            // ("move all but one to the Trash") leaves users
+            // hunting for installs in Finder by hand.
+            let pathList = paths
+                .map { "  • \($0)" }
+                .joined(separator: "\n")
             throw UpdaterError.message(
-                "Multiple copies of Cool Tunnel were found on this Mac. Move all but one to the Trash, restart the app you want to keep, and try Update again."
+                """
+                Multiple copies of Cool Tunnel were found on this Mac:
+                \(pathList)
+                Move all but one to the Trash, restart the app you want to keep, and try Update again.
+                """
             )
         }
+    }
+
+    /// **v0.1.7.20:** filters Spotlight `mdfind` hits to plausible
+    /// user installs only. Excludes Xcode build artifacts that
+    /// LaunchServices ignores when resolving a bundle ID:
+    ///
+    ///   - `/DerivedData/` — anywhere in the path
+    ///   - `/Build/Products/` — Xcode's standard build-output dir
+    ///   - `/Library/Developer/Xcode/` — global Xcode caches
+    ///   - Project-local `build/` directories — `xcodebuild
+    ///     -derivedDataPath` writes here when run without a
+    ///     workspace
+    ///
+    /// A "real" install is one of: `/Applications/...`,
+    /// `~/Applications/...`, or anywhere outside the patterns
+    /// above. False positives here are far worse than false
+    /// negatives: a missed real install only re-fires this
+    /// check the next time the user clicks Update; a
+    /// false-positive blocks every update for every developer.
+    nonisolated fileprivate static func isPlausibleUserInstall(_ path: String) -> Bool {
+        let xcodeBuildMarkers = [
+            "/DerivedData/",
+            "/Build/Products/",
+            "/Library/Developer/Xcode/",
+        ]
+        for marker in xcodeBuildMarkers where path.contains(marker) {
+            return false
+        }
+        // Project-local `build/` from a `xcodebuild
+        // -derivedDataPath build` invocation. Match
+        // `*/build/DerivedData/*` and `*/build/Build/Products/*`
+        // explicitly — a path like `/Applications/build-tools/X.app`
+        // (legitimate app named with "build") is still kept.
+        if path.contains("/build/DerivedData/")
+            || path.contains("/build/Build/Products/")
+        {
+            return false
+        }
+        return true
     }
 
     /// **Edge-F#1 (v0.1.7.16):** asserts that the volume
