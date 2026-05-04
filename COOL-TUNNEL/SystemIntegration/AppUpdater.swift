@@ -759,10 +759,11 @@ final class AppUpdater {
         // so the ancestor check is robust against any symlinks
         // in the tempdir hierarchy (e.g. /var → /private/var on
         // macOS).
-        let containerComponents = try canonicalPathComponents(
-            of: directory.path,
-            errorMessage: "Couldn't canonicalise extraction directory; refusing to install."
-        )
+        guard let containerComponents = canonicalPathComponents(of: directory.path) else {
+            throw UpdaterError.message(
+                "Couldn't canonicalise extraction directory; refusing to install."
+            )
+        }
 
         guard
             let walker = FileManager.default.enumerator(
@@ -802,11 +803,11 @@ final class AppUpdater {
             // case (realpath returns nil) is treated as reject:
             // an update bundle has no business carrying dangling
             // symlinks.
-            let targetComponents = try canonicalPathComponents(
-                of: item.path,
-                errorMessage:
+            guard let targetComponents = canonicalPathComponents(of: item.path) else {
+                throw UpdaterError.message(
                     "Update archive contains a broken symbolic link; refusing to install."
-            )
+                )
+            }
             // Component-wise ancestor check. Defeats both the
             // trailing-slash false positive (`/extracted-evil` vs
             // `/extracted`) and any symlink-traversal-via-target.
@@ -818,22 +819,22 @@ final class AppUpdater {
         }
     }
 
-    /// **R-F#7:** shared realpath wrapper for `refuseExtraction
-    /// EscapingSymlinks`. Wraps the `realpath(3)` syscall +
-    /// `String(cString:)` conversion + `free` + `URL.path
-    /// Components` extraction in one place; used for both the
-    /// container path (once per call) and each symlink target
-    /// (per-entry, capped by `maxExtractionSymlinks`). The
-    /// `errorMessage` parameter lets the two callers attribute
-    /// failure differently while sharing the canonicalisation
-    /// primitive.
-    nonisolated private static func canonicalPathComponents(
-        of path: String,
-        errorMessage: String
-    ) throws -> [String] {
-        guard let cStr = realpath(path, nil) else {
-            throw UpdaterError.message(errorMessage)
-        }
+    /// **R-F#7:** shared realpath wrapper. Wraps the
+    /// `realpath(3)` syscall + `String(cString:)` conversion +
+    /// `free` + `URL.pathComponents` extraction in one place;
+    /// used for both the container path (once per call) and
+    /// each symlink target (per-entry, capped by
+    /// `maxExtractionSymlinks`).
+    ///
+    /// **Q-F#5 (v0.1.7.14):** returns `nil` rather than
+    /// throwing with a caller-supplied `errorMessage:`. The
+    /// helper's job is "canonicalise this path"; the user-
+    /// facing error wording belongs at the call site so the
+    /// two failure modes (container couldn't be canonicalised /
+    /// symlink target couldn't be canonicalised) can carry
+    /// distinct messages without parameterising this primitive.
+    nonisolated private static func canonicalPathComponents(of path: String) -> [String]? {
+        guard let cStr = realpath(path, nil) else { return nil }
         defer { free(cStr) }
         return URL(fileURLWithPath: String(cString: cStr)).pathComponents
     }
@@ -1112,7 +1113,22 @@ final class AppUpdater {
             # preswap_trap (and the warm-up echo below) would go
             # to /dev/null because the parent set
             # task.standardError = nil before exiting.
-            mkdir -p "$(dirname "$LOG")"
+            #
+            # **Q-F#1 (v0.1.7.14):** dropped the bash-side
+            # `mkdir -p "$(dirname "$LOG")"` that lived here. The
+            # Swift `makeRelaunchLogPath()` already creates the
+            # directory before spawning this script (so a bash-
+            # side mkdir was duplicate work) AND its failure path
+            # was silent: bash with `set -eu` would abort on
+            # mkdir failure, but stderr was still pointing at the
+            # parent's `task.standardError = nil` (a closed
+            # pipe), so the diagnostic vanished — defeating the
+            # whole point of Q-F#2. The Swift side now owns the
+            # directory creation; an exec failure here will still
+            # be silent, but it's a strict subset of "the dir
+            # exists and Foundation's `createDirectory` succeeded
+            # but bash can't open the file" — vanishingly rare,
+            # and no worse than pre-Q-F#2 behaviour.
             exec 2>>"$LOG"
             echo "[$(date '+%FT%T%z')] cool-tunnel-relaunch starting (parent=$PARENT_PID)"
 
@@ -1229,18 +1245,10 @@ final class AppUpdater {
     /// real). `O_EXCL` refuses if the file already exists,
     /// which would be a sign of a pre-existing attacker-planted
     /// file in tempRoot — bail in that case.
-    /// Atomic, race-free helper-script writer.
-    ///
-    /// **R-F#1:** delegates to `RestrictedFile.write` — the
-    /// shared `O_CREAT|O_EXCL` + write + fsync + atomic-rename
-    /// primitive used elsewhere for credential files. Pass
-    /// `mode: 0o700` (the only knob this site needs that the
-    /// credentials default `0o600` doesn't cover) and the same
-    /// race-free guarantees apply: the script is born with the
-    /// restrictive mode and the rename is atomic. Replaces ~50
-    /// lines of bespoke FD-lifecycle code that mirrored
-    /// `RestrictedFile`'s implementation almost line-for-line —
-    /// removing the second-implementation drift risk.
+    /// Atomic, race-free helper-script writer. Delegates to
+    /// `RestrictedFile.write` with `mode: 0o700`; same
+    /// `O_CREAT|O_EXCL` + write + fsync + atomic-rename
+    /// guarantees as the credentials writer, just executable.
     nonisolated private static func writeRelaunchScript(_ contents: String, to scriptURL: URL) throws {
         guard let data = contents.data(using: .utf8) else {
             throw UpdaterError.message(
@@ -1272,10 +1280,22 @@ final class AppUpdater {
     /// look at; the helper appends rather than truncating, so
     /// successive failed updates leave a chronological audit
     /// trail capped only by manual `truncate(1)`.
+    ///
+    /// **Q-F#2 (v0.1.7.14):** replaced the prior `.first!`
+    /// force-unwrap with a throwing guard, matching the
+    /// project's documented avoid-bare-! convention from the
+    /// v0.1.5.9 audit (see `NaiveUpdater.resolveLatestStableTag`
+    /// for the same pattern on a hardcoded URL).
     nonisolated private static func makeRelaunchLogPath() throws -> URL {
-        let dir = FileManager.default
+        guard let library = FileManager.default
             .urls(for: .libraryDirectory, in: .userDomainMask)
-            .first!
+            .first
+        else {
+            throw UpdaterError.message(
+                "Couldn't locate user Library directory."
+            )
+        }
+        let dir = library
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("cool-tunnel", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -1372,18 +1392,10 @@ final class AppUpdater {
 /// Module-level `os.Logger` for the updater. Used to capture
 /// detail (failing URLs, version-mismatch values, status codes)
 /// that AU-2 / AU-7 / AU-8 deliberately strip from user-facing
-/// errors — the support workflow recovers real values via
+/// errors. Recovered via
 /// `log show --predicate 'subsystem == "space.coolwhite.cooltunnel"
 /// AND category == "AppUpdater"'`.
 ///
-/// **R-F#2:** migrated from `OSLog` + `os_log("%{public}@", ...)`
-/// (the legacy macOS 10.12+ API) to `os.Logger` (macOS 11+),
-/// matching the convention `CoreClient.swift` already used. Also
-/// fixed the subsystem from the orphan
-/// `"com.cool-tunnel.app"` to the project-wide
-/// `"space.coolwhite.cooltunnel"` so support's `log show`
-/// predicates surface every component under one umbrella.
-private let appUpdaterLogger = Logger(
-    subsystem: "space.coolwhite.cooltunnel",
-    category: "AppUpdater"
-)
+/// **R-F#1 (v0.1.7.14):** routed through `Logger.cooltunnel(_:)`
+/// so the project-wide subsystem string lives in one place.
+private let appUpdaterLogger = Logger.cooltunnel("AppUpdater")

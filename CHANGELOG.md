@@ -9,6 +9,120 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.14] — 2026-05-04 (LTSC patch — second simplify pass)
+
+LTSC patch on v0.1.7 line. Second-pass simplify review of
+v0.1.7.13 found 18 follow-on findings; 7 land in this release
+(1 high-impact dedup, 2 medium real-bug fixes, 4 quick wins).
+11 deferred (subjective comment trim, stylistic placement,
+trivial micro-opts where churn outweighs gain).
+
+### Highlights
+
+- **R-F#2 (high) — Naive/RustCore download dedup.** v0.1.7.13
+  applied the same "host check + URLRequest +
+  download(for:delegate:) + status check + fileExists/
+  removeItem/moveItem" sequence to both `NaiveUpdater.download`
+  and `RustCoreUpdater.download`. The two implementations
+  drifted into line-for-line twins (~22 lines × 2). Extracted
+  to `GitHubRedirectGuard.download(url:to:)` static helper.
+  Both call sites collapse to a 3-line `do/catch` mapping
+  `UntrustedGitHubHostError` to their respective updater
+  error types. AppUpdater's `download` stays bespoke because
+  it layers a per-asset size cap (.sha256 1 MB / .zip 100 MB)
+  that the others don't need.
+- **Q-F#1 (med) — bash mkdir-before-redirect silent fail.**
+  v0.1.7.13's `Q-F#2` redirect (`exec 2>>"$LOG"`) was preceded
+  by a bash-side `mkdir -p "$(dirname "$LOG")"` — but the
+  Swift `makeRelaunchLogPath()` already creates the directory
+  before spawning the script, AND the bash mkdir's failure
+  path was silent (with `set -eu`, mkdir failure aborts; with
+  `task.standardError = nil` on the parent's spawn, the
+  diagnostic vanished). The bash mkdir is now removed; Swift
+  alone owns the dir creation. The exec failure path is still
+  silent on a degenerate "dir exists but file can't be opened"
+  case but that's vanishingly rare on macOS and no worse than
+  pre-Q-F#2 behaviour.
+- **R-F#1 (med) — `Logger.cooltunnel(_:)` factory extension.**
+  Three Logger declarations (`CoreClient.logger`,
+  `AppUpdater.appUpdaterLogger`, `GitHubTrust.trustLogger`)
+  each spelled out
+  `Logger(subsystem: "space.coolwhite.cooltunnel", category: ...)`
+  with the subsystem string as a literal. The
+  orphan-subsystem regression that R-F#2 just fixed in v0.1.7.13
+  (the legacy `"com.cool-tunnel.app"` string) becomes
+  structurally impossible: only one place knows the subsystem
+  identifier now.
+
+### Quick wins
+
+- **Q-F#2 (low) — `makeRelaunchLogPath` force-unwrap fixed.**
+  `FileManager.default.urls(for:in:).first!` violated the
+  project's documented avoid-bare-`!` convention from the
+  v0.1.5.9 audit. Replaced with a throwing guard that surfaces
+  an `UpdaterError.message` if the user Library directory is
+  somehow unreachable.
+- **E-F#3 (low) — dropped redundant `.lowercased()`.**
+  `isTrustedGitHubURL` was calling `.lowercased()` on
+  `url.scheme` and `url.host`. Foundation already canonicalises
+  both to lowercase per RFC 3986 §3.1 / §3.2.2; the explicit
+  lowercase was wasted allocation per call.
+- **Q-F#5 (low) — `canonicalPathComponents` returns Optional.**
+  Removed the `errorMessage:` parameter that threaded a
+  user-facing error string through the realpath wrapper. The
+  helper now returns `[String]?`; the two call sites
+  (container + per-symlink-target) handle their own throws
+  with their own messages. Cleaner separation of "is this
+  POSIX call possible" from "what UX wording does the caller
+  want".
+- **Q-F#7 (low) — trimmed stale `AU-1` doc on
+  `writeRelaunchScript`.** The function body was simplified
+  in v0.1.7.13's R-F#1 (delegate to `RestrictedFile.write`)
+  but the old doc still described the bespoke
+  `O_CREAT|O_EXCL` + write + fsync + close FD-lifecycle that
+  the function no longer does. Trimmed to a one-liner that
+  describes the new shape.
+
+### Tests + verification
+
+- `xcodebuild Release` BUILD SUCCEEDED (Swift 6 strict
+  concurrency)
+- No Rust changes in this release; existing 104 lib + 18 chaos
+  tests still pass
+- `Cool-tunnel-v0.1.7.14.dmg` ships the same five assets as
+  v0.1.7.13 (`.dmg`, `.pkg`, `.zip`, `cool-tunnel-core` engine,
+  `.sha256` manifest)
+
+### Deferred (11 findings)
+
+- **Q-F#3 — Logger placement (file-scope vs static member).**
+  Stylistic; either is defensible.
+- **Q-F#4 — `trustedHostSuffixes` placement.** Module-level
+  fine for one consumer.
+- **Q-F#6 — `RestrictedFile.write` doc duplicate paragraphs.**
+  Subjective.
+- **Q-F#8 — `assetURL` defence-in-depth check is dead on a
+  hardcoded URL.** Kept as a tripwire if `assetURL` ever
+  takes dynamic input.
+- **Q-F#9 — error wording drift between Naive and RustCore.**
+  Now mostly resolved by R-F#2 (both go through the same
+  helper); minor text differences in the wrap remain.
+- **Q-F#10 — `MAX_PAC_DOMAIN_BYTES` audit-trail comment.**
+  Same Q-F#3 deferral pattern as last release.
+- **R-F#3 — `~/Library/Logs/cool-tunnel/` derivation in
+  `AppSupportPaths`.** One call site; not worth churn.
+- **R-F#4 — `InvalidServer::TooLong` hardcodes 253.**
+  thiserror format-string limitation; punt.
+- **E-F#1 — drop one of two host validations per download.**
+  Effectively addressed by R-F#2 (the helper validates once;
+  the upstream `validateInstallAssets` / `resolveLatestAsset`
+  / `assetURL` checks remain as defence-in-depth at a
+  different seam).
+- **E-F#2 — URL roundtrip in `canonicalPathComponents`.**
+  Gated by the 1024-symlink cap; not hot.
+- **E-F#4 — bake `"."` prefix into suffix list.** Trivial
+  micro-opt; allocations are negligible at 2 entries / call.
+
 ## [0.1.7.13] — 2026-05-04 (LTSC patch — post-cycle simplify pass)
 
 LTSC patch on the v0.1.7 line. Simplify-pass review of
