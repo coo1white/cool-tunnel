@@ -9,6 +9,146 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.19] — 2026-05-04 (LTSC patch — 10 deferred-high cluster)
+
+LTSC patch on v0.1.7 line. 10 high-severity items pulled
+forward from the deferred backlog. Each is contained, each has
+real user impact, all 10 ship together as one focused release.
+
+### What landed
+
+- **UX-F#5 (high) — auto-revert proxy on naive crash.** In
+  `handle(event:)`, when `.stateChanged(false)` arrives outside
+  a user-initiated stop (i.e. naive died on its own — server
+  unreachable, segfault, OS killed it), the orchestrator now
+  also calls `proxyController.disableAll()` and clears the
+  proxy-active sentinel. Without this, macOS keeps routing at
+  `127.0.0.1:1080` where nothing is listening — user sees a
+  misleading "Idle" header but every browser request stalls.
+  Pairs with v0.1.7.17's `lastError` HeaderView banner: user
+  sees both that naive stopped AND that the proxy was reverted,
+  with a clear retry path.
+- **UX-F#16 (high) — engine pipe-death recovery.** When the
+  `subscribeToEvents` for-await stream ends outside shutdown
+  (cool-tunnel-core itself died — pipe broke, OS killed it),
+  the orchestrator now: reverts system proxy, flips
+  `didBootstrap = false` so the next mode click re-runs the
+  bootstrap path (which calls `core.start()` to respawn the
+  engine), and surfaces an actionable error. Previously the
+  message said "click Start again" — but Start clicks hit
+  `core.send(...)` which throws `.notRunning` since the engine
+  was dead. The new message tells users to click a mode chip
+  (which now correctly re-bootstraps).
+- **Subproc-F#11a (high) — CoreClient stderr drain.** The
+  long-lived engine subprocess's stderr was previously
+  inherited (no drain). A chatty engine writing >64 KiB to
+  stderr fills the kernel pipe buffer, blocks on its next
+  stderr write, and the engine deadlocks mid-request. Added
+  a detached drain task (`Task.detached(priority: .utility)`)
+  that reads stderr to EOF and forwards content to a
+  `Logger.cooltunnel("CoreClient.stderr")` for support
+  diagnosis.
+- **Subproc-F#11b (high) — SystemProxyController via
+  `Subprocess.run`.** Previously used the legacy
+  `process.waitUntilExit()` + `readDataToEndOfFile()`
+  pattern that v0.1.7.10's `Subprocess.swift` was built to
+  replace — exactly the pipe-deadlock scenario for
+  `networksetup -listallnetworkservices` on a Mac with many
+  network services. Now routes through `Subprocess.run` for
+  concurrent pipe drain + 30s timeout escalation + sanitized
+  env (free benefit from Subproc-F#3 below).
+- **Subproc-F#3 (high) — env sanitization in `Subprocess.run`.**
+  Previously children inherited the app's full env including
+  `DYLD_INSERT_LIBRARIES`, `OBJC_DEBUG_*`, `MallocStackLogging`,
+  which could bias trust-boundary tools like `codesign` and
+  `networksetup`. Children now receive a minimal env: PATH
+  set to `/usr/bin:/bin:/usr/sbin:/sbin` (no user `~/bin`
+  shadowing), HOME, LANG=C, LC_ALL=C. Locale-stable output
+  parsing is a free side benefit.
+- **Subproc-F#1 (med-high) — simplified SIGTERM→SIGKILL.**
+  Replaced the 3-step SIGTERM → 250ms → SIGINT → 250ms →
+  SIGKILL escalation with SIGTERM → 1s → SIGKILL. SIGINT was
+  not an escalation past SIGTERM — any child that traps SIGTERM
+  almost always also traps SIGINT (`naive` does both for
+  graceful shutdown). The middle step wasted time without
+  escalating; SIGTERM gets a longer 1s grace before the kill.
+- **Lifecycle-F#7 (high) — transition lock for mode
+  switching.** Added `private var transitionInFlight: Bool`
+  to `TunnelOrchestrator`. A rapid second click while a prior
+  `switchMode` is mid-flight (between `stopQuiet` and
+  `startCore`) is now a clean no-op. Without this, two
+  concurrent transitions raced on `paths.configFile`,
+  `proxyController` state, and `core.send(...)` ordering —
+  `naive`'s config file was last-writer-wins, system proxy
+  state was whatever the last `enableX` call applied,
+  multiple naive children could briefly exist.
+- **UX-F#3 (high) — profile mutation while connected
+  surfaces a banner.** New `activeProfileID` field captured
+  at `startCore` time. The `selectedProfile` setter compares
+  the new value against the current `profiles[id]` — if
+  they differ AND the engine is running on that profile,
+  sets `lastError` to: "Profile edits applied — click Stop,
+  then a mode chip to use them. The running connection is
+  still on the old config." Surfaces in HeaderView via
+  v0.1.7.17 UX-F#1's banner. Previously edits were silently
+  buffered with no UX hint.
+- **Networksetup localization (med) — `dropFirst(1)` legend
+  filter.** `activeServices()` previously filtered the first
+  line via `.contains("asterisk")` — broken on non-English
+  macOS where the legend is localized. `networksetup` always
+  emits exactly one legend line as the first line; the
+  stable, locale-independent filter is `dropFirst(1)`.
+- **Lifecycle-F#5 (med) — AppDelegate watchdog cancels the
+  shutdown Task.** Previously the watchdog fired
+  `replied.fire()` after 5s but didn't cancel the shutdown
+  Task. If shutdown finished at t=8s, it continued running
+  its body (calling `core.stop()` / `disableAll()`) on a
+  partially-released graph while AppKit was mid-teardown.
+  Now the watchdog explicitly `shutdownTask.cancel()` before
+  firing the reply.
+
+### Verification
+
+- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
+  concurrency
+- No Rust changes; existing 104 lib + 18 chaos tests still
+  pass
+
+### What this release changes for users
+
+Users won't notice anything if everything's working — the wins
+are in the failure paths:
+
+1. **naive dies on its own** (server unreachable, OS killed
+   it): system proxy is auto-reverted, error banner explains
+   what happened. Browser keeps working.
+2. **cool-tunnel-core dies**: clear recovery path; clicking
+   any mode chip re-launches the engine.
+3. **Mac sleeps + wakes** with TCP keepalives dropped (from
+   v0.1.7.18) AND **engine subprocess deadlocks under heavy
+   stderr** (this release): no longer possible.
+4. **Profile field edits while connected**: banner explains
+   why the new value isn't in effect.
+5. **Rapid mode chip clicks**: only the first wins; second
+   click is no-op until first transition completes.
+6. **Non-English macOS**: `activeServices()` correctly
+   identifies network services regardless of system language.
+7. **Force-quit via Activity Monitor at the wrong moment**:
+   AppDelegate's watchdog fires cleanly without the shutdown
+   Task continuing post-mortem.
+
+### Still deferred (3 of the 6-high cluster)
+
+These need infrastructure that doesn't fit a single session,
+unchanged from v0.1.7.18's deferral:
+
+- **NaiveProxy SHA pinning** — needs Cool Tunnel-side trusted-
+  versions manifest (v0.1.8 target)
+- **Password Secret newtype + zeroize** — needs Swift test
+  target first (v0.1.8 target)
+- **Swift test target** — architectural pbxproj editing risk
+  (v0.1.8 target)
+
 ## [0.1.7.18] — 2026-05-04 (LTSC patch — focused high-severity cluster)
 
 LTSC patch on v0.1.7 line. Focused release: 3 high-severity

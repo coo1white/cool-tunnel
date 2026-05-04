@@ -67,51 +67,67 @@ public struct SystemProxyController: Sendable {
     // MARK: - Service discovery
 
     /// Returns names of network services that aren't disabled in the
-    /// "Network" preference pane. Excludes the asterisk-prefixed disabled
-    /// services and the leading "An asterisk..." legend line.
+    /// "Network" preference pane.
+    ///
+    /// **v0.1.7.19 (localization fix):** previously filtered the
+    /// legend line via `.contains("asterisk")` — broken on
+    /// non-English macOS where the legend is localized
+    /// ("Un servicio desactivado…", "Un service désactivé…",
+    /// etc.). `networksetup` always emits exactly one legend
+    /// line as the first line, so `dropFirst(1)` is the
+    /// stable, locale-independent filter.
     public func activeServices() async throws -> [String] {
         let output = try await run(["-listallnetworkservices"])
         return
             output
             .split(separator: "\n", omittingEmptySubsequences: true)
-            .lazy
-            .filter { !$0.contains("asterisk") }
+            .dropFirst(1)
             .map(String.init)
             .filter { !$0.hasPrefix("*") && !$0.isEmpty }
     }
 
     // MARK: - Subprocess plumbing
 
+    /// **Subproc-F#11b (v0.1.7.19):** routes through the shared
+    /// `Subprocess.run` helper — concurrent pipe drain + 30s
+    /// timeout escalation + sanitized env (PATH allowlist,
+    /// drop DYLD_*/OBJC_*, LANG=C). Previously this used the
+    /// legacy `process.waitUntilExit()` + `readDataToEndOfFile`
+    /// pattern that Subprocess.swift was built to replace —
+    /// exactly the pipe-deadlock scenario for `networksetup
+    /// -listallnetworkservices` on a Mac with many services.
     @discardableResult
     private func run(_ arguments: [String]) async throws -> String {
-        try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.executableURL = networkSetupURL
-            process.arguments = arguments
-            process.standardOutput = stdout
-            process.standardError = stderr
-
-            do {
-                try process.run()
-            } catch {
-                throw SystemProxyError.spawnFailed(error)
-            }
-            process.waitUntilExit()
-
-            let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-            let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-            let outString = String(data: outData, encoding: .utf8) ?? ""
-            let errString = String(data: errData, encoding: .utf8) ?? ""
-
-            if process.terminationStatus != 0 {
-                throw SystemProxyError.nonZeroExit(
-                    code: process.terminationStatus,
-                    stderr: errString.isEmpty ? outString : errString
+        let result: SubprocessResult
+        do {
+            result = try await Subprocess.run(
+                executable: networkSetupURL,
+                arguments: arguments,
+                timeout: 30
+            )
+        } catch let SubprocessError.launchFailed(message) {
+            throw SystemProxyError.spawnFailed(
+                NSError(
+                    domain: "SystemProxyError",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: message]
                 )
-            }
-            return outString
-        }.value
+            )
+        } catch {
+            throw SystemProxyError.spawnFailed(error)
+        }
+        if result.timedOut {
+            throw SystemProxyError.nonZeroExit(
+                code: -1,
+                stderr: "networksetup did not finish within 30s"
+            )
+        }
+        if !result.success {
+            throw SystemProxyError.nonZeroExit(
+                code: result.exitCode,
+                stderr: result.stderr.isEmpty ? result.stdout : result.stderr
+            )
+        }
+        return result.stdout
     }
 }

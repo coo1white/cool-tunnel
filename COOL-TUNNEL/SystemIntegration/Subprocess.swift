@@ -77,6 +77,23 @@ public enum Subprocess {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // **Subproc-F#3 (v0.1.7.19):** sanitize the env passed
+        // to children. Without this, the child inherits the
+        // app's full env — including `DYLD_INSERT_LIBRARIES`,
+        // `OBJC_DEBUG_*`, `MallocStackLogging`, etc. — which can
+        // bias trust-boundary tools like `codesign` and
+        // `networksetup`. The PATH is also reset to a
+        // system-only allowlist so a barewords command in a
+        // child shell (the relaunch helper invokes `ditto`,
+        // `kill`, `mv`, `seq`, `date`, `open`) can't be
+        // shadowed by something in `~/bin`. `LANG=C` /
+        // `LC_ALL=C` keep output parsing locale-stable.
+        process.environment = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": NSHomeDirectory(),
+            "LANG": "C",
+            "LC_ALL": "C",
+        ]
 
         do {
             try process.run()
@@ -132,14 +149,19 @@ public enum Subprocess {
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 if process.isRunning {
+                    // **Subproc-F#1 (v0.1.7.19):** simplified
+                    // escalation. Previously
+                    // SIGTERM → 250ms → SIGINT → 250ms → SIGKILL.
+                    // SIGINT is not an escalation past SIGTERM —
+                    // any child that traps SIGTERM almost always
+                    // also traps SIGINT (`naive` does both for
+                    // graceful shutdown). The middle step wasted
+                    // time on no escalation; now SIGTERM gets a
+                    // longer 1s grace before SIGKILL takes over.
                     process.terminate()
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                     if process.isRunning {
-                        process.interrupt()
-                        try? await Task.sleep(nanoseconds: 250_000_000)
-                        if process.isRunning {
-                            kill(process.processIdentifier, SIGKILL)
-                        }
+                        kill(process.processIdentifier, SIGKILL)
                     }
                     return true  // timed out
                 }
