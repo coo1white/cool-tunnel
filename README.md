@@ -63,7 +63,7 @@ click a different mode chip.
 
 1. Download the latest release from
    **[github.com/coo1white/cool-tunnel/releases][releases]**.
-   Pick **`Cool-tunnel-v0.1.7.15.dmg`** if you're not sure.
+   Pick **`Cool-tunnel-v0.1.7.16.dmg`** if you're not sure.
 2. Open the `.dmg`. A Finder window opens.
 3. Drag **Cool tunnel.app** onto the **Applications** folder
    shortcut.
@@ -182,9 +182,14 @@ the `~/Library/Application Support/COOL-TUNNEL` folder.
 
 ## Updating without reinstalling the app
 
-Open Settings (gear button) and you'll see two **Update**
+Open Settings (gear button) and you'll see three **Update**
 buttons:
 
+- **Cool Tunnel → Update** downloads the latest version of the
+  app itself from the project's GitHub releases, verifies it
+  against a published SHA-256 manifest, and relaunches when
+  ready. (Currently the only updater with SHA pinning;
+  Naive + Rust Core SHA pinning is targeted for v0.1.8.)
 - **Naive Binary → Update** downloads the latest NaiveProxy from
   upstream, makes one universal file from the arm64 + x86_64
   versions, and adopts it as your engine.
@@ -192,7 +197,9 @@ buttons:
   the Cool Tunnel GitHub release. Takes effect on your next app
   launch.
 
-Both are one click. No terminal, no recompiling.
+All three are one click. No terminal, no recompiling. Each one
+validates that the URL is on a trusted GitHub-served host and
+caps the download size before adopting the new file.
 
 ---
 
@@ -202,7 +209,7 @@ Both are one click. No terminal, no recompiling.
 | --- | --- |
 | **Mac model** | Apple Silicon (any) or Intel from 2018 |
 | **macOS** | 14 (Sonoma) or newer |
-| **Disk** | About 23 MB |
+| **Disk** | About 45 MB installed |
 | **Memory** | About 30 MB while running |
 | **Admin password** | Never needed |
 

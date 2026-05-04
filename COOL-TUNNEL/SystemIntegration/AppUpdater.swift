@@ -216,6 +216,25 @@ final class AppUpdater {
         default:
             break
         }
+        // **Edge-F#11 (v0.1.7.16):** detect multiple installed
+        // copies of Cool Tunnel BEFORE the helper writes anything.
+        // If the user has /Applications/Cool tunnel.app AND
+        // ~/Applications/Cool tunnel.app (or any other copy with
+        // matching bundle ID), the relaunch helper would update
+        // whichever was launched but LaunchServices' identifier-
+        // resolution may pick a different one on next double-
+        // click — leaving the user with a "successful" update
+        // that doesn't appear to have changed anything. Better
+        // to refuse and tell them which copies exist.
+        do {
+            try await Self.refuseIfMultipleInstalls()
+        } catch let UpdaterError.message(reason) {
+            state = .failed(message: reason)
+            return
+        } catch {
+            state = .failed(message: error.localizedDescription)
+            return
+        }
         state = .downloading(progress: 0.0)
         do {
             try await Self.run(release: release) { phase in
@@ -489,6 +508,16 @@ final class AppUpdater {
         tempRoot: URL,
         report: @escaping @MainActor @Sendable (State) -> Void
     ) async throws {
+        // **Edge-F#1 (v0.1.7.16):** disk-space pre-flight on
+        // tempRoot. Without this, a 100 MB .zip download could
+        // succeed onto a near-full volume, only to fail at the
+        // ditto-extract step with an attacker-influenceable
+        // "No space left on device" stderr that AppUpdater used
+        // to surface verbatim. Refuse early with an actionable
+        // message. 300 MB ≈ 100 MB .zip + ~50 MB extracted
+        // bundle + slack for the relaunch helper's STAGED copy.
+        try requireFreeSpace(at: tempRoot, atLeast: 300 * 1024 * 1024)
+
         let zipURL = tempRoot.appendingPathComponent(release.zipURL.lastPathComponent)
         let shaURL = tempRoot.appendingPathComponent(release.shaManifestURL.lastPathComponent)
 
@@ -1294,6 +1323,79 @@ final class AppUpdater {
         } catch {
             throw UpdaterError.message(
                 "Couldn't create the relaunch helper script: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// **Edge-F#11 (v0.1.7.16):** uses Spotlight (`mdfind`) to
+    /// locate every `.app` whose bundle identifier matches the
+    /// canonical ID. If more than one is registered, refuses
+    /// the update and asks the user to keep only one. The
+    /// failure mode that motivates this check: the user has
+    /// two installs (e.g. /Applications + ~/Applications), the
+    /// helper updates one, LaunchServices launches the other
+    /// next time — and the user thinks the update silently
+    /// failed. Spotlight is the canonical macOS index for this
+    /// query.
+    nonisolated private static func refuseIfMultipleInstalls() async throws {
+        let result: SubprocessResult
+        do {
+            result = try await Subprocess.run(
+                executable: URL(fileURLWithPath: "/usr/bin/mdfind"),
+                arguments: [
+                    "kMDItemCFBundleIdentifier == \"\(canonicalBundleID)\"",
+                ],
+                timeout: 10
+            )
+        } catch {
+            // mdfind launch failure isn't fatal — Spotlight may
+            // be disabled or indexing. Log and continue.
+            appUpdaterLogger.warning(
+                "mdfind launch failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+        if result.timedOut || !result.success {
+            appUpdaterLogger.warning(
+                "mdfind did not return cleanly; skipping multi-install check"
+            )
+            return
+        }
+        let paths = result.stdout
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        if paths.count > 1 {
+            appUpdaterLogger.error(
+                "multiple installs detected: \(paths.joined(separator: ", "), privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "Multiple copies of Cool Tunnel were found on this Mac. Move all but one to the Trash, restart the app you want to keep, and try Update again."
+            )
+        }
+    }
+
+    /// **Edge-F#1 (v0.1.7.16):** asserts that the volume
+    /// containing `url` has at least `bytes` available for
+    /// "important usage" — the URL resource key macOS exposes
+    /// for pre-flight checks. Throws an `UpdaterError` with a
+    /// recovery hint if the volume is too full. Cheap (a single
+    /// `resourceValues` call on a directory URL) so it can run
+    /// per-pipeline.
+    nonisolated private static func requireFreeSpace(at url: URL, atLeast bytes: Int64) throws {
+        let values = try url.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+        ])
+        if let available = values.volumeAvailableCapacityForImportantUsage,
+            available < bytes
+        {
+            let availableMB = available / (1024 * 1024)
+            let requiredMB = bytes / (1024 * 1024)
+            appUpdaterLogger.error(
+                "free-space pre-flight failed: available=\(availableMB, privacy: .public)MB required=\(requiredMB, privacy: .public)MB"
+            )
+            throw UpdaterError.message(
+                "Not enough disk space to install the update (\(availableMB) MB free, \(requiredMB) MB needed). Free a few hundred megabytes and try again."
             )
         }
     }
