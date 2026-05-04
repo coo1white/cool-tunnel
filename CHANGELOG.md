@@ -9,6 +9,61 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.20] — 2026-05-04 (LTSC hotfix — multi-install false-positive)
+
+LTSC hotfix on the v0.1.7 line. Single fix; ships immediately.
+
+**Bug discovered in production:** v0.1.7.16's Edge-F#11
+multi-install detector (`refuseIfMultipleInstalls`) ran
+`mdfind kMDItemCFBundleIdentifier == "space.coolwhite.naive"`
+and treated every hit as a real user install. Spotlight
+indexes Xcode build artifacts in
+`~/Library/Developer/Xcode/DerivedData/` — for any developer
+who has Cool Tunnel checked out and has run `xcodebuild`
+even once, that's anywhere from 1 to 10+ extra hits. The
+in-app updater then refused with "Multiple copies were
+found" even though the user has only one real install in
+`/Applications/`.
+
+### What landed (1 fix)
+
+- **`AppUpdater.refuseIfMultipleInstalls` filters Xcode
+  build artifacts.** New helper
+  `isPlausibleUserInstall(_:)` excludes any `mdfind` hit
+  containing `/DerivedData/`, `/Build/Products/`, or
+  `/Library/Developer/Xcode/`, plus project-local
+  `build/DerivedData/` / `build/Build/Products/` paths.
+  Real installs (`/Applications/...`,
+  `~/Applications/...`, anywhere not matching those
+  patterns) are still detected — defenders against the
+  original Edge-F#11 failure mode (genuine duplicate
+  installs in `/Applications` + `~/Applications`) stays
+  in place.
+- **Error message lists the actual paths.** When the
+  refusal does fire on a real duplicate, the user-facing
+  message now enumerates each path so they don't have to
+  hunt in Finder by hand.
+
+### Verification
+
+- `xcodebuild Release` BUILD SUCCEEDED
+- No Rust changes; existing 104 lib + 18 chaos tests
+  still pass
+
+### Known affected users
+
+Any developer who has Cool Tunnel checked out from GitHub
+and has built it locally (Xcode auto-generates
+`DerivedData`). Users on the production `.app` who have
+NEVER opened the project in Xcode are unaffected.
+
+If you're running **v0.1.7.19 or earlier and seeing this**:
+either drag-install v0.1.7.20's `.dmg` over `/Applications`
+manually, or run
+`rm -rf ~/Library/Developer/Xcode/DerivedData/*` once to
+clear the Xcode caches that Spotlight is indexing (Xcode
+will regenerate them next build — no source loss).
+
 ## [0.1.7.19] — 2026-05-04 (LTSC patch — 10 deferred-high cluster)
 
 LTSC patch on v0.1.7 line. 10 high-severity items pulled
