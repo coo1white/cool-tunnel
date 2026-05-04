@@ -193,6 +193,11 @@ public final class TunnelOrchestrator {
     /// stays fast and we avoid pre-paying authentication cost the user
     /// may never need (read-only profile browsing doesn't spawn naive).
     public func bootstrapIfNeeded() async {
+        // **UX-F#16 (v0.1.7.19):** the `subscribeToEvents`
+        // stream-end handler now flips `didBootstrap = false`
+        // when the engine dies, so this guard correctly
+        // re-bootstraps (re-spawns the engine) on the
+        // next call rather than short-circuiting.
         guard !didBootstrap else { return }
 
         // **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep
@@ -290,6 +295,27 @@ public final class TunnelOrchestrator {
     /// died on us" when its event stream finishes.
     private var isShuttingDown: Bool = false
 
+    /// **Lifecycle-F#7 (v0.1.7.19):** transition lock. While
+    /// true, `switchMode` / `start` / `stop` short-circuit to
+    /// no-op. Without this, a user who clicks Smart at t=0 and
+    /// Global at t=50 ms (mid-`stopQuiet`) gets two concurrent
+    /// transitions racing on `paths.configFile`,
+    /// `proxyController` state, and `core.send(...)` ordering.
+    /// Both transitions write `naive`'s config; whichever wins
+    /// the file race is what naive sees, and the system proxy
+    /// state is whatever the last `enableX` call applied. The
+    /// flag makes "second click while a transition is in
+    /// flight" a clean no-op — the user's first intent wins.
+    private var transitionInFlight: Bool = false
+
+    /// **UX-F#3 (v0.1.7.19):** captured at start time so
+    /// `selectedProfile.set` can detect "user edited the
+    /// active profile while connected" and surface a banner.
+    /// Without this, a profile-field edit silently keeps the
+    /// running engine using the old config, but the form
+    /// shows the new value — confusing.
+    private var activeProfileID: String?
+
     // MARK: - Profile management
 
     public var selectedProfile: Profile? {
@@ -299,6 +325,24 @@ public final class TunnelOrchestrator {
         }
         set {
             guard let updated = newValue else { return }
+            // **UX-F#3 (v0.1.7.19):** detect "user edited the
+            // active profile while connected" and surface a
+            // banner. The running engine's config is locked at
+            // the start-of-session moment; subsequent edits are
+            // silently buffered for the next start. Without
+            // this banner, users edit the server field, see
+            // their input persist (correct), but get confused
+            // when their browser keeps using the old server.
+            // We flag it but don't auto-restart — restart-on-
+            // edit could lose mid-session work for users who
+            // are just typing a new draft profile.
+            if isRunning, let active = activeProfileID, active == updated.id {
+                let prior = profiles.first(where: { $0.id == updated.id })
+                if let prior = prior, prior != updated {
+                    lastError =
+                        "Profile edits applied — click Stop, then a mode chip to use them. The running connection is still on the old config."
+                }
+            }
             if let index = profiles.firstIndex(where: { $0.id == updated.id }) {
                 profiles[index] = updated
             }
@@ -376,6 +420,16 @@ public final class TunnelOrchestrator {
     /// tapping a mode chip while the tunnel is live hot-swaps it
     /// instead of forcing the user to stop first.
     public func switchMode(to newMode: ProxyMode) async throws {
+        // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
+        // rapid second click while a prior switchMode is
+        // mid-flight (between stopQuiet and startCore) is a
+        // clean no-op. The user's first intent wins. See the
+        // `transitionInFlight` declaration above for the race
+        // it defends against.
+        guard !transitionInFlight else { return }
+        transitionInFlight = true
+        defer { transitionInFlight = false }
+
         guard newMode != .stopped else {
             await stop()
             return
@@ -539,6 +593,11 @@ public final class TunnelOrchestrator {
 
         activeMode = mode
         isRunning = true
+        // **UX-F#3 (v0.1.7.19):** capture which profile the
+        // engine started with. The selectedProfile setter
+        // compares against this to detect edits to the
+        // currently-active profile.
+        activeProfileID = selectedProfileID
         if log {
             appendInfo("started in \(mode.title)")
         }
@@ -725,11 +784,26 @@ public final class TunnelOrchestrator {
             //      receiving lines and they assume "nothing's
             //      happening" while the proxy is silently dead.
             if !self.isShuttingDown {
-                self.recordError(
-                    "Engine subprocess exited unexpectedly. The proxy is no longer running. Try clicking Start again — the next launch will respawn cool-tunnel-core."
-                )
+                // **UX-F#16 (v0.1.7.19):** the engine
+                // (`cool-tunnel-core`) subprocess died — pipe
+                // broke or process crashed. The previous
+                // "click Start again" message was misleading;
+                // a Start click hits `core.send(...)` which
+                // throws `.notRunning`. Now: revert the
+                // system proxy first (UX-F#5 reasoning), flip
+                // `didBootstrap` back to false so the next
+                // mode click re-runs the bootstrap path
+                // (which calls `core.start()`), and surface
+                // an actionable error.
+                try? await self.proxyController.disableAll()
+                ProxyActiveFlag.clear(
+                    at: ProxyActiveFlag.path(in: self.paths.supportDirectory))
                 self.isRunning = false
                 self.activeMode = .stopped
+                self.didBootstrap = false
+                self.recordError(
+                    "Engine subprocess exited unexpectedly — system proxy reverted. Click a mode chip to relaunch the engine and try again."
+                )
             }
         }
     }
@@ -739,8 +813,32 @@ public final class TunnelOrchestrator {
         case .logLine(let source, let line):
             appendLog(source: source, text: line)
         case .stateChanged(let running):
+            // **UX-F#5 (v0.1.7.19):** when naive dies on its
+            // own (`running:false` arriving outside a
+            // user-initiated stop), revert system proxy
+            // immediately. Without this, macOS keeps routing
+            // browser requests at `127.0.0.1:1080` where
+            // nothing is listening — the user sees a misleading
+            // "Idle" header but every page in their browser
+            // stalls. The status flip is visible in the
+            // HeaderView; the proxy revert makes the visible
+            // state actually match the network state.
+            let wasRunning = isRunning
             isRunning = running
-            if !running { activeMode = .stopped }
+            if !running {
+                activeMode = .stopped
+                if wasRunning && !isShuttingDown {
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        try? await self.proxyController.disableAll()
+                        ProxyActiveFlag.clear(
+                            at: ProxyActiveFlag.path(in: self.paths.supportDirectory))
+                        self.recordError(
+                            "naive stopped unexpectedly — system proxy reverted. Check the log for why, then click a mode to retry."
+                        )
+                    }
+                }
+            }
         case .anomaly(let reason, let detail):
             appendLog(source: .stderr, text: "[anomaly:\(reason.rawValue)] \(detail)")
             // `ListeningOutsideLoopback` means naive is exposed beyond
