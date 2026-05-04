@@ -99,24 +99,47 @@ final class RustCoreUpdater {
 
         do {
             state = .resolvingRelease
-            let (tag, downloadURL) = try await Self.resolveLatestAsset()
+            let resolved = try await Self.resolveLatestAsset()
 
             state = .downloading(progress: 0.0)
             let tempRoot = try Self.makeTempDirectory()
             defer { try? FileManager.default.removeItem(at: tempRoot) }
-            let downloaded = try await Self.download(
-                url: downloadURL,
+            // **Sw#C4 partial (v0.1.7.18):** download both the
+            // engine binary AND the SHA-256 manifest. Refuse to
+            // adopt the binary if the hash doesn't match the
+            // manifest line for this exact asset filename. The
+            // manifest URL comes from the same release JSON
+            // (host-validated) and the redirect guard already
+            // constrains where the bytes can come from — but
+            // SHA pinning is what closes the residual
+            // CDN-internal-tamper gap that the redirect guard
+            // structurally cannot.
+            async let binaryFetch: URL = Self.download(
+                url: resolved.downloadURL,
                 to: tempRoot.appendingPathComponent("cool-tunnel-core")
             )
+            async let manifestFetch: URL = Self.download(
+                url: resolved.manifestURL,
+                to: tempRoot.appendingPathComponent(
+                    resolved.manifestURL.lastPathComponent)
+            )
+            let downloaded = try await binaryFetch
+            let manifestPath = try await manifestFetch
             state = .downloading(progress: 1.0)
+
+            try Self.verifyAgainstManifest(
+                binary: downloaded,
+                manifestURL: manifestPath,
+                expectedAssetName: resolved.assetName
+            )
 
             state = .installing
             // **CONC-F#1 (v0.1.7.15):** `adhocSign` now async.
             try await Self.adhocSign(at: downloaded)
             try Self.atomicallyInstall(from: downloaded, to: installedURL)
 
-            lastInstalledTag = tag
-            state = .succeeded(tag: tag, installedPath: installedURL)
+            lastInstalledTag = resolved.tag
+            state = .succeeded(tag: resolved.tag, installedPath: installedURL)
             return installedURL
         } catch let UpdaterError.message(reason) {
             state = .failed(message: reason)
@@ -138,12 +161,32 @@ final class RustCoreUpdater {
 
     // MARK: - Pipeline (off-main)
 
-    /// Returns `(tag, downloadURL)` for the newest cool-tunnel
-    /// release that exposes a `cool-tunnel-core-vX.Y.Z(.W)?-universal`
-    /// asset. Walks the recent-releases list rather than hitting
+    /// Aggregate of the resolved release: tag, the
+    /// `cool-tunnel-core-vX.Y.Z(.W)?-universal` download URL,
+    /// the matching SHA-256 manifest URL
+    /// (`Cool-tunnel-vX.Y.Z.sha256`), and the asset filename
+    /// the manifest is keyed on.
+    ///
+    /// **Sw#C4 partial (v0.1.7.18):** previously this returned
+    /// just `(tag, downloadURL)` — pinning required adding the
+    /// manifest URL to the resolved tuple, which is the
+    /// minimal API surface change.
+    private struct ResolvedAsset {
+        let tag: String
+        let downloadURL: URL
+        let manifestURL: URL
+        let assetName: String
+    }
+
+    /// Returns the newest cool-tunnel release that exposes both
+    /// a `cool-tunnel-core-vX.Y.Z(.W)?-universal` asset AND a
+    /// matching `Cool-tunnel-vX.Y.Z.sha256` manifest. Walks the
+    /// recent-releases list rather than hitting
     /// `/releases/latest` because pre-releases may be the only
-    /// builds for a while.
-    private static func resolveLatestAsset() async throws -> (String, URL) {
+    /// builds for a while. A release missing the manifest is
+    /// SKIPPED (not adopted unverified) — this is the SHA-pin
+    /// posture.
+    private static func resolveLatestAsset() async throws -> ResolvedAsset {
         // Compile-time constant URL — same audit-driven safe-unwrap
         // pattern as `NaiveUpdater.resolveLatestStableTag`.
         guard
@@ -193,27 +236,100 @@ final class RustCoreUpdater {
 
         let releases = try JSONDecoder().decode([Release].self, from: data)
         for release in releases {
-            if let asset = release.assets.first(where: {
+            // Engine asset
+            guard let engineAsset = release.assets.first(where: {
                 $0.name.hasPrefix("cool-tunnel-core-v") && $0.name.hasSuffix("-universal")
-            }) {
-                // **R-F#4:** validate the asset URL is on a
-                // trusted GitHub-served host before returning.
-                // `browser_download_url` is attacker-influenceable
-                // through a compromised API response; without
-                // this check (or SHA pinning, which RustCore
-                // doesn't have yet), a wrong host could substitute
-                // the engine binary entirely.
-                guard isTrustedGitHubURL(asset.browserDownloadURL) else {
-                    throw UpdaterError.message(
-                        "GitHub returned an engine asset URL on an unexpected host. Refusing to update."
-                    )
-                }
-                return (release.tagName, asset.browserDownloadURL)
+            }) else {
+                continue
             }
+            // **Sw#C4 partial (v0.1.7.18):** require the
+            // SHA-256 manifest to be present in the same release.
+            // A release without it is SKIPPED — adopting the
+            // binary unverified would defeat the purpose of
+            // adding pinning. Older releases that predate the
+            // manifest publishing era will be silently skipped;
+            // the in-app updater will retry next time the user
+            // clicks Update.
+            let manifestName = "Cool-tunnel-\(release.tagName).sha256"
+            guard let manifestAsset = release.assets.first(where: {
+                $0.name == manifestName
+            }) else {
+                rustCoreUpdaterLogger.info(
+                    "skipping \(release.tagName, privacy: .public) — no SHA-256 manifest"
+                )
+                continue
+            }
+            // **R-F#4:** trusted-host check on both URLs.
+            guard isTrustedGitHubURL(engineAsset.browserDownloadURL) else {
+                throw UpdaterError.message(
+                    "GitHub returned an engine asset URL on an unexpected host. Refusing to update."
+                )
+            }
+            guard isTrustedGitHubURL(manifestAsset.browserDownloadURL) else {
+                throw UpdaterError.message(
+                    "GitHub returned a SHA-256 manifest URL on an unexpected host. Refusing to update."
+                )
+            }
+            return ResolvedAsset(
+                tag: release.tagName,
+                downloadURL: engineAsset.browserDownloadURL,
+                manifestURL: manifestAsset.browserDownloadURL,
+                assetName: engineAsset.name
+            )
         }
         throw UpdaterError.message(
-            "No engine binary in the recent Cool Tunnel releases. The bundled engine still works; Update will retry next time."
+            "No engine binary with a SHA-256 manifest in the recent Cool Tunnel releases. The bundled engine still works; Update will retry next time."
         )
+    }
+
+    /// **Sw#C4 partial (v0.1.7.18):** asserts the downloaded
+    /// engine binary matches the SHA-256 the manifest claims
+    /// for `expectedAssetName`. Throws on any mismatch — caller
+    /// treats that as a refusal to install. Mirrors
+    /// `AppUpdater.verifyZipAgainstManifest` but for a single
+    /// binary entry rather than a .zip.
+    nonisolated private static func verifyAgainstManifest(
+        binary: URL,
+        manifestURL: URL,
+        expectedAssetName: String
+    ) throws {
+        let expected: String?
+        do {
+            expected = try SHAVerifier.expectedHash(
+                for: expectedAssetName, in: manifestURL)
+        } catch {
+            throw UpdaterError.message(
+                "Couldn't read the SHA-256 manifest. Refusing to update."
+            )
+        }
+        guard let expected = expected else {
+            rustCoreUpdaterLogger.error(
+                "manifest does not include \(expectedAssetName, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "SHA-256 manifest does not include the engine binary. Refusing to update."
+            )
+        }
+        let actual: String
+        do {
+            actual = try SHAVerifier.sha256(of: binary)
+        } catch {
+            throw UpdaterError.message(
+                "Couldn't read the downloaded engine binary to verify hash."
+            )
+        }
+        guard actual == expected else {
+            // Don't echo either hash to the user-facing error
+            // (same posture as AppUpdater Sw-H2): a MITM's
+            // hash would otherwise appear in the UI. Real
+            // values go to os_log only.
+            rustCoreUpdaterLogger.error(
+                "engine binary hash mismatch: expected=\(expected, privacy: .public) actual=\(actual, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "SHA-256 verification failed for the engine binary. The download may be corrupted or tampered with — refusing to install."
+            )
+        }
     }
 
     /// Delegates to `GitHubRedirectGuard.download` — the shared
