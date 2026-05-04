@@ -100,7 +100,39 @@ public actor CoreClient {
         readerTask = Task { [weak self] in
             await self?.readLoop(handle: reader)
         }
+
+        // **Subproc-F#11a (v0.1.7.19):** drain stderr on its own
+        // detached task. Without this, a chatty engine writing
+        // >64 KiB to stderr fills the kernel pipe buffer, blocks
+        // on its next stderr write, and the engine deadlocks
+        // mid-request. The drain doesn't structure the bytes
+        // (engine errors that need user surface go through the
+        // JSON-over-stdout protocol, not stderr), but it
+        // prevents the deadlock and forwards content to
+        // tracing for support diagnosis. Mirrors the
+        // concurrent-pipe-drain pattern `Subprocess.run` uses
+        // for short-lived children.
+        let stderrHandle = stderr.fileHandleForReading
+        Task.detached(priority: .utility) {
+            while true {
+                let chunk = stderrHandle.availableData
+                if chunk.isEmpty { break }  // EOF on child exit
+                if let line = String(data: chunk, encoding: .utf8),
+                    !line.isEmpty
+                {
+                    Self.engineStderrLogger.warning(
+                        "engine stderr: \(line, privacy: .public)"
+                    )
+                }
+            }
+        }
     }
+
+    /// **Subproc-F#11a (v0.1.7.19):** dedicated logger for
+    /// engine stderr output. Subsystem matches the project-wide
+    /// convention so support's `log show` predicates surface
+    /// engine diagnostics under one umbrella.
+    private static let engineStderrLogger = Logger.cooltunnel("CoreClient.stderr")
 
     /// Sends a `shutdown` and tears the subprocess down.
     public func stop() async {

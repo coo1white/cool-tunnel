@@ -114,15 +114,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `networksetup`) would park the app in "terminating…" forever
         // with the engine + system proxy still alive — far worse than
         // a 5 s wait followed by a slightly-dirty exit.
+        // **Lifecycle-F#5 (v0.1.7.19):** keep a handle on the
+        // shutdown Task so the watchdog can cancel it on
+        // expiry. Without the cancel, a shutdown that finishes
+        // at t=8s (after the watchdog already replied at t=5s)
+        // continues running its body — calling `core.stop()` /
+        // `disableAll()` against a partially-released graph
+        // while AppKit is mid-teardown.
         let replied = NSAppTerminateReplyOnce()
-        Task { @MainActor in
-            do {
-                await orchestrator.shutdown()
-            }
+        let shutdownTask = Task { @MainActor in
+            await orchestrator.shutdown()
             replied.fire()
         }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
+            shutdownTask.cancel()
             replied.fire()
         }
         return .terminateLater
