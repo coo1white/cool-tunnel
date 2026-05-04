@@ -1,109 +1,54 @@
 // SystemIntegration/AppUpdater.swift
 //
-// In-app updater for the Cool Tunnel .app itself. Mirrors the
-// pattern of NaiveUpdater / RustCoreUpdater but adds the missing
-// security control the Sw#C4 audit identified as deferred:
-// **SHA-256 manifest pinning**. Every release published by
-// `scripts/package_release.sh` ships a
-// `Cool-tunnel-vX.Y.Z.sha256` file alongside the .zip; this
-// updater downloads BOTH, verifies the .zip hash against the
-// manifest, and refuses to install on any mismatch.
+// In-app self-updater for the Cool Tunnel `.app`. SHA-256
+// manifest-pinned: every release ships a
+// `Cool-tunnel-vX.Y.Z.sha256` alongside the .zip; we download
+// both, verify the .zip's hash against the manifest line, and
+// refuse to install on any mismatch.
 //
-// Wire flow:
-//   1. GET /releases/latest from GitHub.
-//   2. Compare tag to the running app's
-//      `CFBundleShortVersionString`. No-op if equal or older.
-//   3. Download the `Cool-tunnel-vX.Y.Z.zip` asset.
-//   4. Download the `Cool-tunnel-vX.Y.Z.sha256` asset.
-//   5. Compute SHA-256 of the downloaded .zip via CryptoKit
-//      (streamed from disk; AU-4 fix avoids loading the whole
-//      .zip into memory on @MainActor).
-//   6. Cross-reference against the manifest line for the .zip
-//      filename. Refuse on mismatch.
-//   7. Extract via `ditto -x -k` (through `Subprocess.run` for
-//      concurrent pipe drain + timeout escalation).
-//   8. Verify the extracted `Cool tunnel.app`:
-//      - Bundle identifier matches the running app's.
-//      - `CFBundleShortVersionString` matches the release tag.
-//      - `CodeSignVerifier` accepts the bundle.
-//   9. Refuse if the running app is on a read-only volume (DMG
-//      mount or quarantine staging).
-//  10. Write a small bash relaunch helper into the per-update
-//      tempRoot (NOT /tmp — see AU-1) atomically with mode
-//      0700, then spawn it detached.
-//  11. `NSApp.terminate(nil)` — the helper waits for the parent
-//      PID to exit, ditto-replaces the bundle, and `open -a`s
-//      the new copy.
+// Pipeline:
+//   1. GET /releases/latest; no-op if not newer than the running
+//      `CFBundleShortVersionString`.
+//   2. Download the .zip + .sha256 asset (in parallel).
+//   3. Stream-hash the .zip; cross-reference the manifest line.
+//   4. Extract via `ditto -x -k` through `Subprocess.run`
+//      (concurrent pipe drain, timeout escalation, sanitized env).
+//   5. Walk the extraction tree — reject hard links, symlinks
+//      that escape the bundle root, more than one .app, anything
+//      that isn't a real bundle directory.
+//   6. Verify the extracted bundle's `CFBundleIdentifier`
+//      matches `canonicalBundleID` (a hard-coded constant — NOT
+//      `Bundle.main.bundleIdentifier`, which is attacker-
+//      controllable if the running app was ever substituted),
+//      its `CFBundleShortVersionString` matches the release tag,
+//      and `CodeSignVerifier` accepts the bundle.
+//   7. Refuse if the running app is on a read-only volume, in a
+//      non-writable folder, or has the bundle itself locked.
+//   8. Refuse if multiple real installs exist (filtered to skip
+//      Xcode build artifacts; see `isPlausibleUserInstall`).
+//   9. Pre-flight free disk space on tempRoot.
+//  10. Write the bash relaunch helper into tempRoot atomically
+//      via `RestrictedFile.write(mode: 0o700)`, spawn detached.
+//  11. `NSApp.terminate(nil)`; the helper waits for parent PID
+//      exit, atomic-renames a STAGED bundle into place with
+//      rollback on any error, then `open`s the new bundle.
 //
-// Security posture:
-// - SHA pinning closes the MITM-on-asset-URL hole that the
-//   existing NaiveUpdater / RustCoreUpdater still have (deferred
-//   from Sw#C4 audit; will be retrofitted in v0.2.0).
-// - The relaunch helper writes only into the existing app's
-//   bundle URL. We refuse to install if that URL is read-only
-//   so a user running from a DMG mount or trash gets a clear
-//   error instead of a silent no-op.
-// - We do NOT request admin escalation. /Applications is
-//   admin-group writable by default; the user is asked to drag
-//   the .app there once, after which all updates work without
-//   `sudo` or auth dialogs.
+// Posture:
+// - We do NOT request admin escalation. `/Applications` is
+//   admin-group writable by default; users drag the .app there
+//   once, after which updates need no sudo prompt.
+// - The relaunch helper writes ONLY at the existing bundle URL
+//   and only after every verification step has passed.
+// - SHA pinning (Sw#C4) is shipped here for the .app itself; the
+//   matching pin for the bundled `naive` is targeted for v0.1.8
+//   and tracked in SECURITY.md's "does NOT protect against".
 //
-// ## v0.1.7.11 Rule-Maker hardening (Fifth audit cycle)
-//
-// - **AU-1 (R2, R4):** the relaunch helper script no longer
-//   lives in `/tmp`. Previously `String.write(to:atomically:)`
-//   created the file with default umask perms (typically 0644),
-//   then a separate `setAttributes(0o700)` call tightened them —
-//   leaving a tiny but real window where a same-UID attacker
-//   could swap the script via symlink before `task.run()`. The
-//   script now lives in the per-update `tempRoot` (already
-//   created with restrictive perms), and is created via
-//   `open(O_CREAT|O_EXCL|O_WRONLY, 0o700)` so it is born with
-//   the right mode and never exists with any other.
-// - **AU-2 (R2):** `browser_download_url`s returned by the
-//   GitHub releases API are now validated against an HTTPS +
-//   github.com / githubusercontent.com host suffix list before
-//   being handed to `URLSession.download`. Previously a
-//   compromised or changed API response could redirect the
-//   .zip / manifest fetch to an attacker-controlled host;
-//   SHA pinning protects the .zip but TRUSTS the manifest URL
-//   (it defines the expected hash), so the manifest URL is the
-//   actual root of trust.
-// - **AU-3 (R2):** all GitHub fetches now use a per-task
-//   delegate that constrains HTTP redirects to the same host
-//   suffix list. `URLSession.shared.download(from:)` was
-//   following up to ~20 redirects with no host check — a CDN
-//   takeover or misconfigured GitHub redirect could substitute
-//   the manifest at this layer, defeating SHA pinning.
-// - **AU-4 (R3):** SHA hashing and Info.plist parsing have
-//   been moved off `@MainActor`. The pipeline helpers are now
-//   `nonisolated`, and `verifyZipAgainstManifest` streams the
-//   .zip through `FileHandle.read(upToCount:)` 64 KiB at a
-//   time instead of `Data(contentsOf: zipURL)` which previously
-//   loaded the full ~12 MB into memory on the main thread.
-// - **AU-5 (R2, R4):** `refuseExtractionEscapingSymlinks` no
-//   longer uses `String.hasPrefix` (which gives false negatives
-//   for sibling paths like `/extracted-evil` vs `/extracted`,
-//   and doesn't normalise `..`-traversal through symlink
-//   targets). It now uses `realpath(3)` + path-component
-//   ancestor comparison.
-// - **AU-7 (R1):** the version-mismatch error in
-//   `verifyExtractedApp` no longer interpolates the new app's
-//   `CFBundleShortVersionString` into the user-facing string.
-//   That value is attacker-controlled; an attacker who got past
-//   SHA pinning could plant a Unicode-bidi-override or fake
-//   "click here to bypass" text in it. The actual value still
-//   goes to `os_log` for support tickets.
-// - **AU-12 (R1, R2):** `versionIsNewer` no longer silently
-//   coerces non-numeric segments to 0 via `Int($0) ?? 0`.
-//   Pre-release suffixes (`-rc1`, `-beta`) are now an outright
-//   reject signal — `/releases/latest` already excludes them,
-//   so seeing one is a release-process bug, not a normal upgrade.
-// - **AU-15 (R2):** `public` access has been removed from
-//   symbols that are only consumed within the same module
-//   (Settings UI). `internal` (the default) is sufficient and
-//   shrinks the API surface that future code paths can
-//   accidentally reach.
+// Per-fix audit-tag breadcrumbs (`AU-1`..`AU-15`, `R-F#1`..,
+// `Q-F#1`.., `Edge-F#1/F#11`, etc.) used to live here in a
+// release-history block; that information now lives in
+// CHANGELOG.md where git blame can find it. Inline comments
+// in this file describe the *invariant* a piece of code
+// upholds, not the cycle in which it was added.
 
 import AppKit
 import CryptoKit
@@ -692,7 +637,7 @@ final class AppUpdater {
         // (background actor + bounded memory).
         let actualSha: String
         do {
-            actualSha = try sha256(of: zipURL)
+            actualSha = try SHAVerifier.sha256(of: zipURL)
         } catch {
             throw UpdaterError.message("Couldn't read downloaded archive to verify hash.")
         }
@@ -709,13 +654,6 @@ final class AppUpdater {
                 "SHA-256 verification failed for \(zipFilename). The download may be corrupted or tampered with — refusing to install."
             )
         }
-    }
-
-    /// **v0.1.7.18:** delegates to `SHAVerifier.sha256(of:)`,
-    /// extracted so RustCoreUpdater can share the same
-    /// streaming-hash primitive for its own manifest pinning.
-    nonisolated private static func sha256(of fileURL: URL) throws -> String {
-        try SHAVerifier.sha256(of: fileURL)
     }
 
     /// Uses `/usr/bin/ditto -x -k` to extract the .zip preserving
@@ -1270,10 +1208,26 @@ final class AppUpdater {
             open "$OLD_APP"
             """
 
-        try writeRelaunchScript(script, to: scriptURL)
+        // Helper script lives in tempRoot (already restrictive
+        // perms; cleaned up by the script's own EXIT trap). The
+        // 0o700 mode is set atomically at file creation —
+        // `RestrictedFile.write`'s `O_CREAT|O_EXCL`-then-fsync-
+        // then-rename closes the post-write/pre-chmod race the
+        // older /tmp + chmod-after pattern had.
+        guard let scriptData = script.data(using: .utf8) else {
+            throw UpdaterError.message(
+                "Internal error: relaunch script not encodable as UTF-8."
+            )
+        }
+        do {
+            try RestrictedFile.write(scriptData, to: scriptURL, mode: 0o700)
+        } catch {
+            throw UpdaterError.message(
+                "Couldn't create the relaunch helper script: \(error.localizedDescription)"
+            )
+        }
 
-        // Spawn detached. We deliberately do NOT wait — the
-        // caller is about to NSApp.terminate.
+        // Spawn detached — the parent is about to NSApp.terminate.
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [scriptURL.path]
@@ -1285,35 +1239,6 @@ final class AppUpdater {
         } catch {
             throw UpdaterError.message(
                 "Couldn't launch the relaunch helper: \(error.localizedDescription)"
-            )
-        }
-    }
-
-    /// AU-1: atomic, race-free helper-script writer.
-    ///
-    /// Uses `open(O_CREAT | O_EXCL | O_WRONLY, 0o700)` so the
-    /// file is created with the restrictive mode in a single
-    /// syscall. There is NO window where the file exists with
-    /// default umask perms (the previous `String.write` +
-    /// `setAttributes` pair did have such a window, ~µs but
-    /// real). `O_EXCL` refuses if the file already exists,
-    /// which would be a sign of a pre-existing attacker-planted
-    /// file in tempRoot — bail in that case.
-    /// Atomic, race-free helper-script writer. Delegates to
-    /// `RestrictedFile.write` with `mode: 0o700`; same
-    /// `O_CREAT|O_EXCL` + write + fsync + atomic-rename
-    /// guarantees as the credentials writer, just executable.
-    nonisolated private static func writeRelaunchScript(_ contents: String, to scriptURL: URL) throws {
-        guard let data = contents.data(using: .utf8) else {
-            throw UpdaterError.message(
-                "Internal error: relaunch script not encodable as UTF-8."
-            )
-        }
-        do {
-            try RestrictedFile.write(data, to: scriptURL, mode: 0o700)
-        } catch {
-            throw UpdaterError.message(
-                "Couldn't create the relaunch helper script: \(error.localizedDescription)"
             )
         }
     }
