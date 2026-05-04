@@ -141,10 +141,9 @@ final class AppUpdater {
         let publishedAt: Date?
     }
 
-    /// Errors raised by the updater pipeline.
-    enum UpdaterError: Error, Sendable, Equatable {
-        case message(String)
-    }
+    // **ARCH-F#1 (v0.1.7.15):** the per-class `UpdaterError`
+    // moved to `SystemIntegration/UpdaterError.swift` and is
+    // now shared with `NaiveUpdater` and `RustCoreUpdater`.
 
     private(set) var state: State = .idle
 
@@ -337,6 +336,14 @@ final class AppUpdater {
         var request = URLRequest(url: api)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-AppUpdater", forHTTPHeaderField: "User-Agent")
+        // **SEC-F#11 (v0.1.7.15):** discourage edge caching /
+        // 0-RTT replay of the metadata response. A network
+        // attacker (Threat T1) replaying a captured
+        // pre-security-fix response could otherwise downgrade
+        // the offered version. The HTTPS body is integrity-
+        // protected against tampering, but is replayable; this
+        // header asks GitHub's edge to serve fresh.
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.timeoutInterval = 15
 
         // **AU-3:** per-task delegate constrains any HTTP
@@ -492,9 +499,10 @@ final class AppUpdater {
         // back-to-back ≈ same wall-time as the .zip alone × 2.
         // `async let` joins them in parallel; the manifest fetch
         // typically completes during the .zip's TLS handshake.
-        async let zipDownload: () = download(release.zipURL, to: zipURL)
-        async let shaDownload: () = download(release.shaManifestURL, to: shaURL)
-        try await (zipDownload, shaDownload)
+        async let zipDownload: Void = download(release.zipURL, to: zipURL)
+        async let shaDownload: Void = download(release.shaManifestURL, to: shaURL)
+        _ = try await zipDownload
+        _ = try await shaDownload
         await MainActor.run { report(.verifying) }
 
         // 5–6. Verify SHA-256 against manifest line for the .zip name.
@@ -738,22 +746,34 @@ final class AppUpdater {
         try refuseExtractionEscapingSymlinks(in: destination)
     }
 
-    /// **E-F#8 (R2):** hard cap on the number of symbolic links
-    /// the extraction-walker will canonicalise per archive. An
-    /// attacker-shaped zip could plant 10k+ symlinks (each ~30
-    /// bytes; the 100 MB Sw-H3 zip cap allows ~3M empty-target
-    /// entries). Without a count cap the loop performs one
-    /// `realpath(3)` syscall per entry, an attacker-controlled
-    /// work multiplier on the user's update path. 1024 is far
-    /// above any legitimate macOS .app bundle (counts in the
-    /// low double digits) — exceeding it is a structural
-    /// anomaly that justifies a refuse-and-bail.
+    /// Cap on how many filesystem entries the extraction walker
+    /// will inspect per archive. Used to bound attacker-controlled
+    /// work multipliers (E-F#8 symlink count, SEC-F#8 hard-link
+    /// detection). 1024 is far above any legitimate macOS .app
+    /// bundle (counts in the low double digits).
     nonisolated private static let maxExtractionSymlinks: Int = 1024
 
     /// Walks `directory` recursively. If any entry is a symbolic
-    /// link whose realpath escapes `directory`, throws. AU-5
+    /// link whose realpath escapes `directory` OR a regular file
+    /// with `st_nlink > 1` (hard-linked to something outside
+    /// the bundle, possibly in the user's home), throws. AU-5
     /// (path-component ancestor check) + E-F#8 (entry-count cap)
-    /// + R-F#7 (extracted realpath helper).
+    /// + R-F#7 (realpath helper) + **SEC-F#8 (v0.1.7.15)** hard
+    /// link rejection.
+    ///
+    /// **SEC-F#8 rationale:** prior to this, the walker only
+    /// inspected entries with `isSymbolicLink == true`. PKZip's
+    /// `ditto`-extension preserves hard links — a malicious zip
+    /// can plant an entry like
+    /// `Cool tunnel.app/Contents/Resources/foo` as a hard link
+    /// to `/etc/passwd` or to a user file (e.g. `~/.ssh/config`).
+    /// Post-extraction the bundle reads attacker-chosen bytes
+    /// (or, more dangerously, writes to the linked file when
+    /// the running app updates a resource). Bundle-id + version
+    /// + codesign verification protect the .app proper but the
+    /// linked-to file is in the side-channel. `nlinks > 1` for
+    /// any regular file in a freshly-extracted bundle is
+    /// unambiguously suspicious.
     nonisolated private static func refuseExtractionEscapingSymlinks(in directory: URL) throws {
         // Resolve the container to its canonical absolute path
         // so the ancestor check is robust against any symlinks
@@ -768,7 +788,7 @@ final class AppUpdater {
         guard
             let walker = FileManager.default.enumerator(
                 at: directory,
-                includingPropertiesForKeys: [.isSymbolicLinkKey],
+                includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey],
                 options: []
             )
         else {
@@ -778,12 +798,36 @@ final class AppUpdater {
         }
         var symlinksSeen = 0
         for case let item as URL in walker {
-            let isSymlink: Bool
+            let resources: URLResourceValues
             do {
-                isSymlink = try item.resourceValues(forKeys: [.isSymbolicLinkKey])
-                    .isSymbolicLink ?? false
+                resources = try item.resourceValues(forKeys: [
+                    .isSymbolicLinkKey, .isRegularFileKey,
+                ])
             } catch {
                 continue
+            }
+            let isSymlink = resources.isSymbolicLink ?? false
+            // **SEC-F#8 (v0.1.7.15):** hard-link detection.
+            // For regular files (not symlinks, not directories),
+            // check `st_nlink` via `attributesOfItem`. Anything
+            // > 1 means the inode is shared with another path
+            // somewhere on disk — possibly outside the
+            // extraction. A legitimate freshly-extracted bundle
+            // will have `nlinks == 1` for every regular file.
+            if resources.isRegularFile == true && !isSymlink {
+                let attrs = try? FileManager.default.attributesOfItem(
+                    atPath: item.path
+                )
+                if let nlinks = attrs?[.referenceCount] as? Int,
+                    nlinks > 1
+                {
+                    appUpdaterLogger.info(
+                        "hard link rejected: \(item.path, privacy: .public) (nlinks=\(nlinks, privacy: .public))"
+                    )
+                    throw UpdaterError.message(
+                        "Update archive contains a hard link; refusing to install."
+                    )
+                }
             }
             if !isSymlink { continue }
             // E-F#8: bail before doing the realpath syscall on a
@@ -840,18 +884,8 @@ final class AppUpdater {
     }
 
     /// Walks the extraction directory looking for a single .app
-    /// bundle. Refuses if zero or more than one is present —
-    /// either is a sign the archive isn't what we expected.
-    ///
-    /// **AU-14 fix:** the filter now also asserts the entry is
-    /// a directory. A malicious zip can contain an entry named
-    /// `Cool tunnel.app` that is a regular file or symlink (not
-    /// a bundle directory). Without this check, the next step
-    /// (`verifyExtractedApp` reading `Contents/Info.plist`)
-    /// would fail with the generic "Couldn't read Info.plist"
-    /// message instead of a clean "structural shape wrong"
-    /// reject. Validating the bundle-shape assumption at the
-    /// boundary surfaces the right diagnosis.
+    /// bundle. Refuses if zero or more than one is present, or
+    /// if the candidate isn't a real bundle directory (AU-14).
     nonisolated private static func locateAppBundle(in directory: URL) throws -> URL {
         let items = try FileManager.default.contentsOfDirectory(
             at: directory,
@@ -1301,7 +1335,29 @@ final class AppUpdater {
         try FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true
         )
-        return dir.appendingPathComponent("relaunch.log", isDirectory: false)
+        let logURL = dir.appendingPathComponent("relaunch.log", isDirectory: false)
+        // **SEC-F#7 (v0.1.7.15):** defend against a pre-planted
+        // symlink. An attacker with prior file-write access in
+        // the user's home (Threat T4) could pre-create
+        // `relaunch.log` as a symlink pointing somewhere
+        // unwritable (`/dev/full`, a root-owned path). The
+        // bash helper's `exec 2>>"$LOG"` would silently fail
+        // (with `set -eu` aborting before producing any
+        // diagnostic), defeating the whole point of Q-F#2.
+        // If the path exists and is anything other than a
+        // regular file, unlink it so bash creates a fresh one.
+        let resources = try? logURL.resourceValues(forKeys: [
+            .isSymbolicLinkKey, .isRegularFileKey,
+        ])
+        if let r = resources,
+            r.isSymbolicLink == true || r.isRegularFile != true
+        {
+            appUpdaterLogger.info(
+                "removing non-regular relaunch.log at \(logURL.path, privacy: .public)"
+            )
+            try? FileManager.default.removeItem(at: logURL)
+        }
+        return logURL
     }
 
     // MARK: - Version + tag parsing

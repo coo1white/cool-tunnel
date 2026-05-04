@@ -103,13 +103,14 @@ public final class RustCoreUpdater {
             state = .downloading(progress: 1.0)
 
             state = .installing
-            try Self.adhocSign(at: downloaded)
+            // **CONC-F#1 (v0.1.7.15):** `adhocSign` now async.
+            try await Self.adhocSign(at: downloaded)
             try Self.atomicallyInstall(from: downloaded, to: installedURL)
 
             lastInstalledTag = tag
             state = .succeeded(tag: tag, installedPath: installedURL)
             return installedURL
-        } catch let RustUpdaterError.message(reason) {
+        } catch let UpdaterError.message(reason) {
             state = .failed(message: reason)
             return nil
         } catch {
@@ -141,11 +142,14 @@ public final class RustCoreUpdater {
             let apiURL = URL(
                 string: "https://api.github.com/repos/coo1white/cool-tunnel/releases?per_page=20")
         else {
-            throw RustUpdaterError.message("internal error: invalid hardcoded GitHub API URL")
+            throw UpdaterError.message("internal error: invalid hardcoded GitHub API URL")
         }
         var request = URLRequest(url: apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-Updater", forHTTPHeaderField: "User-Agent")
+        // **SEC-F#11 (v0.1.7.15):** discourage edge caching /
+        // 0-RTT replay of the metadata response.
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
         // **R-F#4 (v0.1.7.13):** redirect guard from
         // `GitHubTrust.swift`. Same threat model as
@@ -157,7 +161,7 @@ public final class RustCoreUpdater {
             for: request, delegate: GitHubRedirectGuard.shared
         )
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw RustUpdaterError.message(
+            throw UpdaterError.message(
                 "Couldn't reach GitHub to look up the latest Cool Tunnel release. Check your internet connection and try again."
             )
         }
@@ -192,42 +196,46 @@ public final class RustCoreUpdater {
                 // doesn't have yet), a wrong host could substitute
                 // the engine binary entirely.
                 guard isTrustedGitHubURL(asset.browserDownloadURL) else {
-                    throw RustUpdaterError.message(
+                    throw UpdaterError.message(
                         "GitHub returned an engine asset URL on an unexpected host. Refusing to update."
                     )
                 }
                 return (release.tagName, asset.browserDownloadURL)
             }
         }
-        throw RustUpdaterError.message(
+        throw UpdaterError.message(
             "No engine binary in the recent Cool Tunnel releases. The bundled engine still works; Update will retry next time."
         )
     }
 
-    /// **R-F#2 (v0.1.7.14):** delegates to
-    /// `GitHubRedirectGuard.download` — see NaiveUpdater for the
-    /// rationale; the two `download` implementations were
-    /// line-for-line twins prior to this consolidation.
+    /// Delegates to `GitHubRedirectGuard.download` — the shared
+    /// host-validated, redirect-guarded, size-capped download
+    /// primitive. Engine binary is ~5 MB so the default 100 MB
+    /// cap is generous slack.
     private static func download(url: URL, to destination: URL) async throws -> URL {
         do {
             return try await GitHubRedirectGuard.download(url: url, to: destination)
         } catch is UntrustedGitHubHostError {
-            throw RustUpdaterError.message(
+            throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."
             )
+        } catch is OversizeDownloadError {
+            throw UpdaterError.message(
+                "Download exceeded the size limit; refusing to install."
+            )
         } catch {
-            throw RustUpdaterError.message(
+            throw UpdaterError.message(
                 "Couldn't download the engine binary. Check your internet connection and try Update again."
             )
         }
     }
 
-    private static func adhocSign(at url: URL) throws {
+    nonisolated private static func adhocSign(at url: URL) async throws {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: url.path
         )
-        try runProcess(
+        try await runProcess(
             executable: "/usr/bin/codesign",
             arguments: ["--force", "--sign", "-", "--timestamp=none", url.path]
         )
@@ -257,36 +265,40 @@ public final class RustCoreUpdater {
         return url
     }
 
-    private static func runProcess(executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+    /// Async subprocess helper. **CONC-F#1 (v0.1.7.15):**
+    /// previously sync + `process.waitUntilExit()`, blocking
+    /// MainActor through the codesign duration. Now routes
+    /// through `Subprocess.run` matching `NaiveUpdater.runProcess`
+    /// and `AppUpdater.unzip`.
+    nonisolated private static func runProcess(
+        executable: String, arguments: [String]
+    ) async throws {
+        let result: SubprocessResult
         do {
-            try process.run()
+            result = try await Subprocess.run(
+                executable: URL(fileURLWithPath: executable),
+                arguments: arguments,
+                timeout: 120
+            )
         } catch {
-            throw RustUpdaterError.message(
+            throw UpdaterError.message(
                 "could not launch \(executable): \(error.localizedDescription)"
             )
         }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
-            throw RustUpdaterError.message(
-                "\(URL(fileURLWithPath: executable).lastPathComponent) exit \(process.terminationStatus): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        if result.timedOut {
+            throw UpdaterError.message(
+                "\(URL(fileURLWithPath: executable).lastPathComponent) did not finish within 120s — refusing to continue."
+            )
+        }
+        guard result.success else {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw UpdaterError.message(
+                "\(URL(fileURLWithPath: executable).lastPathComponent) exit \(result.exitCode): \(stderr)"
             )
         }
     }
 }
 
-/// Internal typed error so each pipeline step can raise a
-/// human-readable message that the `update()` catch-all turns
-/// into a `.failed(message:)` state. Same shape as
-/// `NaiveUpdater`'s `UpdaterError` but namespaced so the two
-/// cannot collide.
-enum RustUpdaterError: Error, Sendable {
-    case message(String)
-}
+// **ARCH-F#1 (v0.1.7.15):** the file-scope `RustUpdaterError`
+// moved to `SystemIntegration/UpdaterError.swift` and is now
+// shared across all three updaters under one name.
