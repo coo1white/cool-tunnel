@@ -272,31 +272,25 @@ public final class NaiveUpdater {
     /// A future patch can switch to `URLSessionDownloadDelegate` to
     /// report real progress; deferred to keep the LTSC patch surface
     /// small.
+    /// **R-F#2 (v0.1.7.14):** delegates to
+    /// `GitHubRedirectGuard.download` — the shared host-validated,
+    /// redirect-guarded download primitive. Replaces ~20 lines of
+    /// code that mirrored RustCoreUpdater's `download` line-for-
+    /// line, including the now-unnecessary `fileExists`/
+    /// `removeItem` TOCTOU pre-check (destination is always
+    /// in a fresh per-pipeline tempRoot).
     private static func download(url: URL, to destination: URL) async throws -> URL {
-        // **R-F#4:** redirect guard + host check. See the
-        // `assetURL` and `resolveLatestStableTag` notes for
-        // why this matters even without SHA pinning.
-        guard isTrustedGitHubURL(url) else {
+        do {
+            return try await GitHubRedirectGuard.download(url: url, to: destination)
+        } catch is UntrustedGitHubHostError {
             throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."
             )
-        }
-        let request = URLRequest(url: url)
-        let (tempURL, response) = try await URLSession.shared.download(
-            for: request, delegate: GitHubRedirectGuard.shared
-        )
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        } catch {
             throw UpdaterError.message(
                 "Couldn't download \(url.lastPathComponent). Check your internet connection and try Update again."
             )
         }
-        // Move into our temp dir so both downloads end up in
-        // predictable filenames the rest of the pipeline can find.
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.moveItem(at: tempURL, to: destination)
-        return destination
     }
 
     private static func makeTempDirectory() throws -> URL {

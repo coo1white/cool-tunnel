@@ -228,13 +228,11 @@ public actor CoreClient {
     }
 
     /// Subsystem-scoped logger for the JSON-over-stdio frame pump.
-    /// `os.Logger` is the modern (macOS 11+) replacement for both
-    /// `print` and `os_log`; it streams into Console.app and
-    /// `log show` with structured predicates.
-    private static let logger = Logger(
-        subsystem: "space.coolwhite.cooltunnel",
-        category: "CoreClient"
-    )
+    /// **R-F#1 (v0.1.7.14):** routed through
+    /// `Logger.cooltunnel(_:)` so the project-wide subsystem
+    /// string lives in one place across CoreClient, AppUpdater,
+    /// and GitHubTrust.
+    private static let logger = Logger.cooltunnel("CoreClient")
 
     private func dispatch(_ frame: CoreOutbound) {
         switch frame {

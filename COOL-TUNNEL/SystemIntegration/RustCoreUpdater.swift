@@ -204,27 +204,22 @@ public final class RustCoreUpdater {
         )
     }
 
+    /// **R-F#2 (v0.1.7.14):** delegates to
+    /// `GitHubRedirectGuard.download` — see NaiveUpdater for the
+    /// rationale; the two `download` implementations were
+    /// line-for-line twins prior to this consolidation.
     private static func download(url: URL, to destination: URL) async throws -> URL {
-        // **R-F#4:** redirect guard + host check.
-        guard isTrustedGitHubURL(url) else {
+        do {
+            return try await GitHubRedirectGuard.download(url: url, to: destination)
+        } catch is UntrustedGitHubHostError {
             throw RustUpdaterError.message(
                 "Refusing to download from non-GitHub host."
             )
-        }
-        let request = URLRequest(url: url)
-        let (tempURL, response) = try await URLSession.shared.download(
-            for: request, delegate: GitHubRedirectGuard.shared
-        )
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        } catch {
             throw RustUpdaterError.message(
                 "Couldn't download the engine binary. Check your internet connection and try Update again."
             )
         }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.moveItem(at: tempURL, to: destination)
-        return destination
     }
 
     private static func adhocSign(at url: URL) throws {
