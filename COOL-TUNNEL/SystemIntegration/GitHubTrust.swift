@@ -63,6 +63,19 @@ struct UntrustedGitHubHostError: Error, Sendable {
     let url: URL
 }
 
+/// Thrown by `GitHubRedirectGuard.download` when the response
+/// body exceeds the per-call `maxBytes` cap. **ARCH-F#2 / SEC
+/// (v0.1.7.15):** previously only `AppUpdater.download` had a
+/// size cap; NaiveUpdater + RustCoreUpdater inherited none, so
+/// a confused-deputy or attacker-shaped API response that
+/// pointed at a 4 GB file at a trusted GitHub host would happily
+/// fill the user's disk. Sharing the cap as a default on the
+/// shared download primitive closes that defense-in-depth gap.
+struct OversizeDownloadError: Error, Sendable {
+    let actual: Int64
+    let cap: Int64
+}
+
 /// Hosts we trust to serve GitHub release assets. Matched as
 /// case-insensitive suffixes (entry equals host, OR host ends in
 /// `"." + entry`). Keep this list short and explicit — every
@@ -140,27 +153,36 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
         }
     }
 
-    /// **R-F#2 (v0.1.7.14):** shared host-validated, redirect-
-    /// guarded download. Replaces the line-for-line-twin
-    /// `download(url:to:)` methods that NaiveUpdater and
-    /// RustCoreUpdater carried. AppUpdater keeps its own
-    /// inline because it layers a per-asset size cap that
-    /// these callers don't need.
+    /// Shared host-validated, redirect-guarded download.
+    /// NaiveUpdater + RustCoreUpdater both call this; AppUpdater
+    /// has its own inline variant because it needs different
+    /// per-asset caps (.sha256 1 MB, .zip 100 MB) within a
+    /// single pipeline run.
     ///
     /// Validates `url` against `isTrustedGitHubURL`, builds a
     /// URLRequest, downloads via the shared redirect guard,
-    /// asserts HTTP 200, and moves the temp file into
-    /// `destination`. `destination` is assumed to live in a
-    /// per-pipeline `tempRoot` (each call site pre-creates a
-    /// fresh `mkdtemp`-style directory) — the move is
-    /// unconditional, no `fileExists`/`removeItem` pre-check
-    /// (E-F#6 anti-pattern eliminated here too).
+    /// asserts HTTP 200, refuses anything over `maxBytes`, and
+    /// moves the temp file into `destination`. `destination` is
+    /// assumed to live in a per-pipeline `tempRoot`; the move is
+    /// unconditional (no `fileExists` pre-check).
     ///
-    /// Throws `UntrustedGitHubHostError` if the host check
-    /// fails; otherwise propagates `URLSession`/`FileManager`
-    /// errors to the caller for them to wrap in their own
-    /// updater error type.
-    static func download(url: URL, to destination: URL) async throws -> URL {
+    /// Throws:
+    ///   - `UntrustedGitHubHostError` — host outside the
+    ///     trusted suffix list
+    ///   - `OversizeDownloadError` — body > `maxBytes`
+    ///   - `URLError` — network / non-200 status
+    ///   - `CocoaError` — file-move failure
+    ///
+    /// **ARCH-F#2 (v0.1.7.15):** added the `maxBytes` cap so
+    /// NaiveUpdater + RustCoreUpdater inherit defense-in-depth
+    /// against a confused-deputy / attacker-shaped API response
+    /// that pointed at an oversized file. Default 100 MB
+    /// matches AppUpdater's existing .zip cap.
+    static func download(
+        url: URL,
+        to destination: URL,
+        maxBytes: Int64 = 100 * 1024 * 1024
+    ) async throws -> URL {
         guard isTrustedGitHubURL(url) else {
             throw UntrustedGitHubHostError(url: url)
         }
@@ -168,14 +190,19 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
         let (tempURL, response) = try await URLSession.shared.download(
             for: request, delegate: GitHubRedirectGuard.shared
         )
+        // Deliberately do NOT include the URL in userInfo.
+        // Callers wrap into their own opaque error type before
+        // surfacing to UI; embedding attacker-influenced URL
+        // bytes in error userInfo is a known leak vector.
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(
-                .badServerResponse,
-                userInfo: [
-                    NSURLErrorFailingURLErrorKey: url,
-                    "statusCode": (response as? HTTPURLResponse)?.statusCode ?? -1,
-                ]
-            )
+            throw URLError(.badServerResponse)
+        }
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
+            let size = attrs[.size] as? NSNumber,
+            size.int64Value > maxBytes
+        {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw OversizeDownloadError(actual: size.int64Value, cap: maxBytes)
         }
         try FileManager.default.moveItem(at: tempURL, to: destination)
         return destination

@@ -9,6 +9,135 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.15] — 2026-05-04 (LTSC patch — deep audit, MainActor freeze fix)
+
+LTSC patch on v0.1.7 line. Deep three-angle review (adversarial
+security, Swift 6 concurrency, architectural design) returned 32
+findings; 7 land here, 25 deferred (low-severity / "don't do it"
+recommendations / future-cycle work).
+
+The headline finding is real: **NaiveUpdater + RustCoreUpdater
+were freezing the UI during updates** because their
+`runProcess(executable:arguments:) throws` synchronously called
+`Process.waitUntilExit()` from `@MainActor` context. AppUpdater
+fixed this pattern back in v0.1.7.10 by routing `ditto`
+through the async `Subprocess.run` helper, but the two cousin
+updaters were missed by that audit.
+
+### v0.1.7.15 fixes
+
+- **CONC-F#1 (high) — UI freeze during NaiveProxy + Rust core
+  updates.** Both updaters' `runProcess` is now async and routes
+  through `Subprocess.run` (concurrent pipe drain + 120 s timeout
+  escalation), matching `AppUpdater.unzip`. Their pipeline
+  helpers (`extractNaive`, `lipoCreate`, `adhocSign`,
+  `RustCoreUpdater.adhocSign`) are now `nonisolated async` and
+  awaited from `update()`. NaiveUpdater additionally extracts
+  the two arches in parallel via `async let` (~2× speedup on
+  the cold path). The Process-blocks-MainActor pattern is gone
+  from the codebase.
+- **SEC-F#8 (medium) — hard-link rejection in extraction
+  walker.** `refuseExtractionEscapingSymlinks` previously only
+  inspected `isSymbolicLink == true` entries; PKZip's
+  `ditto`-extension preserves hard links, so a malicious zip
+  that survives SHA verification could embed
+  `Cool tunnel.app/Contents/Resources/foo` as a hard link to
+  `/etc/passwd` or `~/.ssh/config`, leaving the bundle a
+  side-channel into user files. Now: any regular file with
+  `nlinks > 1` rejects with refuse-and-bail.
+- **SEC-F#6 (low) — `fchmod()` after `open()` in
+  `RestrictedFile.write`.** POSIX `open(2)` ANDs the supplied
+  mode with `~umask`; on a system with an unusual umask
+  (corporate-managed `0o077`, or a future caller passing
+  `0o755`) the file would be created with FEWER permissions
+  than requested. `fchmod(2)` doesn't honour umask, so calling
+  it explicitly after `open` guarantees the requested mode
+  regardless of environment. For the existing call sites
+  (credentials at 0o600, relaunch script at 0o700) the umask
+  interaction was a no-op, but locking the contract here means
+  future callers can rely on the requested mode.
+- **SEC-F#7 (low) — defend `~/Library/Logs/cool-tunnel/
+  relaunch.log` against pre-planted symlinks.** An attacker
+  with prior file-write access in the user's home (Threat T4)
+  could pre-create the log path as a symlink to `/dev/full` or
+  a root-owned location. The bash helper's `exec 2>>"$LOG"`
+  redirect would silently fail, defeating Q-F#2's whole point
+  (no diagnostic anywhere on update failure). Swift now
+  checks `isSymbolicLink` on the path before returning it; if
+  the file exists and isn't a regular file, it's unlinked so
+  bash creates a fresh one.
+- **ARCH-F#1 (medium) — single shared `UpdaterError` enum.**
+  Three updaters carried three identical
+  `enum X: Error, Sendable, Equatable { case message(String) }`
+  declarations: `AppUpdater.UpdaterError` (nested),
+  `NaiveUpdater.UpdaterError` (file-scope), and
+  `RustCoreUpdater.RustUpdaterError` (file-scope, renamed to
+  prevent collision with NaiveUpdater's). Consolidated to a
+  single module-level `UpdaterError` in
+  `SystemIntegration/UpdaterError.swift`; all three updaters
+  now share it.
+- **ARCH-F#2 (medium) — size cap on shared
+  `GitHubRedirectGuard.download`.** Previously only
+  `AppUpdater.download` had a per-asset cap (.sha256 1 MB,
+  .zip 100 MB). NaiveUpdater + RustCoreUpdater inherited none,
+  so a confused-deputy or attacker-shaped API response
+  pointing at a 4 GB file at a trusted GitHub host would
+  happily fill the user's disk. Added `maxBytes: Int64 = 100
+  * 1024 * 1024` parameter (default = 100 MB) and an
+  `OversizeDownloadError` carrier; the two cousins inherit
+  the cap as defense-in-depth.
+- **SEC-F#11 (low) — `Cache-Control: no-cache` header on
+  metadata fetches.** A network-position attacker (Threat T1)
+  serving a captured pre-security-fix `/releases/latest`
+  response could otherwise downgrade the offered version even
+  through HTTPS (replay of integrity-protected bytes is still
+  replayable). All three updaters' GitHub releases-API
+  requests now send `Cache-Control: no-cache` to discourage
+  edge caching / 0-RTT replay.
+
+### Tests + verification
+
+- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
+  concurrency (every helper conversion to `nonisolated async`
+  type-checked clean).
+- No Rust changes; existing 104 lib + 18 chaos tests still
+  pass from v0.1.7.13.
+- v0.1.7.15 ships the same five assets as v0.1.7.14
+  (`.dmg`, `.pkg`, `.zip`, `cool-tunnel-core` engine,
+  `.sha256` manifest).
+
+### Deferred (25 findings)
+
+The deep review's most impactful deferred items, with rationale:
+
+- **SEC-F#1 + F#2 (high) — SHA pinning for NaiveUpdater +
+  RustCoreUpdater.** The redirect guard (v0.1.7.13) and size
+  cap (this release) cover most of the threat surface, but a
+  CDN-internal byte tamper at `objects.githubusercontent.com`
+  would still serve substituted bytes. Cool Tunnel-published
+  SHA manifests for both binaries close that gap. **Targeted
+  for v0.1.8** rather than v0.2.0 — the security agent's
+  argument that the v0.2.0 timeline isn't defensible if it's
+  more than ~30 days out is correct. Tracked.
+- **SEC-F#4 + F#5 (medium) — relaunch helper recovery
+  improvements (notify on `mv` failure, verify post-launch).**
+  Real UX gaps but each requires careful design (osascript
+  notifications, post-launch poll). Punt to a polish cycle.
+- **CONC-F#3 (medium) — `.relaunching` recovery deadline.**
+  Theoretical (`applicationShouldTerminate` always returns
+  `.terminateLater` with a watchdog in this app); track for
+  the v0.2.0 cross-platform refactor.
+- **CONC-F#4 (medium) — Task cancellation handling.** Storing
+  the in-flight `Task` and cancelling on `reset()` /
+  `deinit`. Real but cooperative-cancellation semantics need
+  careful design across the three updaters.
+- **ARCH-F#3 (medium) — extract `AppUpdaterPipeline` from
+  `AppUpdater`.** Q-F#11 deferred; same answer.
+- **ARCH-F#4 (low) — build-time `canonicalBundleID`.**
+  Pre-empting a hypothetical fork rename; no fork imminent.
+- 19 other findings are low-severity (style, micro-opts,
+  comment trim, "don't do it" recommendations).
+
 ## [0.1.7.14] — 2026-05-04 (LTSC patch — second simplify pass)
 
 LTSC patch on v0.1.7 line. Second-pass simplify review of

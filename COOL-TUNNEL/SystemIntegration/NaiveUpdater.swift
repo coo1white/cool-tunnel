@@ -125,14 +125,23 @@ public final class NaiveUpdater {
             state = .downloading(progress: 1.0)
 
             state = .extracting
-            let arm64Bin = try Self.extractNaive(
+            // **CONC-F#1 (v0.1.7.15):** the extraction +
+            // lipo + codesign helpers are now `nonisolated
+            // async` and route through `Subprocess.run`, so the
+            // `process.waitUntilExit()` calls don't block the
+            // main thread. Extract both arches in parallel since
+            // they're independent.
+            async let arm64BinAsync = Self.extractNaive(
                 from: arm64Path, into: tempRoot.appendingPathComponent("arm64"))
-            let x64Bin = try Self.extractNaive(from: x64Path, into: tempRoot.appendingPathComponent("x64"))
+            async let x64BinAsync = Self.extractNaive(
+                from: x64Path, into: tempRoot.appendingPathComponent("x64"))
+            let arm64Bin = try await arm64BinAsync
+            let x64Bin = try await x64BinAsync
 
             state = .merging
             let merged = tempRoot.appendingPathComponent("naive-universal")
-            try Self.lipoCreate(arm64: arm64Bin, x64: x64Bin, output: merged)
-            try Self.adhocSign(at: merged)
+            try await Self.lipoCreate(arm64: arm64Bin, x64: x64Bin, output: merged)
+            try await Self.adhocSign(at: merged)
 
             state = .installing
             try Self.atomicallyInstall(from: merged, to: installedURL)
@@ -225,6 +234,9 @@ public final class NaiveUpdater {
         var request = URLRequest(url: apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Cool-Tunnel-Updater", forHTTPHeaderField: "User-Agent")
+        // **SEC-F#11 (v0.1.7.15):** discourage edge caching /
+        // 0-RTT replay of the metadata response.
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
         // **R-F#4 (v0.1.7.13):** the redirect guard from
         // `GitHubTrust.swift` constrains any HTTP redirect this
@@ -272,19 +284,20 @@ public final class NaiveUpdater {
     /// A future patch can switch to `URLSessionDownloadDelegate` to
     /// report real progress; deferred to keep the LTSC patch surface
     /// small.
-    /// **R-F#2 (v0.1.7.14):** delegates to
-    /// `GitHubRedirectGuard.download` — the shared host-validated,
-    /// redirect-guarded download primitive. Replaces ~20 lines of
-    /// code that mirrored RustCoreUpdater's `download` line-for-
-    /// line, including the now-unnecessary `fileExists`/
-    /// `removeItem` TOCTOU pre-check (destination is always
-    /// in a fresh per-pipeline tempRoot).
+    /// Delegates to `GitHubRedirectGuard.download` — the shared
+    /// host-validated, redirect-guarded, size-capped download
+    /// primitive. Naive tarballs run ~5 MB each so the default
+    /// 100 MB cap is generous slack.
     private static func download(url: URL, to destination: URL) async throws -> URL {
         do {
             return try await GitHubRedirectGuard.download(url: url, to: destination)
         } catch is UntrustedGitHubHostError {
             throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."
+            )
+        } catch is OversizeDownloadError {
+            throw UpdaterError.message(
+                "Download exceeded the size limit; refusing to install."
             )
         } catch {
             throw UpdaterError.message(
@@ -305,9 +318,9 @@ public final class NaiveUpdater {
     /// contain a single top-level directory whose contents include
     /// `naive`; we strip the leading component so the binary lands
     /// directly in `target`.
-    private static func extractNaive(from archive: URL, into target: URL) throws -> URL {
+    nonisolated private static func extractNaive(from archive: URL, into target: URL) async throws -> URL {
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-        try runProcess(
+        try await runProcess(
             executable: "/usr/bin/tar",
             arguments: ["-xJf", archive.path, "-C", target.path, "--strip-components=1"]
         )
@@ -320,15 +333,15 @@ public final class NaiveUpdater {
         return binary
     }
 
-    private static func lipoCreate(arm64: URL, x64: URL, output: URL) throws {
-        try runProcess(
+    nonisolated private static func lipoCreate(arm64: URL, x64: URL, output: URL) async throws {
+        try await runProcess(
             executable: "/usr/bin/lipo",
             arguments: ["-create", arm64.path, x64.path, "-output", output.path]
         )
     }
 
-    private static func adhocSign(at url: URL) throws {
-        try runProcess(
+    nonisolated private static func adhocSign(at url: URL) async throws {
+        try await runProcess(
             executable: "/usr/bin/codesign",
             arguments: ["--force", "--sign", "-", "--timestamp=none", url.path]
         )
@@ -354,35 +367,43 @@ public final class NaiveUpdater {
         }
     }
 
-    /// Tiny `Process` helper that throws a typed error on non-zero
-    /// exit. Captures stdout+stderr for the failure message so the
-    /// Settings UI can show *why* a step failed.
-    private static func runProcess(executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+    /// Async subprocess helper. **CONC-F#1 (v0.1.7.15):**
+    /// previously a sync `Process` + `process.waitUntilExit()`
+    /// that blocked the calling actor — and since `update()` is
+    /// `@MainActor`, that froze the UI through the duration of
+    /// `tar -xJf`, `lipo`, and `codesign`. Now routes through
+    /// `Subprocess.run` (concurrent pipe drain + 120 s timeout
+    /// escalation), the same async helper `AppUpdater.unzip`
+    /// uses for its `ditto` invocation.
+    nonisolated private static func runProcess(
+        executable: String, arguments: [String]
+    ) async throws {
+        let result: SubprocessResult
         do {
-            try process.run()
+            result = try await Subprocess.run(
+                executable: URL(fileURLWithPath: executable),
+                arguments: arguments,
+                timeout: 120
+            )
         } catch {
-            throw UpdaterError.message("could not launch \(executable): \(error.localizedDescription)")
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
             throw UpdaterError.message(
-                "\(URL(fileURLWithPath: executable).lastPathComponent) exit \(process.terminationStatus): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+                "could not launch \(executable): \(error.localizedDescription)"
+            )
+        }
+        if result.timedOut {
+            throw UpdaterError.message(
+                "\(URL(fileURLWithPath: executable).lastPathComponent) did not finish within 120s — refusing to continue."
+            )
+        }
+        guard result.success else {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw UpdaterError.message(
+                "\(URL(fileURLWithPath: executable).lastPathComponent) exit \(result.exitCode): \(stderr)"
             )
         }
     }
 }
 
-/// Internal typed error so each pipeline step can raise a
-/// human-readable message that the `update()` catch-all turns into
-/// a `.failed(message:)` state.
-enum UpdaterError: Error, Sendable {
-    case message(String)
-}
+// **ARCH-F#1 (v0.1.7.15):** the file-scope `UpdaterError`
+// moved to `SystemIntegration/UpdaterError.swift` and is now
+// shared across all three updaters.
