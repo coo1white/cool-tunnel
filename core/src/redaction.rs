@@ -40,6 +40,18 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     if let Cow::Owned(s) = COOKIE_HEADER_REGEX.replace_all(&current, "${prefix}***") {
         current = Cow::Owned(s);
     }
+    // **Diag-F#1 (v0.1.7.17):** JSON / k=v credential fields.
+    // `naive` config-load errors dump partial JSON like
+    // `"password":"..."`; curl -v emits `password: hunter2`.
+    // Without this, both forms reach the UI verbatim.
+    if let Cow::Owned(s) = JSON_KV_CRED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
+        current = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = AUTH_HEADER_REGEX.replace_all(&current, "${prefix}***") {
+        // Re-run after JSON pass in case a header-shaped credential
+        // appears in a log line that also contains a JSON dump.
+        current = Cow::Owned(s);
+    }
     current
 }
 
@@ -91,6 +103,30 @@ static AUTH_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static COOKIE_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?P<prefix>(?:Set-)?Cookie:\s*)[^\r\n]+")
         .expect("Cookie redaction regex must compile")
+});
+
+/// **Diag-F#1 (v0.1.7.17):** matches credential-bearing JSON
+/// fields and `key=value` / `key: value` plain text dumps.
+/// Covers `password`, `passwd`, `secret`, `token`, `api_key`,
+/// `apikey`, `access_token`, `refresh_token` — case-insensitive,
+/// optional surrounding quotes on the key, optional surrounding
+/// quotes on the value. The trailing-quote `suffix` capture
+/// preserves the closing quote on JSON so the redacted output
+/// remains parse-able.
+#[allow(clippy::expect_used)]
+static JSON_KV_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        (?P<prefix>
+            "?(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token)"?
+            \s* [:=] \s*
+            "?
+        )
+        [^"\s,}\r\n]+
+        (?P<suffix>"?)
+        "#,
+    )
+    .expect("JSON KV credential redaction regex must compile")
 });
 
 #[cfg(test)]

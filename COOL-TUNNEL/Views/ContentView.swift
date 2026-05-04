@@ -58,7 +58,9 @@ public struct ContentView: View {
             HeaderView(
                 isRunning: orchestrator.isRunning,
                 activeMode: orchestrator.activeMode,
-                firewallState: orchestrator.firewallState
+                firewallState: orchestrator.firewallState,
+                lastError: orchestrator.lastError,
+                onDismissError: { orchestrator.dismissLastError() }
             )
 
             ControlPanelView(
