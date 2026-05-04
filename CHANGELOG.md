@@ -9,6 +9,83 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.21] — 2026-05-04 (LTSC patch — clarity sweep, deletions only)
+
+LTSC patch on the v0.1.7 line. **Net –287 lines.** No new
+features, no new fixes, no behavior change. Pure deletion of
+indirection wrappers, audit-history narrative, and stale docs
+that have stopped earning their place after 11 patches of
+accumulation.
+
+The bias: where two equivalent fixes exist for a finding,
+prefer deletion over refactor. Code is read 10× more than it
+is written; less to read is the highest-value clarity change.
+
+### What was deleted
+
+- **`AppUpdater.sha256(of:)`** — single-line wrapper that just
+  forwarded to `SHAVerifier.sha256(of:)`. Two callers now go
+  through `SHAVerifier` directly. Indirection saved zero
+  semantic content; deletion saves 6 lines + one less symbol
+  to grep.
+- **`AppUpdater.writeRelaunchScript`** — wrapper that did
+  `String → Data + RestrictedFile.write(mode: 0o700) +
+  error wrap`. Single caller (`spawnRelaunchHelper`).
+  Inlined the four operative lines at the call site;
+  deleted the function. Removes ~20 lines and an entry from
+  the function-name vocabulary the reader has to keep in
+  their head.
+- **`AppUpdater.swift` file header — release-history block.**
+  The "## v0.1.7.11 Rule-Maker hardening (Fifth audit cycle)"
+  section enumerated AU-1 through AU-15 with a ~6-line
+  paragraph each (~80 lines of release narrative). That's
+  what `CHANGELOG.md` is for; `git blame` finds the same
+  information per-line on demand. Header now describes the
+  pipeline + posture + open trade-offs in 65 lines instead
+  of 145.
+- **`docs/v0.1.5-roadmap.md`** — 209 lines of stale planning
+  notes. The agent's documentation review explicitly flagged
+  this as "now stale" two cycles ago; deferred and forgotten.
+  Removed. CONTRIBUTING.md's dangling link to it removed
+  too.
+- **`docs/session-prompts-summary.xlsx`** — accidentally
+  committed via `git add -A` in v0.1.7.16. Was a per-session
+  artifact, not project state. Removed.
+
+### What stayed
+
+The decomposition checklist also asked "could this be
+deleted?" of:
+
+- The audit-tag inline comments (`v0.1.7.X (FIX):` /
+  `R-F#N:` / `Q-F#N:` etc., ~93 hits in `AppUpdater.swift`).
+  KEPT for now — they describe genuine *invariants* at the
+  point of code, not just history (e.g. "the relaunch helper
+  trap installs only after step 4" is a real ordering
+  constraint a future reader needs to know). Trimming would
+  bleed into refactoring; deletion-only release stays
+  scoped.
+- The `activeProfileID` field added in v0.1.7.19. KEPT —
+  used by exactly one consumer today, but the consumer's
+  job (detect "user edited the active profile") cannot be
+  derived from existing state.
+- The `ProxyActiveFlag` module. KEPT — it's an actual
+  state machine (write on enable / clear on disable / read
+  on bootstrap), not indirection.
+
+### What this means
+
+For users: nothing. No behavior change.
+For maintainers: 287 fewer lines to read on next pass.
+File-header history is now where it belongs (the
+changelog), and two indirection layers are gone.
+
+### Verification
+
+- `xcodebuild Release` BUILD SUCCEEDED
+- No Rust changes; existing 104 lib + 18 chaos tests still
+  pass
+
 ## [0.1.7.20] — 2026-05-04 (LTSC hotfix — multi-install false-positive)
 
 LTSC hotfix on the v0.1.7 line. Single fix; ships immediately.
