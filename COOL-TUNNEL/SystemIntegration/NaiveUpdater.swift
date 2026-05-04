@@ -27,16 +27,25 @@
 
 import Foundation
 import Observation
+import os
+
+/// Module-level logger. **Cross-F#2 (v0.1.7.16):** previously
+/// only `AppUpdater` had a Logger, so when NaiveUpdater rejected
+/// a download (untrusted host, oversize, network failure)
+/// support had no breadcrumb to triage from. Routes through the
+/// shared `Logger.cooltunnel` factory so the subsystem matches
+/// CoreClient + AppUpdater + GitHubTrust.
+private let naiveUpdaterLogger = Logger.cooltunnel("NaiveUpdater")
 
 /// Live state of an in-flight or finished update. `@Observable` so
 /// the Settings view re-renders as the updater advances through the
 /// pipeline without manual binding plumbing.
 @MainActor
 @Observable
-public final class NaiveUpdater {
+final class NaiveUpdater {
 
     /// What the updater is doing right now.
-    public enum State: Sendable, Equatable {
+    enum State: Sendable, Equatable {
         case idle
         case resolvingTag
         case downloading(progress: Double)  // 0.0 – 1.0
@@ -50,24 +59,24 @@ public final class NaiveUpdater {
         case failed(message: String)
     }
 
-    public private(set) var state: State = .idle
-    public private(set) var lastInstalledTag: String?
+    private(set) var state: State = .idle
+    private(set) var lastInstalledTag: String?
 
     private let supportDirectory: URL
 
-    public init(supportDirectory: URL) {
+    init(supportDirectory: URL) {
         self.supportDirectory = supportDirectory
     }
 
     /// Convenience initializer using the standard
     /// `~/Library/Application Support/COOL-TUNNEL` directory.
-    public convenience init(paths: AppSupportPaths) {
+    convenience init(paths: AppSupportPaths) {
         self.init(supportDirectory: paths.supportDirectory)
     }
 
     /// Path the updater writes the merged binary to. Stable across
     /// updates so `customNaiveBinaryPath` keeps pointing at it.
-    public var installedURL: URL {
+    var installedURL: URL {
         supportDirectory.appendingPathComponent("naive-managed", isDirectory: false)
     }
 
@@ -76,7 +85,7 @@ public final class NaiveUpdater {
     /// finishes first). Returns the installed URL on success or
     /// nil on any failure — full diagnostic in `state`.
     @discardableResult
-    public func update() async -> URL? {
+    func update() async -> URL? {
         // Reject a second concurrent update — keep state machine
         // monotonic so the UI never sees overlapping `downloading(0.4)`
         // -> `downloading(0.1)` regressions.
@@ -161,7 +170,7 @@ public final class NaiveUpdater {
     /// Resets the visible state back to `.idle`. Called from the
     /// Settings view when the sheet dismisses so a stale failure
     /// banner doesn't follow the user back into the form.
-    public func reset() {
+    func reset() {
         switch state {
         case .resolvingTag, .downloading, .extracting, .merging, .installing:
             return  // Don't clobber an in-flight update.
@@ -291,15 +300,24 @@ public final class NaiveUpdater {
     private static func download(url: URL, to destination: URL) async throws -> URL {
         do {
             return try await GitHubRedirectGuard.download(url: url, to: destination)
-        } catch is UntrustedGitHubHostError {
+        } catch let untrusted as UntrustedGitHubHostError {
+            naiveUpdaterLogger.error(
+                "untrusted host: \(untrusted.url.absoluteString, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."
             )
-        } catch is OversizeDownloadError {
+        } catch let oversize as OversizeDownloadError {
+            naiveUpdaterLogger.error(
+                "oversize download: actual=\(oversize.actual, privacy: .public) cap=\(oversize.cap, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "Download exceeded the size limit; refusing to install."
             )
         } catch {
+            naiveUpdaterLogger.warning(
+                "download failure for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
             throw UpdaterError.message(
                 "Couldn't download \(url.lastPathComponent). Check your internet connection and try Update again."
             )

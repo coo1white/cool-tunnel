@@ -43,7 +43,18 @@ pub fn parse(output: &str, port: Port) -> TrafficSnapshot {
             if line.contains(local_client_marker.as_str()) {
                 local_clients = local_clients.saturating_add(1);
             }
-            if line.contains("->") && !line.contains("127.0.0.1") {
+            // **Rust-F#2 (v0.1.7.16):** also exclude IPv6
+            // loopback so that an IPv6-first system isn't
+            // counted as having `remote` connections from its
+            // own loopback. macOS uses `[::1]:port->[::1]:port`
+            // for IPv6 ESTABLISHED lines; the bare
+            // `127.0.0.1` check missed them, allowing local
+            // loopback fanout to synthesize a `TooManyRemote`
+            // anomaly from the user's own machine.
+            if line.contains("->")
+                && !line.contains("127.0.0.1")
+                && !line.contains("[::1]")
+            {
                 remote = remote.saturating_add(1);
             }
         } else if exposed_listen.is_none()

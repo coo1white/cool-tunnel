@@ -29,6 +29,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# **Shell-F#6 (v0.1.7.16):** least-privilege workflow permissions.
+# Without an explicit `permissions:` block, jobs inherit the org
+# default which can include `contents: write` and other broad
+# scopes. None of these jobs need write access to anything.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Surface backtraces in test failures so CI logs are useful
@@ -43,7 +50,13 @@ jobs:
       run:
         working-directory: core
     steps:
+      # **Shell-F#6 (v0.1.7.16):** `persist-credentials: false`
+      # so the GITHUB_TOKEN doesn't sit in `.git/config` after
+      # checkout. A compromised dependency or test fixture
+      # executed in a later step could otherwise read it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # rust-toolchain.toml is honoured automatically by rustup —
       # this step just makes sure rustup is present and up to date.
       - name: Install pinned toolchain
@@ -63,9 +76,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy --pedantic -D warnings
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: cargo test
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
       # cargo-deny enforces the policy in `core/deny.toml`
       # (advisories-as-error, license allow-list, crates.io-only
       # source). Was policy-without-enforcement until v0.1.7.10:
@@ -77,12 +90,12 @@ jobs:
           tool: cargo-deny
       - name: cargo deny check
         run: cargo deny check
-      - name: cargo build --release (universal)
+      - name: cargo build --locked --release (universal)
         if: github.event_name == 'push'
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
           lipo -create \
             target/aarch64-apple-darwin/release/cool-tunnel-core \
             target/x86_64-apple-darwin/release/cool-tunnel-core \
@@ -94,6 +107,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: swift-format --lint
         # **v0.1.7.10:** hard-fail if swift-format isn't on PATH.
         # The previous soft-fail (`exit 0` when missing) silently
@@ -109,6 +124,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck scripts/*.sh
