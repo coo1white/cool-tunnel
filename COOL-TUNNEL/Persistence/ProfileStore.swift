@@ -16,6 +16,7 @@
 // which only runs on a user-initiated Start.
 
 import Foundation
+import os
 
 /// Stores profiles + selection. Marked `@unchecked Sendable` because
 /// `UserDefaults` is documented thread-safe but does not yet conform
@@ -29,6 +30,9 @@ public struct ProfileStore: @unchecked Sendable {
     private enum Keys {
         static let profiles = "profiles"
         static let selected = "selectedProfileID"
+        /// **Pers-F#10 (v0.1.7.17):** namespace for backed-up
+        /// corrupt profile blobs. Suffix is an ISO-8601 timestamp.
+        static let profilesBroken = "profiles.broken"
     }
 
     private let defaults: UserDefaults
@@ -53,10 +57,33 @@ public struct ProfileStore: @unchecked Sendable {
     /// store here, because we already have those bytes in memory and
     /// adopting them is free of any prompt.
     public func loadProfiles() -> [Profile] {
-        guard let data = defaults.data(forKey: Keys.profiles),
-            let stored = try? JSONDecoder().decode([Profile].self, from: data),
-            !stored.isEmpty
-        else {
+        guard let data = defaults.data(forKey: Keys.profiles) else {
+            // First launch — no key set. Return default.
+            return [.default]
+        }
+        // **Pers-F#10 (v0.1.7.17):** previously
+        // `try? JSONDecoder().decode(...)` swallowed decode
+        // errors and returned `[.default]`. Next `save(profiles:)`
+        // would then overwrite the corrupted-but-recoverable
+        // blob with the default profile, silently destroying
+        // the user's profile list. Now: on decode failure, copy
+        // the corrupted blob to a backup key
+        // (`Keys.profilesBroken` + ISO timestamp) and surface
+        // an `os_log` warning before falling back. The user can
+        // recover via `defaults read` if needed.
+        let stored: [Profile]
+        do {
+            stored = try JSONDecoder().decode([Profile].self, from: data)
+        } catch {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let brokenKey = "\(Keys.profilesBroken).\(timestamp)"
+            defaults.set(data, forKey: brokenKey)
+            Logger.cooltunnel("ProfileStore").error(
+                "profiles JSON failed to decode (\(error.localizedDescription, privacy: .public)); preserved as \(brokenKey, privacy: .public)"
+            )
+            return [.default]
+        }
+        if stored.isEmpty {
             return [.default]
         }
 

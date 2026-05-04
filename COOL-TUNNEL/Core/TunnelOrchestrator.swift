@@ -728,6 +728,13 @@ public final class TunnelOrchestrator {
         lastError = nil
     }
 
+    /// **UX-F#1 (v0.1.7.17):** dismiss the error banner from
+    /// `HeaderView`. Encapsulated so the public setter on
+    /// `lastError` stays `private(set)`.
+    public func dismissLastError() {
+        lastError = nil
+    }
+
     private func parsePort(_ raw: String) throws -> UInt16 {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = UInt16(trimmed), port > 0 else {
