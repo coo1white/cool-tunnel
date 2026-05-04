@@ -74,6 +74,20 @@ into production.
   Apple Developer ID); the right-click → Open flow is the
   intended one-time approval. Anyone who can run code as you can
   also click that prompt.
+- **Bit-flips inside GitHub's release-asset CDN during a Naive
+  Binary or Rust Core update.** Both updaters verify the URL is
+  HTTPS + on a trusted GitHub-served host (`*.github.com` /
+  `*.githubusercontent.com`), constrain redirects to the same
+  list, and cap the download size at 100 MB — but neither
+  pins a SHA-256 hash against a Cool Tunnel-published manifest
+  today (deferred to v0.1.8). The .app's own Cool Tunnel →
+  Update flow IS SHA-pinned. If a CDN-internal byte tamper
+  occurred between the Cool Tunnel release publish and the
+  user's Update click, the redirect guard wouldn't catch it.
+  In practice the downloaded binary is then `codesign`-verified
+  before adoption (so a stranger's signature would fail), but
+  ad-hoc re-signing locally on tampered bytes would launder
+  them — a real residual risk acknowledged here for honesty.
 
 ## Apple Developer ID
 

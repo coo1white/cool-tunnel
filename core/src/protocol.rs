@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Port, Profile, ProxyTestMode};
+use crate::domain::{Port, Profile, ProxyTestMode, RawProfile};
 
 /// One request frame from the Swift app.
 ///
@@ -63,9 +63,18 @@ pub struct Request {
 #[non_exhaustive]
 pub enum RequestKind {
     /// Validate a profile and return whether it is well-formed.
+    ///
+    /// **v0.1.7.16 (Rust-F#1):** the variant now carries a
+    /// `RawProfile` rather than a fully-validated `Profile`.
+    /// Previously the `serde` deserializer did the validation
+    /// before this arm could run — making the `ok:false`
+    /// branch of `ValidationReport` structurally unreachable.
+    /// The dispatcher now runs `Profile::try_from(raw)` itself,
+    /// surfacing both branches of the contract in line with the
+    /// SM-3 hardening on the HTTP server side.
     ValidateProfile {
-        /// The profile to validate.
-        profile: Profile,
+        /// The profile to validate (un-validated wire shape).
+        profile: RawProfile,
     },
     /// Generate the `naive` `config.json` text for `profile`.
     GenerateNaiveConfig {
@@ -325,7 +334,7 @@ mod tests {
         let req = Request {
             id: 7,
             kind: RequestKind::ValidateProfile {
-                profile: sample_profile(),
+                profile: RawProfile::from(sample_profile()),
             },
         };
         let value = serde_json::to_value(&req).unwrap();

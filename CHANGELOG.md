@@ -9,6 +9,230 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [0.1.7.16] — 2026-05-04 (LTSC patch — broad-surface deep audit)
+
+LTSC patch on v0.1.7 line. Seven specialized review agents in
+parallel (Rust core, SwiftUI views, shell + tooling, test
+coverage, documentation, cross-cutting consistency, updater
+edge cases) returned **100 findings** — well above the 50+ asked
+for. Tight triage: **13 fixes land here**, 87 deferred with
+explicit categorization below.
+
+The fixes are spread across the surfaces that prior reviews
+hadn't deeply mined: the Rust core's protocol contract, the
+sibling updaters' API + logging discipline, real-user edge cases
+(disk full, multi-install), CI hardening, and documentation
+drift.
+
+### Rust core (3 fixes)
+
+- **Rust-F#1 — `validate_profile` contract honesty.** The
+  client-mode dispatcher's `RequestKind::ValidateProfile` arm
+  took an already-deserialized `Profile`, so the `ok:false`
+  branch of `ValidationReport` was structurally unreachable —
+  the same bug pattern SM-3 fixed in `server_mode.rs`. The
+  variant now carries `RawProfile` and the dispatcher runs
+  `Profile::try_from(raw)` itself, surfacing both branches.
+- **Rust-F#2 — IPv6 loopback in `lsof` remote classifier.**
+  `monitor::lsof::parse` only excluded `127.0.0.1` from the
+  "remote" classification. macOS uses `[::1]:port->[::1]:port`
+  for IPv6 ESTABLISHED lines; without the v6 loopback exclusion
+  an IPv6-first system's own loopback fanout could synthesize
+  a `TooManyRemote` anomaly. Now also excludes `[::1]`.
+- **Rust-F#4 — `unimplemented_method` Debug-format wire-side
+  scrub.** The wildcard arm in `dispatch()` previously embedded
+  `format!("…{kind:?}")` in the wire payload — a forward-compat
+  exfil channel: any future `RequestKind` variant with
+  attacker-influenceable fields would have its Debug
+  representation reach the client. Wire body is now a stable
+  payload-free string; the unknown variant goes to
+  `tracing::warn!` only.
+
+### Sibling updaters parity with AppUpdater (2 fixes)
+
+- **Cross-F#1 — `NaiveUpdater` + `RustCoreUpdater` API surface
+  narrowed to `internal`.** `AU-15` (v0.1.7.12) demoted only
+  AppUpdater. Both sibling updaters were still `public final
+  class …` with 9 `public` symbols each, despite SettingsView
+  being the sole consumer. Now matches AppUpdater + GitHubTrust:
+  `internal` (default) on the class and all members.
+- **Cross-F#2 — `Logger.cooltunnel("NaiveUpdater")` and
+  `…("RustCoreUpdater")` added.** Only AppUpdater had a Logger
+  before; the sibling updaters' security-relevant rejects
+  (untrusted host, oversize, network failure) had no
+  os_log breadcrumb. Now `error`-level on host/oversize hits,
+  `warning`-level on network failures — matching the discipline
+  AppUpdater established.
+
+### Updater edge cases (2 fixes)
+
+- **Edge-F#1 — disk-space pre-flight on tempRoot.**
+  `runPipeline` now calls `requireFreeSpace(at:atLeast:)` BEFORE
+  initiating the .zip download, requiring 300 MB available on
+  the volume containing tempRoot (≈ 100 MB .zip + 50 MB
+  extracted bundle + slack for the relaunch helper's STAGED
+  copy). Prevents the failure mode where a near-full volume
+  surfaces an attacker-influenceable "No space left on device"
+  ditto stderr message — and avoids the worst case where the
+  parent has terminated AND the helper hits ENOSPC mid-swap.
+- **Edge-F#11 — multi-install detection via Spotlight.**
+  Before any pipeline work, AppUpdater shells out to
+  `mdfind 'kMDItemCFBundleIdentifier == "space.coolwhite.naive"'`
+  to find every installed copy. If more than one exists
+  (e.g. `/Applications` + `~/Applications`), the update is
+  refused with: "Multiple copies of Cool Tunnel were found on
+  this Mac. Move all but one to the Trash, restart the app
+  you want to keep, and try Update again." Without this, the
+  helper updates one install but LaunchServices may launch the
+  other on next double-click — leaving a "successful" update
+  that doesn't appear to have changed anything.
+
+### CI + tooling (2 fixes)
+
+- **Shell-F#5 — `cargo build --locked` everywhere.**
+  `scripts/build_rust_core.sh` and three `cargo` invocations
+  in `.github/workflows/ci.yml` (clippy, test, build) now pass
+  `--locked`. Without it, a missing or out-of-date `Cargo.lock`
+  would be silently regenerated against newer transitive deps
+  — defeating the LTSC reproducibility posture the rest of the
+  build infrastructure tries to enforce.
+- **Shell-F#6 — least-privilege CI permissions + GitHub-token
+  scrub on checkout.** `.github/workflows/ci.yml` now declares
+  `permissions: { contents: read }` at the workflow level, and
+  every `actions/checkout@v4` invocation passes
+  `with: persist-credentials: false`. Without these, the
+  inherited org-default permissions could include `contents:
+  write` (or worse), and a compromised dependency or test
+  fixture could exfiltrate the GITHUB_TOKEN that
+  `actions/checkout` left in `.git/config`.
+
+### Documentation honesty (4 fixes)
+
+- **Doc-F#1 — Disclaimer corrected.** The "no data collection"
+  paragraph claimed credentials live in the macOS Keychain
+  with the rest in UserDefaults — both wrong. The actual
+  storage is `~/Library/Application Support/COOL-TUNNEL/
+  credentials.json` (mode 0600, parent dir 0700). Updated to
+  match reality and to mention the exact GitHub hosts the app
+  contacts during in-Settings updates.
+- **Doc-F#2 — README disk size from 23 MB to ~45 MB.** The
+  installed `.app` is now ~45 MB (universal `naive` Mach-O +
+  universal `cool-tunnel-core` engine + Swift app + assets);
+  the 23 MB figure was accurate pre-v0.1.7. Memory unchanged.
+- **Doc-F#3 — README documents the in-app self-updater.** The
+  user-facing "Updating without reinstalling the app" section
+  previously listed only the Naive Binary and Rust Core update
+  buttons, omitting the Cool Tunnel → Update button that
+  actually has SHA pinning. All three are now documented; the
+  SHA-pin gap on the other two is acknowledged with the v0.1.8
+  target.
+- **Doc-F#5 — SECURITY.md threat-model honesty about SHA-pin
+  gap.** The threat model now explicitly lists "Bit-flips
+  inside GitHub's release-asset CDN during a Naive Binary or
+  Rust Core update" under "Does NOT protect against", with the
+  full reasoning: redirect guard + size cap mitigate most of
+  the threat surface, but a CDN-internal byte tamper would
+  serve substituted bytes that local ad-hoc re-signing would
+  launder. Tracked for v0.1.8.
+
+### Tests + verification
+
+- `cargo check` clean (0 errors, 0 warnings)
+- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
+  concurrency
+- All 104 lib + 18 chaos tests still pass
+- `cargo test --locked --all-features` passes (the new
+  `--locked` flag enforces lockfile freshness)
+
+### Deferred (87 findings)
+
+Triaged into clear categories so the next maintainer (or
+release cycle) can pick up without re-reading the agent
+reports. The full per-finding output is preserved in the
+review-agent transcripts at the time of this commit.
+
+**SHA pinning for Naive + RustCore (v0.1.8 target)**: The
+single most-impactful deferred item. Both sibling updaters
+download attacker-influenceable bytes; only the .app's own
+self-updater pins SHA-256. The redirect guard + 100 MB cap
+help, but a CDN-internal tamper would serve substituted bytes
+that ad-hoc re-signing would launder. Sw#C4 was originally
+v0.2.0; SECURITY.md now commits to v0.1.8.
+
+**Test coverage (15 deferred)**: server-mode HTTP API has zero
+tests; the 7 Swift fixes shipped in v0.1.7.13/.14/.15 have NO
+tests of any kind; no end-to-end integration test for the JSON
+protocol or the HTTP server; chaos suite is liveness-only, no
+security boundaries; property-based testing missing for parsers;
+test fixtures hardcode "hunter2"/"secret". Whole test cycle
+worth scheduling.
+
+**SwiftUI render efficiency (8 deferred)**: `binding(for:)`
+round-trips full Profile on every keystroke causing global
+re-renders; `LazyVStack` autoscroll is O(N) per log line;
+`@State updater = NaiveUpdater(...)` re-instantiates on body
+recompute; `@Environment(\.colorScheme)` reads in three views
+duplicate work the dynamic NSColor provider already does.
+
+**Localization readiness (1 deferred)**: zero `String(localized:)`
+calls in the entire UI. Every visible string is a hardcoded
+Swift literal. The line-count display is grammatically wrong
+in English ("1 lines"). Untranslatable as-is.
+
+**Accessibility (1 deferred)**: decorative pulsing dot,
+gradient app icon, scroll/lightbulb icons all lack
+`.accessibilityHidden(true)` — VoiceOver walks into them
+unlabeled. Status pill should be a single combined element.
+
+**Architectural debt (4 deferred)**: extract
+`AppUpdaterPipeline` from AppUpdater (1402-line file is 85%
+nonisolated statics on a `@MainActor @Observable` class);
+build-time `canonicalBundleID` from pbxproj; `parse_args`
+clap migration; pipeline-actor split for the cross-platform
+v0.2.0 refactor.
+
+**Bash + supply chain (10 deferred)**: `fetch_naive.sh` claims
+to verify SHA but doesn't (writes the SHA from downloaded bytes,
+no pinned manifest); `taiki-e/install-action@v2` not pinned to
+SHA; `package_release.sh` doesn't actually invoke `gh release
+create`; `secret_check.sh` excludes `dist/` from the scan;
+cargo-deny advisory list lacks expirations; dependabot lacks
+`groups:`; `build.rs` doesn't honour `SOURCE_DATE_EPOCH`.
+
+**Documentation polish (8 deferred)**: SECURITY.md's
+"begins with 1999… ends with …Wry" gives away the password
+structure; SUPPORT.md's "macOS 26 Tahoe Liquid Glass" claim
+is aspirational; CONTRIBUTING references wrong package version;
+NOTICE doesn't mention Apple system fonts; no PR template;
+no "run a single test" snippet in CONTRIBUTING.
+
+**UI race conditions (1 deferred)**: ControlPanelView's Stop /
+Diag / Latency buttons spawn `Task { ... }` without sync gates.
+Lower priority because the underlying ops are idempotent at
+the orchestrator layer.
+
+**Performance / memory micro-opts (15 deferred)**: regex with
+default features pulls 1.5 MB unicode tables; `pid_alive`
+shells out per 5s tick instead of using
+`monitor_lifecycle`'s child.wait(); `EncodedCredentials::Drop`
+documents itself as theatre; redundant `.lowercased()` calls
+on already-canonical Foundation types; etc.
+
+**Style + naming (10 deferred)**: bundle-ID legacy
+(`space.coolwhite.naive` vs `…cooltunnel`); empty
+`ViewModels/` directory; audit-tag comment density; magic
+number `1024` overloaded; "Refusing to install/update/
+proceed" verb drift across error messages.
+
+**Don't-do-it findings (15)**: AsyncStream pipeline migration
+(callback shape is fine), shared `Updater` protocol (the three
+state machines diverge structurally), bash heredoc → resource
+file (current shape is more secure + auditable),
+`AvailableRelease` asymmetry (reflects real product asymmetry),
+exact-allowlist hostname (suffix matching is fine), several
+others. Flagged as "don't do" so the next reviewer doesn't
+propose them.
+
 ## [0.1.7.15] — 2026-05-04 (LTSC patch — deep audit, MainActor freeze fix)
 
 LTSC patch on v0.1.7 line. Deep three-angle review (adversarial
