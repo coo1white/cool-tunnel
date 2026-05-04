@@ -137,9 +137,6 @@ If your change touches more than one column, that's fine — but
 note it in the PR description so reviewers know to look both
 sides.
 
-See [docs/v0.1.5-roadmap.md](./docs/v0.1.5-roadmap.md) for the
-list of features tracked but not yet shipped.
-
 ## Code of conduct
 
 Be kind. We're all volunteers.
