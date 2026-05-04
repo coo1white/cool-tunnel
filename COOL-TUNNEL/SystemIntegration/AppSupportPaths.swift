@@ -110,6 +110,24 @@ public enum RestrictedFile {
         guard fd >= 0 else {
             throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
         }
+        // **SEC-F#6 (v0.1.7.15):** belt-and-braces `fchmod` to
+        // defeat umask interaction. `open(2)`'s mode arg is
+        // ANDed with `~umask` per POSIX; on a system with an
+        // unusual umask (corporate-managed `umask 077`, or a
+        // future caller passing `0o755`) the file would be
+        // created with FEWER permissions than requested.
+        // `fchmod(2)` doesn't honour umask, so this guarantees
+        // the file ends up at exactly `mode`. For the existing
+        // call sites (credentials at 0o600, relaunch script at
+        // 0o700) the umask interaction was a no-op, but locking
+        // the contract here means future callers can rely on
+        // the requested mode without auditing their environment.
+        if fchmod(fd, mode) != 0 {
+            let chmodErrno = errno
+            close(fd)
+            _ = unlink(tempURL.path)
+            throw POSIXError(POSIXError.Code(rawValue: chmodErrno) ?? .EIO)
+        }
         // Track close state so the catch block doesn't double-close
         // a fd we already closed in the success path. macOS may
         // reuse a closed fd for an unrelated open() between
