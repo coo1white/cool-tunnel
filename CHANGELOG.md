@@ -9,6 +9,37 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.4] — 2026-05-05 (hotfix — phantom spinner next to "You're on the latest version")
+
+The Settings → Naive Binary and Settings → Rust Core sections
+left a small `ProgressView` spinner permanently spinning next
+to the "You're on the latest version (X)" text after a
+successful Check. Cosmetic — the check itself completed; just
+the indeterminate-progress glyph never went away.
+
+### Cause
+
+`updaterRow` and `rustUpdaterRow` both render a leading
+`ProgressView` whose `.frame(width: 80)` slot uses an inner
+switch over `updater.state`. v2.0.2 added the new `.checking
+/ .upToDate / .available` states but only added their text
+to `updaterMessage` — the row's `case .succeeded, .failed,
+.idle: EmptyView()` arm wasn't extended, so `.upToDate` and
+`.available` fell into the `default: ProgressView()` arm.
+`.upToDate` and `.available` are *resting* states (the check
+finished; nothing's in flight), so they should render no
+spinner.
+
+### Fix
+
+Add `.upToDate, .available` to the `EmptyView` arm of both
+`updaterRow` and `rustUpdaterRow`. Two lines.
+
+After 2.0.4, the row renders just the message ("You're on
+the latest version (X).") with no leading spinner.
+
+---
+
 ## [2.0.3] — 2026-05-05 (hotfix — false-positive "bundle is locked" on Update)
 
 `AppUpdater.refuseReadOnlyInstall` over-reported "Cool Tunnel's
