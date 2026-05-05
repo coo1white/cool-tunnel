@@ -232,8 +232,8 @@ async fn version() -> Json<VersionResponse> {
 /// deserializer itself, and surfaces both branches:
 ///
 ///   - `Ok(_)`  → `{"ok":true,"reason":null}`
-///   - `Err(e)` → `{"ok":false,"reason":"invalid profile"}` with
-///                `e` logged at warn level server-side.
+///   - `Err(e)` → `{"ok":false,"reason":"invalid profile"}`
+///     with `e` logged at warn level server-side.
 ///
 /// The wire `reason` is intentionally generic. An unauthenticated
 /// caller cannot use it to enumerate the engine's validation rules
@@ -281,7 +281,7 @@ struct NaiveConfigResponse {
 async fn naive_config(
     body: Result<Json<Profile>, JsonRejection>,
 ) -> Result<Json<NaiveConfigResponse>, ApiError> {
-    let Json(profile) = body.map_err(ApiError::from_json_rejection)?;
+    let Json(profile) = body.map_err(|err| ApiError::from_json_rejection(&err))?;
     let config = NaiveConfig::from_profile(&profile);
     let json = config.to_pretty_json().map_err(|err| {
         tracing::error!(error = %err, "naive_config: serialize failed");
@@ -328,7 +328,7 @@ const MAX_PAC_DOMAIN_BYTES: usize = ServerAddress::MAX_LEN;
 async fn naive_pac(
     body: Result<Json<NaivePacRequest>, JsonRejection>,
 ) -> Result<Json<NaivePacResponse>, ApiError> {
-    let Json(request) = body.map_err(ApiError::from_json_rejection)?;
+    let Json(request) = body.map_err(|err| ApiError::from_json_rejection(&err))?;
     // SM-4 caps. Enforced at the handler boundary rather than in
     // the deserializer because `Vec<String>` has no native serde
     // attribute for max-items / max-byte-len; a custom
@@ -388,7 +388,12 @@ impl ApiError {
     /// `Result<Json<T>, JsonRejection>`: log the underlying serde
     /// error server-side, surface only the opaque envelope to the
     /// wire. SM-1's scrub happens here.
-    fn from_json_rejection(err: JsonRejection) -> Self {
+    ///
+    /// Takes `&JsonRejection` rather than consuming it: the body
+    /// only needs `Display` (`%err`) for logging, and pass-by-ref
+    /// keeps clippy's `needless_pass_by_value` happy. Call sites
+    /// hand a reference: `body.map_err(|e| ApiError::from_json_rejection(&e))`.
+    fn from_json_rejection(err: &JsonRejection) -> Self {
         tracing::warn!(error = %err, "scrubbed JsonRejection at handler boundary");
         Self::BadRequest
     }
