@@ -996,27 +996,34 @@ public struct SettingsView: View {
             // `alignment: .top` so on multi-line messages the
             // icon + Dismiss button stay aligned with the first
             // line of text rather than drifting to the vertical
-            // centre. `lineLimit(3)` + `fixedSize(vertical:)`
-            // lets the message expand within the row without
-            // the parent layout snapping it back to a single
-            // line.
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "xmark.octagon.fill")
-                    .foregroundStyle(.red)
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(message)
-                    .textSelection(.enabled)
-                // "Dismiss" is the actual semantic — clears the
-                // error so the Check button can render again.
-                // "Reset" suggested undoing user changes which
-                // is misleading.
-                Button("Dismiss") { appUpdater.reset() }
+            // centre. v2.0.5: lineLimit raised from 3 to 12 so
+            // the longer .pkg-ownership recovery instructions
+            // display in full, and added a Reveal in Finder
+            // button — one click takes the user straight to the
+            // bundle they need to drag to Trash for the manual
+            // reinstall path.
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "xmark.octagon.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(12)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Reveal in Finder") {
+                        let appURL = Bundle.main.bundleURL
+                        NSWorkspace.shared.activateFileViewerSelecting([appURL])
+                    }
                     .controlSize(.small)
+                    Button("Dismiss") { appUpdater.reset() }
+                        .controlSize(.small)
+                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
