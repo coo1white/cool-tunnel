@@ -509,7 +509,17 @@ public struct SettingsView: View {
                 switch updater.state {
                 case .downloading(let p) where p > 0:
                     ProgressView(value: p).controlSize(.small)
-                case .succeeded, .failed, .idle:
+                // **v2.0.4 hotfix:** the new `.upToDate` and
+                // `.available` states are *resting* states (the
+                // check finished; nothing's in flight), so they
+                // must NOT fall into the `default` ProgressView
+                // arm. v2.0.2 added the states but left the
+                // switch listing only `.succeeded / .failed /
+                // .idle` as no-spinner cases, so a successful
+                // check left a permanent spinner next to "You're
+                // on the latest version (X)." Same shape on the
+                // rust core row below.
+                case .succeeded, .failed, .idle, .upToDate, .available:
                     EmptyView()
                 default:
                     ProgressView().controlSize(.small)
@@ -1328,7 +1338,8 @@ public struct SettingsView: View {
                 switch rustUpdater.state {
                 case .downloading(let p) where p > 0:
                     ProgressView(value: p).controlSize(.small)
-                case .succeeded, .failed, .idle:
+                // v2.0.4 hotfix — see naive `updaterRow` above.
+                case .succeeded, .failed, .idle, .upToDate, .available:
                     EmptyView()
                 default:
                     ProgressView().controlSize(.small)
