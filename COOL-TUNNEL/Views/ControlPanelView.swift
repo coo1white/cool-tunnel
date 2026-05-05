@@ -170,10 +170,40 @@ public struct ControlPanelView: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.regular)
         .tint(orchestrator.isRunning ? .red : .accentColor)
-        .disabled(orchestrator.selectedProfile == nil)
-        .help(orchestrator.isRunning ? "Stop the proxy" : "Start in \(pendingMode.title) mode")
-        .accessibilityLabel(
-            orchestrator.isRunning ? "Stop proxy" : "Start proxy in \(pendingMode.title) mode")
+        .disabled(primaryButtonDisabled)
+        .help(primaryButtonHelp)
+        .accessibilityLabel(primaryButtonAccessibilityLabel)
+    }
+
+    /// Disable Start when the selected profile is missing or
+    /// has empty required fields. Stop is always enabled while
+    /// running (so the user can recover from any state).
+    private var primaryButtonDisabled: Bool {
+        if orchestrator.isRunning { return false }
+        guard let profile = orchestrator.selectedProfile else { return true }
+        return !profile.isStartable
+    }
+
+    private var primaryButtonHelp: String {
+        if orchestrator.isRunning { return "Stop the proxy" }
+        guard let profile = orchestrator.selectedProfile else {
+            return "Pick or create a profile first"
+        }
+        if !profile.isStartable {
+            return "Fill in server, username, password, and local port to start"
+        }
+        return "Start in \(pendingMode.title) mode"
+    }
+
+    private var primaryButtonAccessibilityLabel: String {
+        if orchestrator.isRunning { return "Stop proxy" }
+        guard let profile = orchestrator.selectedProfile else {
+            return "Start disabled — pick or create a profile first"
+        }
+        if !profile.isStartable {
+            return "Start disabled — fill in server, username, password, and local port"
+        }
+        return "Start proxy in \(pendingMode.title) mode"
     }
 
     private func togglePrimary() async {
