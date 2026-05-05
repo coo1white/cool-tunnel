@@ -146,7 +146,7 @@ final class NaiveUpdater {
                 state = .available(
                     tag: tag, currentVersion: currentVersion)
             }
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -278,7 +278,7 @@ final class NaiveUpdater {
             lastInstalledTag = tag
             state = .succeeded(tag: tag, installedPath: installedURL)
             return installedURL
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
             return nil
         } catch {

@@ -139,7 +139,7 @@ final class AppUpdater {
             } else {
                 state = .upToDate(currentVersion: current)
             }
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -173,7 +173,7 @@ final class AppUpdater {
         // to refuse and tell them which copies exist.
         do {
             try await Self.refuseIfMultipleInstalls()
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
             return
         } catch {
@@ -231,7 +231,7 @@ final class AppUpdater {
                 Darwin.exit(0)
             }
             await MainActor.run { NSApp.terminate(nil) }
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -1009,7 +1009,7 @@ final class AppUpdater {
                     throw UpdaterError.message("New app's Info.plist is malformed.")
                 }
                 plist = parsed
-            } catch let UpdaterError.message(reason) {
+            } catch UpdaterError.message(let reason) {
                 throw UpdaterError.message(reason)
             } catch {
                 throw UpdaterError.message("Couldn't parse new app's Info.plist.")
