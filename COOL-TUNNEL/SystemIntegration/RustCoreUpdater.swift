@@ -138,6 +138,24 @@ final class RustCoreUpdater {
             try await Self.adhocSign(at: downloaded)
             try Self.atomicallyInstall(from: downloaded, to: installedURL)
 
+            // **U#2 fix (v2.0.1):** post-install `--version`
+            // verification. Pre-2.0.1 we declared
+            // `state = .succeeded(tag: resolved.tag, …)` based
+            // solely on the SHA-256 match — which is fine for
+            // proving the bytes we downloaded are the bytes the
+            // release publisher signed off on, but says nothing
+            // about whether those bytes actually self-identify
+            // as the version the tag claims. v2.0.0 shipped a
+            // Rust binary that self-reported `0.1.7` because the
+            // `core/Cargo.toml` version field was never bumped;
+            // the updater happily declared "Updated to v2.0.0"
+            // while the verdict pill read `cool-tunnel-core 0.1.7`.
+            // Now: run the new binary's `--version` and refuse
+            // to enter `.succeeded` unless its self-reported
+            // semver matches the release tag's semver.
+            try await Self.verifyInstalledVersion(
+                at: installedURL, matchesTag: resolved.tag)
+
             lastInstalledTag = resolved.tag
             state = .succeeded(tag: resolved.tag, installedPath: installedURL)
             return installedURL
@@ -435,3 +453,62 @@ final class RustCoreUpdater {
 // **ARCH-F#1 (v0.1.7.15):** the file-scope `RustUpdaterError`
 // moved to `SystemIntegration/UpdaterError.swift` and is now
 // shared across all three updaters under one name.
+
+extension RustCoreUpdater {
+    /// **U#2 fix (v2.0.1):** asserts the just-installed engine
+    /// binary's self-reported version (parsed from `--version`)
+    /// matches the release tag we downloaded from. Throws
+    /// `UpdaterError.message` on any mismatch — caller treats
+    /// that as a refusal to declare the update successful.
+    ///
+    /// Why this exists: SHA-256 verification proves the bytes
+    /// we wrote to disk are the bytes the release publisher
+    /// signed off on, but it doesn't prove those bytes were
+    /// built from a `Cargo.toml` whose `version` field matches
+    /// the release tag. v2.0.0 shipped exactly this drift —
+    /// the binary self-reported `0.1.7` while the tag was
+    /// `v2.0.0`. From v2.0.1 forward, the updater catches the
+    /// drift at install time rather than letting it surface
+    /// later as a confusing "verdict pill says 0.1.7 but
+    /// updater says 2.0.0" UI state.
+    nonisolated fileprivate static func verifyInstalledVersion(
+        at url: URL,
+        matchesTag tag: String
+    ) async throws {
+        let resolver = RustCoreResolver()
+        let descriptor: RustCoreDescriptor
+        do {
+            descriptor = try await resolver.inspect(url: url, origin: .userSupplied)
+        } catch {
+            rustCoreUpdaterLogger.error(
+                "post-install inspect failed: \(error.localizedDescription, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "Couldn't run --version on the installed engine binary to verify it. Refusing to declare the update successful."
+            )
+        }
+        guard let actualLine = descriptor.version else {
+            throw UpdaterError.message(
+                "The installed engine binary didn't respond to --version. Refusing to declare the update successful."
+            )
+        }
+        // descriptor.version is like "cool-tunnel-core 2.0.1";
+        // tag is like "v2.0.1". Extract the bare semver from
+        // both and compare.
+        let expectedSemver = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let actualSemver =
+            actualLine
+            .split(whereSeparator: \.isWhitespace)
+            .last
+            .map(String.init) ?? ""
+
+        guard !actualSemver.isEmpty, actualSemver == expectedSemver else {
+            rustCoreUpdaterLogger.error(
+                "version mismatch after install: tag=\(tag, privacy: .public) binary=\(actualLine, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "Engine binary self-reports “\(actualLine)” but the release tag is “\(tag)”. Refusing to declare the update successful — the upstream Cargo.toml version may not have been bumped for this release."
+            )
+        }
+    }
+}
