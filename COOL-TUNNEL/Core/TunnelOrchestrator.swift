@@ -5,8 +5,10 @@
 // observable façade. Views read state from here and call its methods;
 // nothing else is `@Observable` in the app.
 
+import Darwin
 import Foundation
 import Observation
+import os
 
 /// One streamed line of engine output, surfaced in the live log view.
 public struct LogEntry: Sendable, Identifiable, Hashable {
@@ -308,6 +310,20 @@ public final class TunnelOrchestrator {
     /// flight" a clean no-op — the user's first intent wins.
     private var transitionInFlight: Bool = false
 
+    /// **Engine-F#P1.2 (v0.2):** suppresses the
+    /// `stateChanged(false)` recovery-error path while a
+    /// user-initiated stop is in flight. Without this, every
+    /// clean Stop produces a misleading "naive stopped
+    /// unexpectedly — system proxy reverted" banner one tick
+    /// later — naive's intentional shutdown event arrives at
+    /// `handle(event:)` before `stop()` has reached its
+    /// `isRunning = false` line, so the recovery branch fires
+    /// for what was actually a healthy shutdown. Set true at
+    /// the head of `stop()` and `stopQuiet()`, cleared in their
+    /// `defer`. The event handler reads it as part of the
+    /// existing `wasRunning && !isShuttingDown` guard.
+    private var userStopInFlight: Bool = false
+
     /// **UX-F#3 (v0.1.7.19):** captured at start time so
     /// `selectedProfile.set` can detect "user edited the
     /// active profile while connected" and surface a banner.
@@ -458,6 +474,14 @@ public final class TunnelOrchestrator {
     /// outside the orchestrator should use `stop()` so the log is
     /// always informative for explicit stops.
     private func stopQuiet() async {
+        // **Engine-F#P1.2 (v0.2):** mark this stop as user-
+        // initiated for the duration of the call so the
+        // `stateChanged(false)` event handler doesn't post a
+        // phantom "naive stopped unexpectedly" banner for the
+        // shutdown event we just *asked* naive to emit.
+        userStopInFlight = true
+        defer { userStopInFlight = false }
+
         try? await proxyController.disableAll()
         // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
         // clean stop. Same reasoning as `shutdown()`.
@@ -494,112 +518,143 @@ public final class TunnelOrchestrator {
     /// this with `log: false` so it can emit a single "switched
     /// from X to Y" line in the public log instead of the
     /// stop/start pair the user sees as visual noise.
+    ///
+    /// **Engine-F#P0 (v0.2):** the entire body is wrapped in a
+    /// single do/catch that publishes any failure to `lastError`
+    /// (via `recordError`) before re-throwing. Pre-v0.2, every
+    /// throw inside this method propagated to the view's empty
+    /// catch block, where the comment claimed "lastError carries
+    /// the user-facing surface" — but no path here ever set it on
+    /// failure. Result: a port-collision or naive-spawn-failure
+    /// produced silent UI on the click of Smart / Global / Local.
+    /// Now: any failure path inside `startCore` populates
+    /// `lastError` and the live log before the throw escapes, so
+    /// the existing HeaderView error banner becomes the visible
+    /// surface for engine errors too.
     private func startCore(mode: ProxyMode, log: Bool) async throws {
         guard mode != .stopped else { return }
-        guard var profile = selectedProfile else {
-            throw OrchestratorError.noProfile
-        }
         // Clear stale error from any previous failed attempt — a successful
         // start should not leave the user staring at last week's failure.
+        // Hoisted above the do/catch so a successful start always begins
+        // with a clean banner, while a failing start will repopulate
+        // `lastError` from the catch arm below.
         lastError = nil
 
-        // Hydrate the password from the credential store on demand.
-        // `loadProfiles()` deliberately leaves passwords empty so app
-        // launch never triggers a credential-store access; we pull
-        // here, after the user has already committed to starting,
-        // which is the contextually-sensible place for any prompt the
-        // migrating store may surface for upgraders.
-        if profile.password.isEmpty {
-            let stored = profileStore.password(forProfileID: profile.id)
-            if !stored.isEmpty {
-                profile.password = stored
+        do {
+            guard var profile = selectedProfile else {
+                throw OrchestratorError.noProfile
             }
-        }
 
-        // Validate via engine. The engine's `Profile` deserializer enforces
-        // every rule the Swift form previously did inline.
-        let validation = try await core.send(.validateProfile(profile))
-        guard case .validation(let report) = validation, report.ok else {
-            throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
-        }
+            // Hydrate the password from the credential store on demand.
+            // `loadProfiles()` deliberately leaves passwords empty so app
+            // launch never triggers a credential-store access; we pull
+            // here, after the user has already committed to starting,
+            // which is the contextually-sensible place for any prompt the
+            // migrating store may surface for upgraders.
+            if profile.password.isEmpty {
+                let stored = profileStore.password(forProfileID: profile.id)
+                if !stored.isEmpty {
+                    profile.password = stored
+                }
+            }
 
-        // Generate engine artifacts.
-        let configResponse = try await core.send(.generateNaiveConfig(profile))
-        guard case .naiveConfig(let configJSON) = configResponse else {
-            throw OrchestratorError.unexpectedResponse
-        }
-        try RestrictedFile.write(configJSON, to: paths.configFile)
+            // Validate via engine. The engine's `Profile` deserializer enforces
+            // every rule the Swift form previously did inline.
+            let validation = try await core.send(.validateProfile(profile))
+            guard case .validation(let report) = validation, report.ok else {
+                throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
+            }
 
-        let port = try parsePort(profile.localPort)
-
-        if mode == .smart {
-            let pacResponse = try await core.send(
-                .generatePac(directDomains: settings.directDomains, port: port)
-            )
-            guard case .pac(let pacJS) = pacResponse else {
+            // Generate engine artifacts.
+            let configResponse = try await core.send(.generateNaiveConfig(profile))
+            guard case .naiveConfig(let configJSON) = configResponse else {
                 throw OrchestratorError.unexpectedResponse
             }
-            try RestrictedFile.write(pacJS, to: paths.pacFile)
-        }
+            try RestrictedFile.write(configJSON, to: paths.configFile)
 
-        // Resolve the naive binary through the dedicated resolver: it
-        // checks the host arch slice, runs `--version`, verifies the
-        // code signature, and refuses to return a descriptor that would
-        // crash on spawn. One typed error covers all four failure modes.
-        let descriptor: NaiveBinaryDescriptor
-        do {
-            descriptor = try await naiveResolver.resolve(settings: settings)
-        } catch let error as NaiveResolverError {
-            throw OrchestratorError.naiveBinaryUnusable(error)
-        }
-        activeNaiveDescriptor = descriptor
+            let port = try parsePort(profile.localPort)
 
-        let started = try await core.send(
-            .startProxy(
-                binaryPath: descriptor.url.path,
-                configPath: paths.configFile.path,
-                port: port
-            ))
-        guard case .started = started else {
-            throw OrchestratorError.unexpectedResponse
-        }
+            if mode == .smart {
+                let pacResponse = try await core.send(
+                    .generatePac(directDomains: settings.directDomains, port: port)
+                )
+                guard case .pac(let pacJS) = pacResponse else {
+                    throw OrchestratorError.unexpectedResponse
+                }
+                try RestrictedFile.write(pacJS, to: paths.pacFile)
+            }
 
-        // Apply system proxy.
-        switch mode {
-        case .smart:
-            try await proxyController.enableSmartPAC(pacURL: paths.pacFile)
-            // **Lifecycle-F#16 (v0.1.7.18):** write the
-            // proxy-active sentinel so a crash before
-            // `disableAll()` runs is recoverable on next launch.
-            ProxyActiveFlag.write(
-                at: ProxyActiveFlag.path(in: paths.supportDirectory),
-                mode: "smart"
-            )
-        case .global:
-            try await proxyController.enableGlobalSOCKS(port: port)
-            ProxyActiveFlag.write(
-                at: ProxyActiveFlag.path(in: paths.supportDirectory),
-                mode: "global"
-            )
-        case .localOnly:
-            try await proxyController.disableAll()
-            // local mode doesn't touch system proxy — clear
-            // any stale flag from a previous mode run.
-            ProxyActiveFlag.clear(
-                at: ProxyActiveFlag.path(in: paths.supportDirectory))
-        case .stopped:
-            break
-        }
+            // Resolve the naive binary through the dedicated resolver: it
+            // checks the host arch slice, runs `--version`, verifies the
+            // code signature, and refuses to return a descriptor that would
+            // crash on spawn. One typed error covers all four failure modes.
+            let descriptor: NaiveBinaryDescriptor
+            do {
+                descriptor = try await naiveResolver.resolve(settings: settings)
+            } catch let error as NaiveResolverError {
+                throw OrchestratorError.naiveBinaryUnusable(error)
+            }
+            activeNaiveDescriptor = descriptor
 
-        activeMode = mode
-        isRunning = true
-        // **UX-F#3 (v0.1.7.19):** capture which profile the
-        // engine started with. The selectedProfile setter
-        // compares against this to detect edits to the
-        // currently-active profile.
-        activeProfileID = selectedProfileID
-        if log {
-            appendInfo("started in \(mode.title)")
+            let started = try await core.send(
+                .startProxy(
+                    binaryPath: descriptor.url.path,
+                    configPath: paths.configFile.path,
+                    port: port
+                ))
+            guard case .started = started else {
+                throw OrchestratorError.unexpectedResponse
+            }
+
+            // Apply system proxy.
+            switch mode {
+            case .smart:
+                try await proxyController.enableSmartPAC(pacURL: paths.pacFile)
+                // **Lifecycle-F#16 (v0.1.7.18):** write the
+                // proxy-active sentinel so a crash before
+                // `disableAll()` runs is recoverable on next launch.
+                ProxyActiveFlag.write(
+                    at: ProxyActiveFlag.path(in: paths.supportDirectory),
+                    mode: "smart"
+                )
+            case .global:
+                try await proxyController.enableGlobalSOCKS(port: port)
+                ProxyActiveFlag.write(
+                    at: ProxyActiveFlag.path(in: paths.supportDirectory),
+                    mode: "global"
+                )
+            case .localOnly:
+                try await proxyController.disableAll()
+                // local mode doesn't touch system proxy — clear
+                // any stale flag from a previous mode run.
+                ProxyActiveFlag.clear(
+                    at: ProxyActiveFlag.path(in: paths.supportDirectory))
+            case .stopped:
+                break
+            }
+
+            activeMode = mode
+            isRunning = true
+            // **UX-F#3 (v0.1.7.19):** capture which profile the
+            // engine started with. The selectedProfile setter
+            // compares against this to detect edits to the
+            // currently-active profile.
+            activeProfileID = selectedProfileID
+            if log {
+                appendInfo("started in \(mode.title)")
+            }
+        } catch {
+            // Build a user-readable message: the typed
+            // `OrchestratorError` cases already carry localized
+            // descriptions; everything else falls back to the
+            // error's own description. Engine wire errors
+            // (`ErrorPayload`) include the engine's own message
+            // string, which is what we want surfaced for things
+            // like "address already in use".
+            let detail = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            recordError("Couldn't start \(mode.title): \(detail)")
+            throw error
         }
     }
 
@@ -613,6 +668,14 @@ public final class TunnelOrchestrator {
         // misleading "stop failed: not_running" log line. Single
         // exit point keeps the user-facing behaviour clean.
         guard isRunning || activeMode != .stopped else { return }
+        // **Engine-F#P1.2 (v0.2):** see `userStopInFlight` doc —
+        // suppresses the spurious "naive stopped unexpectedly"
+        // recovery error that would otherwise fire when naive's
+        // intentional `stateChanged(false)` event arrives mid-
+        // stop, before this body has set `isRunning = false`.
+        userStopInFlight = true
+        defer { userStopInFlight = false }
+
         try? await proxyController.disableAll()
         // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
         // user-initiated stop.
@@ -633,6 +696,17 @@ public final class TunnelOrchestrator {
     /// the proxy-active sentinel exists, the previous run died
     /// without disabling — force-disable the system proxy now
     /// so the user gets a working network on launch.
+    ///
+    /// **Engine-F#P2.5 (v0.2):** also sweeps for orphan `naive`
+    /// processes that survived the crash. If `cool-tunnel-core`
+    /// was SIGKILL'd while `naive` was its child, naive gets
+    /// reparented to launchd and keeps holding its local port.
+    /// On the next launch, `core.send(.startProxy)` would fail
+    /// with EADDRINUSE — combined with the silent-error fix
+    /// (P0 #1) the user would just see "Couldn't start: address
+    /// already in use" with no obvious culprit. This sweep
+    /// terminates orphans (parent PID == 1) before the next
+    /// start attempt so launches are deterministic.
     public func recoverFromCrashIfNeeded() async {
         let flagURL = ProxyActiveFlag.path(in: paths.supportDirectory)
         guard ProxyActiveFlag.existsIndicatingCrash(at: flagURL) else {
@@ -646,7 +720,110 @@ public final class TunnelOrchestrator {
         )
         try? await proxyController.disableAll()
         ProxyActiveFlag.clear(at: flagURL)
+
+        await sweepOrphanNaiveIfAny()
     }
+
+    /// **Engine-F#P2.5 (v0.2):** terminate any `naive` process
+    /// reparented to launchd (PID 1) — the signature of an
+    /// orphan that outlived its `cool-tunnel-core` parent.
+    /// Two-stage match keeps this targeted and safe:
+    ///
+    /// 1. `pgrep -x naive` returns processes whose **executable
+    ///    name** is exactly `naive`. Matching the process name
+    ///    (not `-f` against the cmdline) avoids killing a user's
+    ///    own `cat /path/to/naive` or text editor.
+    /// 2. `ps -o ppid=` filters to PIDs whose parent is `1`
+    ///    (launchd). A naive whose parent is still alive belongs
+    ///    to that parent — leave it alone.
+    ///
+    /// SIGTERM with a 500 ms grace, then SIGKILL any survivors.
+    /// Failures (sandbox-blocked `kill`, missing `pgrep`, etc.)
+    /// are logged and skipped — the sweep is best-effort, never
+    /// blocks the bootstrap.
+    private func sweepOrphanNaiveIfAny() async {
+        let pgrep = URL(fileURLWithPath: "/usr/bin/pgrep")
+        let ps = URL(fileURLWithPath: "/bin/ps")
+
+        let listing: SubprocessResult
+        do {
+            listing = try await Subprocess.run(
+                executable: pgrep,
+                arguments: ["-x", "naive"],
+                timeout: 5
+            )
+        } catch {
+            Self.recoveryLogger.warning(
+                "orphan-naive sweep skipped (pgrep launch failed): \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+        // pgrep convention: exit 0 = matches printed; exit 1 =
+        // no match (clean); exit ≥ 2 = error. Only act on exit 0.
+        guard listing.exitCode == 0 else { return }
+
+        let candidatePIDs: [pid_t] = listing.stdout
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line in
+                pid_t(line.trimmingCharacters(in: .whitespaces))
+            }
+        guard !candidatePIDs.isEmpty else { return }
+
+        var orphans: [pid_t] = []
+        for pid in candidatePIDs {
+            let parent: pid_t? = await Self.parentPID(of: pid, ps: ps)
+            if parent == 1 {
+                orphans.append(pid)
+            }
+        }
+        guard !orphans.isEmpty else {
+            // naive processes exist but have living parents —
+            // owned by another tool, not our orphan.
+            return
+        }
+
+        let pidStr = orphans.map(String.init).joined(separator: ", ")
+        appendInfo(
+            "orphan naive (PID \(pidStr)) survived previous crash — terminating"
+        )
+        Self.recoveryLogger.notice(
+            "sweeping orphan naive PIDs: \(pidStr, privacy: .public)"
+        )
+
+        for pid in orphans {
+            kill(pid, SIGTERM)
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        for pid in orphans where kill(pid, 0) == 0 {
+            // Still alive after SIGTERM grace — escalate.
+            kill(pid, SIGKILL)
+        }
+    }
+
+    /// Helper: returns the parent PID of `pid` via `ps -o ppid=`.
+    /// `nil` on any failure (process gone, ps unavailable, malformed
+    /// output) so callers treat the candidate as "don't touch."
+    private static func parentPID(of pid: pid_t, ps: URL) async -> pid_t? {
+        do {
+            let result = try await Subprocess.run(
+                executable: ps,
+                arguments: ["-o", "ppid=", "-p", String(pid)],
+                timeout: 2
+            )
+            guard result.exitCode == 0 else { return nil }
+            let trimmed = result.stdout
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return pid_t(trimmed)
+        } catch {
+            return nil
+        }
+    }
+
+    /// **Engine-F#P2.5 (v0.2):** dedicated logger for the
+    /// crash-recovery / orphan-sweep path. Same subsystem as
+    /// `ProxyActiveFlag.logger` (`ProxyRecovery`) so the full
+    /// recovery story shows up under one `log show` predicate.
+    private static let recoveryLogger = Logger.cooltunnel("ProxyRecovery")
 
     /// **UX-F#4 (v0.1.7.18):** called by AppDelegate when the
     /// system wakes from sleep. If the proxy is still nominally
@@ -827,7 +1004,15 @@ public final class TunnelOrchestrator {
             isRunning = running
             if !running {
                 activeMode = .stopped
-                if wasRunning && !isShuttingDown {
+                // **Engine-F#P1.2 (v0.2):** the recovery branch
+                // is gated on `!userStopInFlight` so an
+                // intentional Stop's own `stateChanged(false)`
+                // doesn't trigger a phantom "naive stopped
+                // unexpectedly" banner. The flag is set by
+                // `stop()` / `stopQuiet()` for the duration of
+                // the call — see its declaration for the
+                // race window it covers.
+                if wasRunning && !isShuttingDown && !userStopInFlight {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         try? await self.proxyController.disableAll()
