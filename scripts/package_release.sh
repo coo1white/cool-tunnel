@@ -37,6 +37,50 @@ if [[ ! -d "${APP}" ]]; then
     exit 1
 fi
 
+# --- U#6 (v2.0.1): Cargo.toml precondition ---------------------------------
+# Reject the packaging run if `core/Cargo.toml`'s version field
+# doesn't match the version arg. v2.0.0 shipped a Rust binary
+# self-reporting `0.1.7` because the Cargo.toml version was never
+# bumped — the in-app updater then declared "Updated to v2.0.0"
+# while the verdict pill read `cool-tunnel-core 0.1.7`. Catching
+# the mismatch here means future releases either ship a coherent
+# binary or fail-fast at packaging time, never half-and-half.
+CARGO_TOML="${REPO_ROOT}/core/Cargo.toml"
+if [[ -f "${CARGO_TOML}" ]]; then
+    CARGO_VERSION=$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' "${CARGO_TOML}")
+    if [[ -z "${CARGO_VERSION}" ]]; then
+        echo "error: could not parse version from ${CARGO_TOML}" >&2
+        exit 1
+    fi
+    if [[ "${CARGO_VERSION}" != "${VERSION}" ]]; then
+        echo "error: core/Cargo.toml version is '${CARGO_VERSION}' but you requested '${VERSION}'" >&2
+        echo "       bump core/Cargo.toml's version field to ${VERSION} and rebuild before retrying." >&2
+        exit 1
+    fi
+fi
+
+# --- U#5 (v2.0.1): Resources/cool-tunnel-core precondition -----------------
+# Verify the just-built .app's bundled Rust binary actually
+# self-identifies as the requested version. If a developer
+# remembered to bump Cargo.toml but forgot to rebuild the .app,
+# `Resources/cool-tunnel-core` is still the previous version's
+# binary. The Xcode build phase rebuilds it on every `xcodebuild
+# build`, but a stale Release/ output dir from a prior run can
+# linger — this check catches that stale output before we ship.
+CORE_IN_APP="${APP}/Contents/Resources/cool-tunnel-core"
+if [[ -x "${CORE_IN_APP}" ]]; then
+    CORE_VERSION_LINE="$("${CORE_IN_APP}" --version 2>/dev/null | head -1 || true)"
+    # Expected line: `cool-tunnel-core <semver>` — extract the
+    # last whitespace-delimited token.
+    CORE_VERSION="${CORE_VERSION_LINE##* }"
+    if [[ "${CORE_VERSION}" != "${VERSION}" ]]; then
+        echo "error: ${CORE_IN_APP##*/} self-reports '${CORE_VERSION}' (line: '${CORE_VERSION_LINE}'), expected '${VERSION}'" >&2
+        echo "       the .app bundle is stale; run a fresh \`xcodebuild ... build\` to regenerate" >&2
+        echo "       Resources/cool-tunnel-core from the bumped Cargo.toml, then retry." >&2
+        exit 1
+    fi
+fi
+
 mkdir -p "${DIST_DIR}"
 
 DMG="${DIST_DIR}/Cool-tunnel-v${VERSION}.dmg"
