@@ -19,6 +19,7 @@
 // Each subview owns its own slice of behaviour; this file does no
 // business logic.
 
+import AppKit
 import SwiftUI
 
 /// Composition root for the single-window app. Swaps between the
@@ -57,21 +58,25 @@ public struct ContentView: View {
         // material, which respects Light / Dark / Increased
         // Contrast / accent tint with no per-state animation.
         //
-        // **v2.0.5 fix:** SwiftUI's `.preferredColorScheme(nil)`
-        // does NOT mean "follow system" the way the docs imply
-        // on macOS — once the modifier has been applied with a
-        // concrete value (`.light` or `.dark`) and then
-        // re-applied with `nil`, the scheme stays locked at
-        // whatever was last concrete. The user reported "Match
-        // System will show black and white" — the app stayed
-        // dark even when System Settings → Appearance is light.
-        // Conditionally applying the modifier only when there's
-        // an explicit override fixes it: in `.system` mode the
-        // modifier is never attached, so SwiftUI follows the
-        // window's `NSAppearance.current` dynamically.
-        .conditionallyPreferredColorScheme(
-            orchestrator.settings.appearanceMode.colorScheme
-        )
+        // **v2.0.8 (appearance scroll-position fix):**
+        // appearance is now driven through `NSApp.appearance`
+        // (AppKit-level) rather than SwiftUI's
+        // `.preferredColorScheme(_:)`. The previous v2.0.5
+        // implementation used `conditionallyPreferredColorScheme`
+        // which had an `if let scheme { … } else { self }`
+        // branch — every appearance change toggled the view
+        // structure, and SwiftUI invalidated the entire ZStack
+        // subtree. The SettingsView's ScrollView lost its
+        // scroll position on every Match System / Light / Dark
+        // tap, dumping the user back to the top. AppKit-level
+        // appearance propagates via `NSWindow.effectiveAppearance`
+        // without changing any SwiftUI view structure, so the
+        // ScrollView stays put and only the resolved colours
+        // update. We apply the persisted preference once on
+        // appear and then on every subsequent change.
+        .task(id: orchestrator.settings.appearanceMode) {
+            Self.applyAppearance(orchestrator.settings.appearanceMode)
+        }
         // **Menu-F#1 (v0.2):** observe ⌘, / "Settings…" from the
         // App scene's CommandGroup. Flipping `isShowingSettings`
         // here keeps the inline-panel architecture intact — the
@@ -82,6 +87,31 @@ public struct ContentView: View {
         ) { _ in
             isShowingSettings = true
         }
+    }
+
+    /// **v2.0.8:** apply an AppearanceMode at the AppKit level
+    /// by setting `NSApp.appearance`. Cocoa propagates the
+    /// resolved appearance to every NSWindow (including the
+    /// SwiftUI-hosted ones), and SwiftUI picks up the change
+    /// through `NSWindow.effectiveAppearance` without rebuilding
+    /// the view tree.
+    ///
+    /// `nil` (the `.system` case) clears the override so the
+    /// app follows the system appearance — the AppKit-native
+    /// way of saying "Match System." This is what the v2.0.5
+    /// SwiftUI workaround was trying to do, only without the
+    /// view-structure thrash that caused the Settings scroll
+    /// position to reset on every change (the bug a user
+    /// reported between v2.0.7 and v2.0.8).
+    @MainActor
+    private static func applyAppearance(_ mode: AppearanceMode) {
+        let appearance: NSAppearance?
+        switch mode {
+        case .system: appearance = nil
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .dark: appearance = NSAppearance(named: .darkAqua)
+        }
+        NSApp.appearance = appearance
     }
 
     private var mainStack: some View {
@@ -97,31 +127,56 @@ public struct ContentView: View {
         // for live-tail use. Both halves keep their own internal
         // scrolling within the user-chosen split.
         VSplitView {
-            // --- Top pane: header + controls + form ---
+            // --- Top pane: merged header row + form ---
             VStack(spacing: 0) {
+                // **v2.0.8 (UI compaction):** the header status
+                // and the controls row used to be two separate
+                // rows — `HeaderView` (dot + 2-line headline +
+                // firewall pill, with a subtitle that just
+                // narrated the action whose UI was three pixels
+                // below it) above `ControlPanelView` (mode
+                // picker + Start + buttons). A user screenshot
+                // showed the upper-middle of the window was
+                // nearly all blank.
+                //
+                // We now place all of it on a single row:
+                //
+                //   ●  Not connected  ────  [Smart│Global│Local]
+                //   ▶ Start  ⚕  ⏱⌄  ⚙  [⚠ Firewall on]
+                //
+                // The subtitle is dropped (the mode picker on
+                // the same row IS what it was instructing the
+                // user to do). The firewall badge moves to the
+                // far trailing edge so it doesn't fight the
+                // primary action for visual weight. Net win:
+                // the title-bar area collapses from three rows
+                // of chrome to one, plus the optional error
+                // banner below.
+                mergedHeaderRow
+
+                // Error banner under the merged row when an
+                // engine error is live. HeaderView is now
+                // exclusively responsible for this surface;
+                // when there's no error its body is an empty
+                // view and contributes zero height.
                 HeaderView(
-                    isRunning: orchestrator.isRunning,
-                    activeMode: orchestrator.activeMode,
-                    firewallState: orchestrator.firewallState,
                     lastError: orchestrator.lastError,
                     onDismissError: { orchestrator.dismissLastError() }
                 )
                 .padding(.horizontal, 20)
-                .padding(.top, 16)
-
-                ControlPanelView(
-                    isShowingSettings: $isShowingSettings
-                )
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                .padding(.bottom, orchestrator.lastError == nil ? 0 : 8)
 
                 ConnectionFormView()
             }
-            // Preserve enough vertical room for header + controls
+            // Preserve enough vertical room for the merged row
             // + the four Server form rows + footer text. Below
             // this minimum the form starts truncating, which the
             // user can't fix by dragging (the divider just stops).
-            .frame(minHeight: 360)
+            // **v2.0.8:** lowered from 360 → 320 because the
+            // merged single-row header reclaims ~40 pt of
+            // vertical space that the previous two-row layout
+            // ate.
+            .frame(minHeight: 320)
 
             // --- Bottom pane: live log ---
             LogConsoleView()
@@ -135,6 +190,47 @@ public struct ContentView: View {
                 // doesn't grow past the window.
                 .frame(minHeight: 80, idealHeight: 220)
         }
+    }
+
+    /// **v2.0.8:** single horizontal row carrying the status
+    /// pill, the mode picker, the Start/Stop button, the
+    /// secondary action buttons, and the firewall warning
+    /// badge — the entire upper chrome of the main window.
+    ///
+    /// Layout: status pill is leading, then a flexible spacer
+    /// pushes the controls to centre/trailing, then the
+    /// firewall badge anchors the far-right edge when present.
+    /// On the macOS minimum window width (~700 pt) the picker
+    /// stays comfortably above its 240-pt natural width and the
+    /// firewall pill keeps its full text; if the user drags the
+    /// window narrower than expected, the picker truncates
+    /// before the buttons do, then the picker shrinks before
+    /// the firewall pill drops its label — same priority order
+    /// the system uses for toolbar items.
+    private var mergedHeaderRow: some View {
+        HStack(spacing: 12) {
+            HeaderStatusPill(
+                isRunning: orchestrator.isRunning,
+                lastError: orchestrator.lastError
+            )
+            // Flexible gap so the status pill hugs leading and
+            // the controls cluster centre-trailing. `minLength`
+            // gives a real visual breathing-room floor; without
+            // it the pill and picker can touch on small windows.
+            Spacer(minLength: 16)
+
+            ControlPanelView(
+                isShowingSettings: $isShowingSettings
+            )
+            .layoutPriority(1)
+
+            if orchestrator.firewallState == .enabled {
+                FirewallBadge()
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
     }
 }
 
@@ -150,24 +246,14 @@ public struct ContentView: View {
     }
 #endif
 
-extension View {
-    /// **v2.0.5 fix:** apply `.preferredColorScheme(_:)` only
-    /// when the caller has a concrete `.light` or `.dark`
-    /// override. Passing `nil` to `.preferredColorScheme(_:)`
-    /// directly does not actually free the view to follow
-    /// system appearance — once SwiftUI has seen a concrete
-    /// scheme, re-applying with `nil` leaves the scheme
-    /// locked at the last value. Conditionally NOT applying
-    /// the modifier (this helper) is the correct way to
-    /// say "follow system."
-    @ViewBuilder
-    fileprivate func conditionallyPreferredColorScheme(
-        _ scheme: ColorScheme?
-    ) -> some View {
-        if let scheme {
-            self.preferredColorScheme(scheme)
-        } else {
-            self
-        }
-    }
-}
+// **v2.0.8:** the `conditionallyPreferredColorScheme(_:)`
+// helper that v2.0.5 added is gone. Driving appearance through
+// SwiftUI's `.preferredColorScheme(_:)` — even with the
+// conditional `if let` workaround — caused the SettingsView's
+// ScrollView to scroll back to the top on every appearance
+// change, because toggling the modifier alters the view-tree
+// structure and SwiftUI rebuilds the subtree. v2.0.8 sets
+// `NSApp.appearance` directly from `ContentView.body.task(id:)`
+// instead, so the SwiftUI tree is unchanged and only the
+// resolved colours update. See `applyAppearance(_:)` in
+// `ContentView`.

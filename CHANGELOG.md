@@ -9,6 +9,82 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.8] — 2026-05-05 (UI compaction + appearance scroll-jump fix)
+
+Two surfaced-by-screenshot fixes shipped together.
+
+### 1. The whole upper-window chrome collapses to one row
+
+A user screenshot showed the upper-middle of the main window
+was nearly all blank. The status row (`● Not connected` /
+`Pick a mode below to connect.`) sat on its own line above
+the controls row (mode picker + Start + secondary buttons),
+and the firewall warning pill lived in a third corner of the
+header. Three separate rows of chrome before the form even
+started. The subtitle ("Pick a mode below to connect.")
+narrated an action whose UI sat three pixels below it.
+
+**Fix:** the entire header is now a **single horizontal row**:
+
+```
+●  Not connected    [Smart│Global│Local]    ▶ Start  ⚕  ⏱⌄  ⚙   [⚠ Firewall on]
+```
+
+- `HeaderView` is split into `HeaderStatusPill` (single-line
+  dot + headline) and `FirewallBadge` (separately placeable),
+  both `public` so the parent composes them.
+- The "Pick a mode below to connect." subtitle is **dropped**
+  — the mode picker is the action it was instructing.
+- `ControlPanelView` drops its internal flexible `Spacer`
+  between picker and buttons; those now form a tight
+  primary-action cluster.
+- The mode picker tightens from `maxWidth: 260 → 220` so the
+  whole row fits at the 780-pt window minWidth even with the
+  firewall badge on.
+- The top-pane `minHeight` drops `360 → 320` since the
+  reclaimed vertical space is real.
+
+The error banner still appears under the merged row when
+`lastError` is non-nil — that surface didn't change.
+
+### 2. Changing Appearance no longer scrolls Settings to the top
+
+A user reported that tapping Match System / Light / Dark in
+**Settings → Appearance** dumped the Settings ScrollView back
+to the top, losing whatever section they were reading.
+
+**Root cause:** v2.0.5's `conditionallyPreferredColorScheme`
+helper used an `if let scheme { … } else { self }` branch.
+Toggling between Match System (nil) and Light/Dark switched
+which branch was taken, which counts as a view-tree
+*structural* change to SwiftUI — every subtree below it,
+including the SettingsView's ScrollView, got rebuilt and
+lost its scroll position. Even toggling between Light and
+Dark within the `if` branch was enough to re-evaluate the
+modifier and cause the same churn.
+
+**Fix:** v2.0.8 drives appearance through **`NSApp.appearance`**
+(AppKit-level) instead of `.preferredColorScheme(_:)`
+(SwiftUI structural). `ContentView.body.task(id:
+appearanceMode)` calls a new `applyAppearance(_:)` that
+sets:
+
+- `.system` → `NSApp.appearance = nil` (follow system, the
+  AppKit-native equivalent of "Match System")
+- `.light` → `NSApp.appearance = NSAppearance(named: .aqua)`
+- `.dark` → `NSApp.appearance = NSAppearance(named: .darkAqua)`
+
+Cocoa propagates the resolved appearance to every NSWindow
+through `effectiveAppearance`. The SwiftUI view tree is
+**not rebuilt** because no view structure changed — only the
+resolved colours. The Settings ScrollView keeps its scroll
+position across every appearance toggle.
+
+This also lets us delete the `conditionallyPreferredColorScheme`
+View extension v2.0.5 added — the AppKit-native path
+sidesteps the `nil ≠ "follow system"` SwiftUI bug entirely
+without needing the conditional-modifier workaround.
+
 ## [2.0.7] — 2026-05-05 (relaunch-stuck hotfix)
 
 Single-issue hotfix on top of v2.0.6.
