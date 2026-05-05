@@ -1026,15 +1026,51 @@ final class AppUpdater {
                 "Cool Tunnel can't write to its install location. Check your folder permissions and try Update again."
             )
         }
-        // AU-9 part 2: bundle itself writable (not Locked /
-        // chflags-immutable)?
-        let bundleValues = try appURL.resourceValues(forKeys: [.isWritableKey])
-        if bundleValues.isWritable == false {
+        // AU-9 part 2 (v2.0.3 rework):
+        //
+        // Pre-2.0.3 we checked `URLResourceKey.isWritableKey` on
+        // the bundle and threw "bundle is locked" on `false`.
+        // That key reports `false` for a *superset* of the
+        // condition we wanted — true Locked-flag cases land on
+        // `false`, but so do ACL inheritance quirks, mode bits
+        // tweaked by Time Machine restores, and macOS 14+ App-
+        // Management TCC denials. Users without an actually-
+        // locked bundle saw the misleading "uncheck the Locked
+        // checkbox" hint with nothing to uncheck.
+        //
+        // Now: probe chflags directly via `lstat` for the
+        // canonical Locked / chflags-immutable case, and fall
+        // back to `access(W_OK)` for everything else with a
+        // different message. The Locked message stays accurate
+        // for the case it's intended to catch; non-Locked
+        // permission denials get a message that actually points
+        // at the underlying cause.
+        var st = stat()
+        let statOK = appURL.path.withCString { lstat($0, &st) } == 0
+        if statOK {
+            let lockedFlags = UInt32(UF_IMMUTABLE) | UInt32(SF_IMMUTABLE)
+            if (st.st_flags & lockedFlags) != 0 {
+                appUpdaterLogger.info(
+                    "bundle has chflags uchg/schg: \(appURL.path, privacy: .public)"
+                )
+                throw UpdaterError.message(
+                    "Cool Tunnel's bundle is locked. Right-click the app, choose Get Info, uncheck the Locked checkbox, then try Update again."
+                )
+            }
+        }
+        // POSIX / ACL / TCC writability. `access(W_OK)` is
+        // authoritative for "can this EUID write to this path"
+        // on macOS — it consults POSIX mode bits, ACLs, and
+        // BSD flags as a single answer. If THIS fails after
+        // chflags came back clean, the cause is something the
+        // Locked-checkbox hint won't address.
+        let writable = appURL.path.withCString { Darwin.access($0, W_OK) == 0 }
+        if !writable {
             appUpdaterLogger.info(
-                "bundle not writable: \(appURL.path, privacy: .public)"
+                "bundle not writable (non-chflags reason): \(appURL.path, privacy: .public)"
             )
             throw UpdaterError.message(
-                "Cool Tunnel's bundle is locked. Right-click the app, choose Get Info, uncheck the Locked checkbox, then try Update again."
+                "Cool Tunnel can't modify its own bundle. On macOS 14 and later, open System Settings → Privacy & Security → App Management and turn on Cool Tunnel. If you've already done that — or if you're on an older macOS — move the app to /Applications and try Update again."
             )
         }
     }

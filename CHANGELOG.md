@@ -9,6 +9,45 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.3] — 2026-05-05 (hotfix — false-positive "bundle is locked" on Update)
+
+`AppUpdater.refuseReadOnlyInstall` over-reported "Cool Tunnel's
+bundle is locked. Right-click → Get Info → uncheck Locked"
+because it leaned on `URLResourceKey.isWritableKey`, which
+returns `false` for a *superset* of conditions:
+
+- the actual Locked-checkbox / `chflags uchg|schg` case (the
+  one the message addresses),
+- ACL inheritance and POSIX-mode quirks left by Time Machine
+  restores,
+- macOS 14+ App-Management TCC denials,
+- some signed-bundle metadata states on Sequoia.
+
+Users without an actually-locked bundle saw a hint pointing at
+a checkbox they'd find already unchecked.
+
+### Fix
+
+- **Probe `chflags` directly** via `lstat` + `st_flags &
+  (UF_IMMUTABLE | SF_IMMUTABLE)`. This is authoritative for
+  the Locked-checkbox case; the message stays accurate when
+  it fires.
+- **Fall back to `access(W_OK)`** for non-chflags causes (ACL,
+  TCC, mode bits). New, separate error message: "Cool Tunnel
+  can't modify its own bundle. On macOS 14 and later, open
+  System Settings → Privacy & Security → App Management and
+  turn on Cool Tunnel. If you've already done that — or if
+  you're on an older macOS — move the app to /Applications
+  and try Update again."
+- **Drop `URLResourceKey.isWritableKey` from the bundle-level
+  check.** The parent-folder check still uses it (where the
+  semantics are clean enough).
+
+After 2.0.3, you only see the Locked-checkbox hint when there
+is actually a Locked checkbox to uncheck.
+
+---
+
 ## [2.0.2] — 2026-05-05 (Check-then-update for naive + rust core)
 
 `NaiveUpdater` and `RustCoreUpdater` now mirror `AppUpdater`'s
