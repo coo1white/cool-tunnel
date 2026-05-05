@@ -43,6 +43,24 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
         password: "",
         localPort: "1080"
     )
+
+    /// True when every required field is filled. Drives the
+    /// Start button's enabled state in `ControlPanelView` so the
+    /// user can't launch the engine against a half-filled profile
+    /// (the engine would otherwise spawn `naive` with empty
+    /// credentials, fail to authenticate upstream, and surface as
+    /// `× upstream_via_socks` in the diagnostics — confusing the
+    /// user about what went wrong).
+    ///
+    /// Whitespace-only entries count as empty. Password is also
+    /// trimmed: a password of pure whitespace is almost always a
+    /// typo, and the upstream would reject it anyway.
+    public var isStartable: Bool {
+        !server.trimmingCharacters(in: .whitespaces).isEmpty
+            && !username.trimmingCharacters(in: .whitespaces).isEmpty
+            && !password.trimmingCharacters(in: .whitespaces).isEmpty
+            && !localPort.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 }
 
 // MARK: - Modes
