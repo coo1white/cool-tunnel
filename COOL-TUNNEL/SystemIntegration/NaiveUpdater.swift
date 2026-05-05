@@ -45,8 +45,22 @@ private let naiveUpdaterLogger = Logger.cooltunnel("NaiveUpdater")
 final class NaiveUpdater {
 
     /// What the updater is doing right now.
+    ///
+    /// **v2.0.2:** `checking` / `upToDate` / `available` mirror the
+    /// AppUpdater's check-then-update pattern. Pre-2.0.2 the only
+    /// entry point was `update()`, which always resolved-and-
+    /// downloaded — clicking "Update again" on a binary already
+    /// matching the latest upstream tag pulled the same bytes
+    /// again with cosmetic differences (the upstream `-2` patch
+    /// suffix re-tags the same naive binary). The check phase
+    /// surfaces "you're on the latest version (X)" when the
+    /// installed binary's `--version` matches the upstream tag's
+    /// stripped semver.
     enum State: Sendable, Equatable {
         case idle
+        case checking
+        case upToDate(currentVersion: String, latestTag: String)
+        case available(tag: String, currentVersion: String)
         case resolvingTag
         case downloading(progress: Double)  // 0.0 – 1.0
         case extracting
@@ -60,12 +74,26 @@ final class NaiveUpdater {
     }
 
     private(set) var state: State = .idle
-    private(set) var lastInstalledTag: String?
+    /// Most recently installed upstream tag. Persisted in
+    /// UserDefaults so a relaunch doesn't reset the comparison
+    /// baseline — without persistence, every fresh launch would
+    /// claim "Update available" against an upstream patch tag the
+    /// user already installed.
+    private(set) var lastInstalledTag: String? {
+        didSet {
+            UserDefaults.standard.set(
+                lastInstalledTag, forKey: Self.lastInstalledTagKey)
+        }
+    }
+
+    private static let lastInstalledTagKey = "NaiveUpdater.lastInstalledTag"
 
     private let supportDirectory: URL
 
     init(supportDirectory: URL) {
         self.supportDirectory = supportDirectory
+        self.lastInstalledTag = UserDefaults.standard.string(
+            forKey: Self.lastInstalledTagKey)
     }
 
     /// Convenience initializer using the standard
@@ -80,6 +108,81 @@ final class NaiveUpdater {
         supportDirectory.appendingPathComponent("naive-managed", isDirectory: false)
     }
 
+    /// **v2.0.2:** queries upstream for the latest stable tag and
+    /// compares against the user's installed binary, leaving the
+    /// updater in `.upToDate` (no action needed) or `.available`
+    /// (Update button now meaningful). Caller passes the binary's
+    /// `--version` line so the comparison can use the binary's
+    /// authoritative self-report rather than the tag string —
+    /// upstream's `-N` patch suffix is cosmetic when the naive
+    /// binary itself didn't change.
+    ///
+    /// Re-running while a previous check OR update is in flight
+    /// is a no-op so the state machine stays monotonic.
+    func checkForUpdates(currentVersion: String) async {
+        switch state {
+        case .checking, .resolvingTag, .downloading, .extracting,
+             .merging, .installing:
+            return
+        default:
+            break
+        }
+        state = .checking
+        do {
+            let tag = try await Self.resolveLatestStableTag()
+            guard Self.isValidReleaseTag(tag) else {
+                throw UpdaterError.message(
+                    "GitHub returned an unexpected release tag (\(tag)). Refusing to proceed."
+                )
+            }
+            if Self.tagIsConsideredCurrent(
+                tag,
+                forBinaryVersion: currentVersion,
+                lastInstalled: lastInstalledTag
+            ) {
+                state = .upToDate(
+                    currentVersion: currentVersion, latestTag: tag)
+            } else {
+                state = .available(
+                    tag: tag, currentVersion: currentVersion)
+            }
+        } catch let UpdaterError.message(reason) {
+            state = .failed(message: reason)
+        } catch {
+            state = .failed(message: error.localizedDescription)
+        }
+    }
+
+    /// Whether `tag` represents a build the user is already on.
+    /// Two paths qualify:
+    ///   1. **Exact tag match** — the persisted `lastInstalledTag`
+    ///      from a previous successful update.
+    ///   2. **Binary-semver match** — strip the `v` prefix and
+    ///      `-N` patch suffix from the tag and compare against
+    ///      the bare semver in the binary's `--version` line. If
+    ///      they match, upstream's `-N` is cosmetic (rebuilt with
+    ///      different flags but same naive source) and a
+    ///      re-download wouldn't change the user-visible version.
+    nonisolated static func tagIsConsideredCurrent(
+        _ tag: String,
+        forBinaryVersion binaryVersion: String,
+        lastInstalled: String?
+    ) -> Bool {
+        if let lastInstalled, lastInstalled == tag {
+            return true
+        }
+        let stripV = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let tagSemver =
+            stripV.components(separatedBy: "-").first ?? stripV
+        // binaryVersion is like "naive 148.0.7778.96" — last
+        // whitespace token is the bare semver.
+        let binarySemver =
+            binaryVersion
+            .split(whereSeparator: \.isWhitespace).last
+            .map(String.init) ?? binaryVersion
+        return !tagSemver.isEmpty && tagSemver == binarySemver
+    }
+
     /// Kicks off the update pipeline. Re-running while a previous
     /// update is in flight is a no-op (the previous run's promise
     /// finishes first). Returns the installed URL on success or
@@ -90,15 +193,32 @@ final class NaiveUpdater {
         // monotonic so the UI never sees overlapping `downloading(0.4)`
         // -> `downloading(0.1)` regressions.
         switch state {
-        case .resolvingTag, .downloading, .extracting, .merging, .installing:
+        case .checking, .resolvingTag, .downloading, .extracting,
+             .merging, .installing:
             return nil
         default:
             break
         }
 
+        // **v2.0.2:** if the caller just finished a check and
+        // entered `.available(tag:…)`, reuse that resolved tag
+        // instead of re-fetching `/releases`. Saves one HTTP
+        // roundtrip in the Check → Update flow.
+        let preResolvedTag: String?
+        if case .available(let tag, _) = state {
+            preResolvedTag = tag
+        } else {
+            preResolvedTag = nil
+        }
+
         do {
-            state = .resolvingTag
-            let tag = try await Self.resolveLatestStableTag()
+            let tag: String
+            if let preResolvedTag {
+                tag = preResolvedTag
+            } else {
+                state = .resolvingTag
+                tag = try await Self.resolveLatestStableTag()
+            }
             // Validate the tag before interpolating it into a URL
             // path. GitHub release tags are typically `vN.N.N-N`
             // but the API returns whatever upstream pushed —
@@ -172,8 +292,9 @@ final class NaiveUpdater {
     /// banner doesn't follow the user back into the form.
     func reset() {
         switch state {
-        case .resolvingTag, .downloading, .extracting, .merging, .installing:
-            return  // Don't clobber an in-flight update.
+        case .checking, .resolvingTag, .downloading, .extracting,
+             .merging, .installing:
+            return  // Don't clobber an in-flight check or update.
         default:
             state = .idle
         }
