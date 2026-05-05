@@ -81,6 +81,31 @@ if [[ -x "${CORE_IN_APP}" ]]; then
     fi
 fi
 
+# --- U#7 (v2.0.16): Info.plist CFBundleShortVersionString precondition -----
+# Verify the .app's marketing version matches the requested
+# release version. The xcodeproj's `MARKETING_VERSION` build
+# setting is the source of truth here — and unlike Cargo.toml
+# (which the Rust crate's `--version` reflects), the .app's
+# Info.plist version is set ONLY at xcodebuild time. v2.0.15
+# shipped with `MARKETING_VERSION` still at 2.0.14 even though
+# Cargo.toml + bundled cool-tunnel-core were both at 2.0.15:
+# the in-app updater's `verifyExtractedApp` (AU-7) caught it
+# and refused to install ("New app's version does not match
+# the release tag 2.0.15. Refusing to install."), but only
+# after the user already downloaded the .zip. This check fails
+# the release at packaging time so the broken bundle never
+# leaves the build machine.
+APP_PLIST="${APP}/Contents/Info.plist"
+if [[ -f "${APP_PLIST}" ]]; then
+    APP_SHORT_VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${APP_PLIST}" 2>/dev/null || echo "?")"
+    if [[ "${APP_SHORT_VERSION}" != "${VERSION}" ]]; then
+        echo "error: .app Info.plist CFBundleShortVersionString is '${APP_SHORT_VERSION}', expected '${VERSION}'" >&2
+        echo "       bump MARKETING_VERSION in COOL-TUNNEL.xcodeproj/project.pbxproj (both Debug + Release configs)" >&2
+        echo "       to ${VERSION}, run a fresh \`xcodebuild ... build\`, then retry." >&2
+        exit 1
+    fi
+fi
+
 mkdir -p "${DIST_DIR}"
 
 DMG="${DIST_DIR}/Cool-tunnel-v${VERSION}.dmg"
