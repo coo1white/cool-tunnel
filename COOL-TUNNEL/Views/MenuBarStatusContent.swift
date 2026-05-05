@@ -38,8 +38,8 @@
 // bar updates the window's status pill and vice-versa with no
 // extra plumbing.
 
-import SwiftUI
 import AppKit
+import SwiftUI
 import os
 
 @MainActor

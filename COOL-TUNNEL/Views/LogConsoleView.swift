@@ -90,7 +90,8 @@ public struct LogConsoleView: View {
     // MARK: - Filter / source data
 
     private var filteredEntries: [LogEntry] {
-        let needle = filter
+        let needle =
+            filter
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !needle.isEmpty else { return orchestrator.logEntries }
