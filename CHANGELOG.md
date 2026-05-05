@@ -9,6 +9,91 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.15] — 2026-05-05 (post-swap liveness probe + updater hardening)
+
+Two fixes on top of v2.0.14: a liveness probe that closes the
+last semantic gap in the no-restart hot-swap, and a
+security-audit follow-up that caps the in-app Rust-core
+updater's manifest fetch at 1 MB.
+
+### Liveness probe after no-restart hot-swap (UX-F#7)
+
+v2.0.14's `applyModeWithoutRestart` leaves naive untouched
+during a Smart/Global/Local switch — the orchestrator only
+reconfigures system proxy settings. The
+`transitionInFlight` gate (UX-F#5) suppresses any
+`stateChanged(false)` event delivered during that ~50 ms
+window so the UI doesn't blink. The corner case v2.0.14 left
+unguarded: if naive happens to die in that exact window
+(OOM, kernel signal, panic), the suppression also hides the
+genuine death — the orchestrator declares the swap
+successful while naive is in fact dead. Browser stalls,
+Stop button stays red.
+
+v2.0.15 adds an explicit liveness probe:
+
+  - new engine RPC `probe_naive_live` returns
+    `{ running, pid }` from the dispatcher under the engine
+    state lock;
+  - `switchMode` calls `verifyNaiveLiveAfterHotSwap()` AFTER
+    `applyModeWithoutRestart` succeeds, BEFORE the success
+    log line. Throws on `running: false`, on engine-transport
+    failure, or on any unexpected response shape;
+  - the throw is caught one frame up in `switchMode`, logs at
+    `.notice` to the `HotSwap` os_log category, and falls
+    through to the existing full-restart path which respawns
+    naive with the correct config.
+
+The user never sees an error — the recovery path is a normal
+restart that takes ~250 ms. The live log shows ONE
+"switched from X to Y" line per click on either the
+hot-swap path or the recovery path.
+
+Belt-and-suspenders: the catch arm also sets
+`activeProfileEdited = true` so any future code path that
+re-checks the hot-swap gate sees this profile as ineligible
+until the next successful `startCore`. The current call's
+fallback is unconditional, so this only matters for future
+refactors — but it removes a footgun.
+
+### Updater hardening: 1 MB cap on the Rust-core manifest fetch
+
+`RustCoreUpdater.download` previously rode the shared
+`GitHubRedirectGuard.download` default of 100 MB for both
+the engine binary AND the SHA-256 manifest. The manifest is
+~250 bytes; capping it at 100 MB is two orders of magnitude
+looser than necessary. An attacker-shaped 100 MB "manifest"
+file from a compromised release-asset path would land on
+disk before `SHAVerifier.expectedHash` read it into memory
+via `String(contentsOf:)`.
+
+`AppUpdater` already caps its sha256 download at 1 MB
+(AppUpdater.swift:605); this brings `RustCoreUpdater` into
+line. `maxBytes` is now threaded through
+`RustCoreUpdater.download` (default still 100 MB so the
+binary fetch is unchanged); the manifest call site passes
+`1 * 1024 * 1024`.
+
+Came out of an end-to-end audit of the updater chain. The
+naive updater intentionally still has no SHA pin — the
+known limitation tracked in `SECURITY.md`.
+
+### Doc refresh
+
+README's "Pick this .dmg if you're not sure" line — bumped
+to `Cool-tunnel-v2.0.15.dmg`.
+
+### Validation
+- `cargo test --release` — 130/130 pass
+- `cargo clippy ... -- -D warnings` — clean
+- `xcodebuild Release` — succeeds
+
+### Bundled
+- NaiveProxy v148.0.7778.96-2 (unchanged from v2.0.14)
+- Cool Tunnel Core v2.0.15
+
+---
+
 ## [2.0.14] — 2026-05-05 (mode switch is now invisible to traffic too)
 
 The functional companion to v2.0.13 (UX-F#5). Where v2.0.13
