@@ -9,6 +9,71 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.17] — 2026-05-06 (Start-button validation + audit gate locked)
+
+One user-visible bug fix plus a repository-discipline cycle that
+locks the CI gate that should have caught the drift this cycle
+absorbed.
+
+### Fixed
+- **Start button now refuses to launch on an incomplete profile.**
+  Previously, a profile with an empty Password (or Username,
+  Server, Local Port) was still considered "selected" by the
+  Start button's enabled-check, so clicking Start would spawn
+  `naive` with empty credentials, the upstream would reject the
+  auth, and diagnostics surfaced a generic `× upstream_via_socks`
+  failure with no signal that the cause was an unfilled form
+  field. Now: Start is disabled until every required field is
+  filled (whitespace-trim), the tooltip names what's missing
+  (`"Fill in server, username, password, and local port to
+  start"`), and VoiceOver announces the same. Stop stays enabled
+  while running, preserving the recovery invariant. Fixed in #12.
+
+### Repository discipline (internal)
+- **CI gate locked.** Required status checks on `main` are now
+  enforced with `strict: true`: `Rust (build + clippy + test)`,
+  `ShellCheck`, and `Swift (format lint)` must all be green
+  before a PR can merge. Previously CI was advisory; drift
+  accumulated post-merge across all three axes — this release
+  absorbs that drift in one cycle.
+- **Lint-floor reconciliation.**
+  - `cargo fmt --all` absorbed accumulated rustfmt drift across
+    `core/src/{redaction,client_mode,main}.rs` and
+    `core/tests/chaos.rs`. (#9)
+  - `xcrun swift-format format -i` absorbed ~40 swift-format
+    violations across 13 files in `COOL-TUNNEL/{Core,
+    SystemIntegration, Persistence, Views}/`. (#11)
+  - `.github/workflows/ci.yml` now invokes `xcrun swift-format`
+    instead of bare `swift-format` so the toolchain binary is
+    found on macos-14 runners regardless of `$PATH` state. The
+    Swift lint job had been silently exiting 127 on every run
+    since the `--lint` step landed. (#9)
+- **Script hygiene.**
+  - `scripts/cut_release.sh:92` Xcode-DerivedData lookup now
+    carries an explicit `# shellcheck disable=SC2012` with
+    justification (path is constrained, BSD `find` lacks
+    `-printf`). (#10)
+  - `scripts/fetch_naive.sh` no longer rewrites
+    `naive.upstream.json` when the three SHAs are unchanged —
+    eliminates the permanently-dirty working tree that
+    accumulated on every fetch. (#10)
+- **Contributor onboarding.** `CONTRIBUTING.md` lists
+  `cargo install cargo-deny` as a build prerequisite and adds
+  `cargo deny check` to the local test-sweep section. (#9)
+- **GitHub repo metadata.** Topics set: `proxy`, `naive`,
+  `naiveproxy`, `tunnel`, `macos`, `swiftui`, `rust`,
+  `censorship`.
+
+Architecture decision recorded at
+`docs/adr/0001-audit-rules-locked-2026-05-05.md`. `required_signatures`
+on `main` remains deferred pending maintainer signing setup.
+
+### Bundled
+- NaiveProxy v148.0.7778.96-2 (unchanged)
+- Cool Tunnel Core v2.0.17
+
+---
+
 ## [2.0.16] — 2026-05-05 (hotfix v2.0.15: Xcode project version drift)
 
 v2.0.15 shipped with the bundled `cool-tunnel-core` and
