@@ -47,9 +47,19 @@ public struct ControlPanelView: View {
     }
 
     public var body: some View {
+        // **v2.0.8 (UI compaction):** the previous layout had a
+        // flexible `Spacer(minLength: 8)` between the mode
+        // picker and the buttons, so the controls sprayed out
+        // across the whole window width with a wide empty gap
+        // in the middle — exactly the wasted space the user
+        // flagged in the screenshot. v2.0.8 collapses that to a
+        // fixed 10-pt gap. ControlPanelView is now a tight
+        // primary-action cluster (Picker + Start + secondary
+        // buttons), and the breathing room comes from the
+        // outer Spacer in `ContentView.mergedHeaderRow` between
+        // the status pill and this cluster.
         HStack(spacing: 10) {
             modePicker
-            Spacer(minLength: 8)
             primaryButton
             diagnosticsButton
             latencyMenu
@@ -77,7 +87,15 @@ public struct ControlPanelView: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(maxWidth: 260)
+        // **v2.0.8 (UI compaction):** trimmed from 260 → 220.
+        // The merged single-row header (status pill + this
+        // picker + Start + secondary buttons + firewall badge)
+        // needs to fit at the 780-pt window minWidth with the
+        // firewall pill on; 260 left no margin. Three short
+        // labels ("Smart" / "Global" / "Local") still render
+        // comfortably at 220 — checked against the system's
+        // segment glyph metrics.
+        .frame(maxWidth: 220)
         .disabled(orchestrator.selectedProfile == nil)
         .help(modeHelp)
     }
