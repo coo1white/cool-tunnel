@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Port, Profile, ProxyTestMode, RawProfile};
+use crate::domain::{Port, Profile, ProxyTestMode};
 
 /// One request frame from the Swift app.
 ///
@@ -64,17 +64,32 @@ pub struct Request {
 pub enum RequestKind {
     /// Validate a profile and return whether it is well-formed.
     ///
-    /// **v0.1.7.16 (Rust-F#1):** the variant now carries a
-    /// `RawProfile` rather than a fully-validated `Profile`.
-    /// Previously the `serde` deserializer did the validation
-    /// before this arm could run — making the `ok:false`
-    /// branch of `ValidationReport` structurally unreachable.
-    /// The dispatcher now runs `Profile::try_from(raw)` itself,
-    /// surfacing both branches of the contract in line with the
-    /// SM-3 hardening on the HTTP server side.
+    /// The wire variant carries a fully-validated [`Profile`].
+    /// Validation runs at serde deserialization through the
+    /// `try_from = "RawProfile"` attribute on `Profile`, so an
+    /// invalid profile fails the outer
+    /// `serde_json::from_value::<Request>` call upstream and is
+    /// emitted as an `invalid_request` error frame, NOT as a
+    /// successful response carrying `ok:false`. This keeps the
+    /// stdio-mode protocol uniform: any "you sent me bad data"
+    /// outcome is an [`Outbound::Error`] frame, never a
+    /// successful [`Outbound::Response`] with a "no, really, it
+    /// failed" payload buried inside.
+    ///
+    /// **Note on divergence from `server_mode`:** the HTTP
+    /// validate endpoint (`POST /naive/validate`) deliberately
+    /// returns 200 with `{"ok":false,"reason":"…"}` on failure
+    /// (SM-3) so HTTP clients see a uniform 200-with-payload
+    /// shape. Stdio callers are the trusted Swift app and want
+    /// the `Outbound::Error` shape used everywhere else for
+    /// invalid input — the two modes differ on this one point
+    /// by design.
     ValidateProfile {
-        /// The profile to validate (un-validated wire shape).
-        profile: RawProfile,
+        /// The profile to validate. Already-validated by serde
+        /// at deserialization time; an invalid profile would
+        /// have produced an `invalid_request` error frame
+        /// upstream rather than reaching this variant.
+        profile: Profile,
     },
     /// Generate the `naive` `config.json` text for `profile`.
     GenerateNaiveConfig {
@@ -334,7 +349,7 @@ mod tests {
         let req = Request {
             id: 7,
             kind: RequestKind::ValidateProfile {
-                profile: RawProfile::from(sample_profile()),
+                profile: sample_profile(),
             },
         };
         let value = serde_json::to_value(&req).unwrap();

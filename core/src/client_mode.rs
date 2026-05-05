@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use cool_tunnel_core::config::{generate_pac, NaiveConfig};
 use cool_tunnel_core::diagnostics::{run_diagnostics, run_latency};
-use cool_tunnel_core::domain::Profile;
 use cool_tunnel_core::monitor;
 use cool_tunnel_core::protocol::{
     AnomalyReason, ErrorPayload, Event, Outbound, Request, RequestKind, ResponsePayload,
@@ -322,29 +321,36 @@ async fn dispatch(
     events: mpsc::Sender<Event>,
 ) -> Result<ResponsePayload, ErrorPayload> {
     match kind {
-        // **Rust-F#1 (v0.1.7.16):** previously this arm took
-        // `profile: Profile` (already-validated by serde at
-        // deserialization time), which made the `ok: false`
-        // branch of `ValidationReport` structurally unreachable
-        // — exactly the SM-3 issue server_mode.rs hardened. The
-        // wire variant now carries a `RawProfile`; the validator
-        // runs here, returning a real `ok: false` with a
-        // scrubbed reason on failure (full error to logs only).
-        RequestKind::ValidateProfile { profile: raw } => {
-            match Profile::try_from(raw) {
-                Ok(_) => Ok(ResponsePayload::Validation(ValidationReport {
-                    ok: true,
-                    reason: None,
-                })),
-                Err(err) => {
-                    tracing::warn!(error = %err, "validate_profile: rejected");
-                    Ok(ResponsePayload::Validation(ValidationReport {
-                        ok: false,
-                        reason: Some("invalid profile".to_owned()),
-                    }))
-                }
-            }
-        }
+        // The wire variant carries a fully-validated `Profile`
+        // (see `protocol.rs` doc comment on `ValidateProfile`).
+        // Validation runs at serde deserialization via Profile's
+        // `try_from = "RawProfile"` attribute, so by the time we
+        // reach this arm the input has already cleared every
+        // domain-type check. An invalid profile would have
+        // failed the outer `from_value::<Request>(value)` call
+        // and been emitted as an `invalid_request` error frame
+        // by the read loop above (see the `Err(err) =>
+        // emit_or_break!(... "invalid_request" ...)` arm).
+        //
+        // The `_` bind is intentional: `validate_profile`'s
+        // contract is "did this profile pass validation?", not
+        // "do something with the profile." Now that the answer
+        // is unconditionally "yes" (no by definition can't reach
+        // here), we don't need to use the value.
+        //
+        // **Divergence from server_mode (SM-3):** HTTP
+        // `/naive/validate` returns 200 with `ok:false` for
+        // invalid profiles so HTTP clients see a uniform
+        // 200-with-payload shape. Stdio mode talks to the
+        // trusted Swift app and uses `Outbound::Error` for any
+        // "you sent me bad data" — see the `RequestKind::
+        // ValidateProfile` doc comment for the full rationale.
+        RequestKind::ValidateProfile { profile: _ } => Ok(ResponsePayload::Validation(
+            ValidationReport {
+                ok: true,
+                reason: None,
+            },
+        )),
         RequestKind::GenerateNaiveConfig { profile } => {
             let config = NaiveConfig::from_profile(&profile);
             let json = config
