@@ -9,6 +9,101 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.13] — 2026-05-05 (mode-switch UX: no more Stop→Start→Stop button blink)
+
+A user reported that clicking through Smart / Global / Local
+modes while connected made the primary action button visibly
+flicker `Stop → Start → Stop` and the live log spam
+"switched from X to Y" lines as fast as they could click.
+The button blink was the visible artifact of a deeper
+two-step state transition the orchestrator was publishing
+mid-swap.
+
+### Root cause
+
+`switchMode(to:)` was implemented as `stopQuiet(); startQuiet()`.
+Both halves wrote to the observable `isRunning` and `activeMode`
+properties:
+
+  - `stopQuiet` wrote `isRunning = false`, `activeMode = .stopped`
+    after sending `.stopProxy` to the engine.
+  - `startCore` wrote `isRunning = true`, `activeMode = newMode`
+    at the very end of the bring-up.
+
+Between the two writes, SwiftUI got at least one render
+opportunity (every `await` yield is a render boundary), so
+the Stop button visibly flipped through "Start" and the mode
+picker briefly de-highlighted every segment. The engine also
+emitted `stateChanged(false)` then `stateChanged(true)` events
+in response to the stop/start commands; the event handler at
+`handle(event:)` *also* wrote those values to the public
+state, so even when `stopQuiet` was made silent the engine
+event would re-introduce the flicker.
+
+Plus, the picker's binding read `orchestrator.activeMode`
+while running and `pendingMode` while stopped — so once the
+orchestrator stopped flickering through `.stopped`, the
+picker became *laggy* (showed the old mode for the full
+duration of the engine restart) instead of jumping to the
+clicked mode.
+
+### Fix (UX-F#5)
+
+Three coordinated changes so the user perceives a single
+instant transition:
+
+  1. **`stopQuiet(publishStoppedState: Bool = true)`** — added
+     a parameter that suppresses the `isRunning` /
+     `activeMode` flips. `switchMode` calls with `false`. All
+     legacy callers default to `true` and behave as before.
+
+  2. **`handle(event:)` — `stateChanged` early-return when
+     `transitionInFlight`** — the engine's stop/start events
+     during a hot-swap arrive as separate `stateChanged`
+     frames; we ignore them while `switchMode` owns the
+     public state. The natural-death recovery banner stays
+     intact for `stateChanged(false)` events that arrive
+     outside a transition (genuine naive crashes).
+
+  3. **`ControlPanelView.modeBinding.get` reads `pendingMode`
+     directly** — the picker reflects the clicked mode
+     instantly instead of waiting for `activeMode` to catch
+     up at the end of the engine restart. The existing
+     `.onChange(of: orchestrator.activeMode)` handler keeps
+     `pendingMode` in sync when the running mode changes
+     from another surface (menu-bar tap, deep-link).
+
+Failure recovery: if `startQuiet` throws after a successful
+`stopQuiet(publishStoppedState: false)`, the engine is
+genuinely dead — `switchMode` restores truthful state
+(`isRunning = false`, `activeMode = .stopped`) before
+re-throwing. The UI must not lie about a non-running engine.
+
+### Files changed
+
+- `COOL-TUNNEL/Core/TunnelOrchestrator.swift` — `switchMode`,
+  `stopQuiet`, and the `stateChanged` event handler.
+- `COOL-TUNNEL/Views/ControlPanelView.swift` — picker binding
+  + doc comment.
+
+### Validation
+
+- 130/130 Rust tests pass (no engine-side change; included
+  for completeness).
+- `cargo clippy -- -D warnings` clean.
+- Build succeeds.
+
+User-visible effect: clicking Smart / Global / Local now
+keeps the Stop button rock-stable in red, and the picker
+segment flips to the clicked mode within a frame. The single
+"switched from X to Y" log line still appears. Engine
+restart still happens behind the scenes — that's a separate
+optimization tracked for a future cycle (mode-switch could
+eventually skip the restart entirely since naive's bound
+port and config don't change between modes).
+
+---
+
 ## [2.0.12] — 2026-05-05 (logic-integrity sweep: validate_profile semantics + clippy clean)
 
 The v2.0.7 → v2.0.11 stretch was an **industrial-hardening**
