@@ -9,6 +9,49 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.16] — 2026-05-05 (hotfix v2.0.15: Xcode project version drift)
+
+v2.0.15 shipped with the bundled `cool-tunnel-core` and
+`Cargo.toml` correctly at 2.0.15 but the .app's Info.plist
+`CFBundleShortVersionString` still at 2.0.14 — the Xcode
+project's `MARKETING_VERSION` build setting wasn't bumped in
+lock-step with the Rust crate. The in-app updater's
+`verifyExtractedApp` (AU-7) correctly caught the mismatch and
+refused to install:
+
+>   Update failed: New app's version does not match the release
+>   tag 2.0.15. Refusing to install.
+
+This is exactly the version-drift defense AU-7 was added for —
+working as intended — but the user-visible result was an
+unusable update for anyone on v2.0.14 trying to upgrade. v2.0.16
+is binary-identical to what v2.0.15 was supposed to be, with two
+fixes:
+
+1. `MARKETING_VERSION` in
+   `COOL-TUNNEL.xcodeproj/project.pbxproj` bumped to 2.0.16 (both
+   Debug and Release configurations). The .app's Info.plist
+   `CFBundleShortVersionString` now matches Cargo.toml + the
+   bundled Rust binary's `--version`.
+
+2. **U#7:** `scripts/package_release.sh` now verifies the
+   freshly-built .app's `CFBundleShortVersionString` matches the
+   requested version BEFORE producing the .dmg / .pkg / .zip.
+   Same shape as the existing U#5 check that catches stale
+   bundled `cool-tunnel-core`. If `MARKETING_VERSION` is ever
+   missed again, the release fails at packaging time on the
+   build machine — the broken bundle never leaves it.
+
+The v2.0.15 release page on GitHub stays as a historical
+artifact; users on v2.0.14 retrying their in-app updater will
+now pick up v2.0.16 (the new latest) and install cleanly.
+
+### Bundled
+- NaiveProxy v148.0.7778.96-2 (unchanged)
+- Cool Tunnel Core v2.0.16
+
+---
+
 ## [2.0.15] — 2026-05-05 (post-swap liveness probe + updater hardening)
 
 Two fixes on top of v2.0.14: a liveness probe that closes the
