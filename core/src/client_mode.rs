@@ -427,6 +427,22 @@ async fn dispatch(
             Ok(ResponsePayload::Latency(report))
         }
         RequestKind::Shutdown => Ok(ResponsePayload::Ack),
+        // **UX-F#7 (v2.0.15):** liveness probe used by the Swift
+        // orchestrator's no-restart hot-swap path. Reads
+        // `EngineState.supervisor` under the lock — `Some(_)`
+        // means naive is currently being supervised (alive);
+        // `None` means it died, was stopped, or was never
+        // started. `supervisor.pid()` is surfaced for diagnostic
+        // logging on the Swift side; the routing decision uses
+        // only `running`.
+        RequestKind::ProbeNaiveLive => {
+            let guard = state.lock().await;
+            let pid = guard.supervisor.as_ref().map(ProxySupervisor::pid);
+            Ok(ResponsePayload::NaiveLiveness {
+                running: guard.supervisor.is_some(),
+                pid,
+            })
+        }
         // The lib crate defines `RequestKind` with
         // `#[non_exhaustive]`; the binary crate (this file is a
         // submodule of `main.rs`) imports it through the public
