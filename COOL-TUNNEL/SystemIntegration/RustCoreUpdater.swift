@@ -211,10 +211,14 @@ final class RustCoreUpdater {
                 url: resolved.downloadURL,
                 to: tempRoot.appendingPathComponent("cool-tunnel-core")
             )
+            // Manifest is ~250 bytes; 1 MB cap matches AppUpdater
+            // and refuses an attacker-shaped 100 MB "manifest"
+            // before SHAVerifier reads it into memory.
             async let manifestFetch: URL = Self.download(
                 url: resolved.manifestURL,
                 to: tempRoot.appendingPathComponent(
-                    resolved.manifestURL.lastPathComponent)
+                    resolved.manifestURL.lastPathComponent),
+                maxBytes: 1 * 1024 * 1024
             )
             let downloaded = try await binaryFetch
             let manifestPath = try await manifestFetch
@@ -446,10 +450,19 @@ final class RustCoreUpdater {
     /// Delegates to `GitHubRedirectGuard.download` — the shared
     /// host-validated, redirect-guarded, size-capped download
     /// primitive. Engine binary is ~5 MB so the default 100 MB
-    /// cap is generous slack.
-    private static func download(url: URL, to destination: URL) async throws -> URL {
+    /// cap is generous slack; callers that download a small
+    /// sidecar (e.g. the .sha256 manifest at ~250 bytes) pass
+    /// a tighter `maxBytes` to refuse a confused-deputy /
+    /// attacker-shaped oversized response before
+    /// `SHAVerifier.expectedHash` reads it into memory.
+    private static func download(
+        url: URL,
+        to destination: URL,
+        maxBytes: Int64 = 100 * 1024 * 1024
+    ) async throws -> URL {
         do {
-            return try await GitHubRedirectGuard.download(url: url, to: destination)
+            return try await GitHubRedirectGuard.download(
+                url: url, to: destination, maxBytes: maxBytes)
         } catch let untrusted as UntrustedGitHubHostError {
             rustCoreUpdaterLogger.error(
                 "untrusted host: \(untrusted.url.absoluteString, privacy: .public)"
