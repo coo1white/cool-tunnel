@@ -428,13 +428,28 @@ public final class TunnelOrchestrator {
     /// 2. Proxy is running in `mode` already → no-op (don't bounce
     ///    the supervisor for a click that selects the current mode)
     /// 3. Proxy is running in a *different* mode → stop, then start in
-    ///    the new mode in one shot — the user only sees a single
-    ///    state-changed flicker rather than a manual stop / start
-    ///    dance
+    ///    the new mode in one shot — the UI sees a single observable
+    ///    transition (`activeMode` flips old→new at the very end of
+    ///    the bring-up); `isRunning` never blinks false.
     ///
     /// This is what powers the single-button mode picker in the UI:
     /// tapping a mode chip while the tunnel is live hot-swaps it
     /// instead of forcing the user to stop first.
+    ///
+    /// **UX-F#5 (v2.0.13):** publish-state suppression during a
+    /// hot-swap. The earlier implementation flipped
+    /// `isRunning = false` and `activeMode = .stopped` inside
+    /// `stopQuiet`, then flipped them back to true / newMode at the
+    /// end of `startCore`. Between the two flips SwiftUI got at least
+    /// one render opportunity (every `await` yield is a render
+    /// boundary), so the Stop button visibly blinked through "Start"
+    /// and the mode picker briefly de-highlighted every segment.
+    /// Now `stopQuiet` is told to leave the published state alone
+    /// during a hot-swap; `startCore` writes the new mode at the end
+    /// as a single observable transition. On a failure inside the
+    /// bring-up the engine is genuinely dead, so we restore truthful
+    /// state (`isRunning = false`, `activeMode = .stopped`) before
+    /// re-throwing — the UI must not lie about a non-running engine.
     public func switchMode(to newMode: ProxyMode) async throws {
         // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
         // rapid second click while a prior switchMode is
@@ -461,8 +476,25 @@ public final class TunnelOrchestrator {
             // user experiences as one tap. Quiet-stop here and let the
             // post-start switch line do the talking.
             let from = activeMode
-            await stopQuiet()
-            try await startQuiet(mode: newMode)
+            // UX-F#5: skip the published `isRunning = false /
+            // activeMode = .stopped` flips in stopQuiet. The user's
+            // intent is "still running, just under a different mode",
+            // and that is what the UI should show throughout. The
+            // engine IS torn down and brought back up internally, but
+            // the observable state stays at the OLD mode until
+            // `startCore` writes the NEW one in a single transition.
+            await stopQuiet(publishStoppedState: false)
+            do {
+                try await startQuiet(mode: newMode)
+            } catch {
+                // Engine is genuinely dead — startCore's writes never
+                // ran. Restore truthful UI state so the user sees the
+                // failure instead of a phantom "Stop" button over a
+                // dead engine.
+                activeMode = .stopped
+                isRunning = false
+                throw error
+            }
             appendInfo("switched from \(from.title) to \(newMode.title)")
             return
         }
@@ -473,7 +505,14 @@ public final class TunnelOrchestrator {
     /// `stop()`, no `appendInfo("stopped")`. Stays private; callers
     /// outside the orchestrator should use `stop()` so the log is
     /// always informative for explicit stops.
-    private func stopQuiet() async {
+    ///
+    /// `publishStoppedState` controls whether `isRunning` and
+    /// `activeMode` are flipped to `false` / `.stopped` after the
+    /// engine teardown completes. Default `true` matches the
+    /// always-stop semantics every legacy caller wants. Pass `false`
+    /// from `switchMode` so the UI doesn't observe the brief
+    /// "stopped" intermediate state during a hot-swap (UX-F#5).
+    private func stopQuiet(publishStoppedState: Bool = true) async {
         // **Engine-F#P1.2 (v0.2):** mark this stop as user-
         // initiated for the duration of the call so the
         // `stateChanged(false)` event handler doesn't post a
@@ -492,8 +531,10 @@ public final class TunnelOrchestrator {
         } catch {
             recordError("stop failed: \(error)")
         }
-        activeMode = .stopped
-        isRunning = false
+        if publishStoppedState {
+            activeMode = .stopped
+            isRunning = false
+        }
     }
 
     /// Internal start path mirror of `start(mode:)` that omits the
@@ -990,6 +1031,26 @@ public final class TunnelOrchestrator {
         case .logLine(let source, let line):
             appendLog(source: source, text: line)
         case .stateChanged(let running):
+            // **UX-F#5 (v2.0.13):** during a hot-swap
+            // (`switchMode`) the engine emits stateChanged(false)
+            // for the .stopProxy and stateChanged(true) for the
+            // subsequent .startProxy. Surfacing those to
+            // `isRunning` / `activeMode` produces the
+            // Stop→Start→Stop button blink and a brief de-
+            // highlight of the mode picker — exactly the
+            // "single observable transition" semantics the
+            // hot-swap was supposed to give us. switchMode owns
+            // the public state during its window and writes the
+            // final mode as a single transition at the end of
+            // startCore; we defer to it here.
+            //
+            // Outside `transitionInFlight`, the event handler
+            // remains the source of truth for natural-death
+            // recovery (naive segfaults, OOMs, etc.) — that's
+            // the path the recovery banner below was added for.
+            if transitionInFlight {
+                return
+            }
             // **UX-F#5 (v0.1.7.19):** when naive dies on its
             // own (`running:false` arriving outside a
             // user-initiated stop), revert system proxy
