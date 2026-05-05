@@ -9,6 +9,125 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.14] — 2026-05-05 (mode switch is now invisible to traffic too)
+
+The functional companion to v2.0.13 (UX-F#5). Where v2.0.13
+made the mode switch *visually* invisible (button no longer
+blinks Stop→Start→Stop, picker no longer de-highlights),
+v2.0.14 makes it *functionally* invisible: the underlying
+naive process is no longer killed and re-spawned on every
+mode switch, so in-flight TCP connections survive and apps
+never see ~200-500 ms of `connection refused` during the
+swap.
+
+### Why the engine was restarting in the first place
+
+Pre-v2.0.14, `switchMode` was implemented as `stopQuiet();
+startQuiet()` — naive was sent `.stopProxy`, killed, then
+re-spawned via `.startProxy` with a freshly-resolved binary
+descriptor and a freshly-written config. That made sense
+when modes meant fundamentally different engine
+configurations, but in practice Smart / Global / Local only
+differ in:
+
+  - **system proxy configuration** (PAC URL vs SOCKS5 server
+    vs nothing), which is a `networksetup` operation
+    completely outside the engine; and
+  - **PAC file regeneration**, which only matters when the
+    new mode is Smart.
+
+The naive process binds to `127.0.0.1:port` with the same
+config in all three modes. Restarting it was wasted work that
+also broke every TCP connection currently flowing through the
+SOCKS5 listener.
+
+### How v2.0.14 hot-swaps without the restart
+
+New private path `applyModeWithoutRestart(_ newMode:)` in
+`TunnelOrchestrator`:
+
+  1. Regenerate the PAC file (only when switching *to* Smart;
+     parity with `startCore`'s PAC step).
+  2. Apply the system-proxy configuration via the existing
+     `SystemProxyController` API
+     (`enableSmartPAC` / `enableGlobalSOCKS` / `disableAll`).
+     The controller already clears the opposing mode
+     internally, so a switch from Smart to Global doesn't
+     leak PAC settings.
+  3. Update the `ProxyActiveFlag` recovery sentinel for the
+     new mode.
+  4. Publish `activeMode = newMode` as a single observable
+     transition. naive is untouched — same PID, same
+     listener, same TCP connections.
+
+`switchMode` tries this path first. It falls through to the
+existing full restart when:
+
+  - `activeProfileEdited` is `true` (the user edited the
+    running profile — naive must restart to pick up the
+    edits, the same UX-F#3 banner still fires); or
+  - `selectedProfileID != activeProfileID` (the user switched
+    to a different profile — same reasoning); or
+  - `applyModeWithoutRestart` itself throws — the fallback's
+    `disableAll` cleans up partial `proxyController` state
+    and `startCore` reapplies the correct config.
+
+A new `activeProfileEdited: Bool` orchestrator flag is set by
+the existing UX-F#3 detection in `selectedProfile.set` and
+cleared at every successful `startCore`. Together with
+`selectedProfileID == activeProfileID`, it's the gate for
+"naive's running config matches the current profile".
+
+`applyModeWithoutRestart` clears `lastError` at the top,
+mirroring `startCore`'s optimistic-clear policy — a
+successful mode switch should not leave the user staring at a
+stale failure banner.
+
+A dedicated `Logger.cooltunnel("HotSwap")` os_log subsystem
+captures `.notice`-level diagnostics when the no-restart path
+fails and we fall back. Surfaces in `log show --predicate
+'subsystem == "space.coolwhite.cooltunnel" AND category ==
+"HotSwap"'`.
+
+### Behaviour matrix
+
+|                                 | pre-v2.0.13 | v2.0.13 (UX-F#5) | v2.0.14 (UX-F#6) |
+|---------------------------------|:-----------:|:----------------:|:----------------:|
+| Stop button blink               | yes         | no               | no               |
+| Picker lag                      | no          | no               | no               |
+| Engine restart on mode switch   | yes         | yes              | **no** *         |
+| In-flight TCP connections drop  | yes         | yes              | **no** *         |
+
+\* When the active profile is unchanged. Edited-profile or
+profile-switch cases still take the full restart path so
+naive picks up the new config — same UX-F#3 banner fires.
+
+### Files changed
+
+- `COOL-TUNNEL/Core/TunnelOrchestrator.swift` — new
+  `applyModeWithoutRestart` method, new `activeProfileEdited`
+  flag, `switchMode` gates the no-restart path on profile
+  parity, `Logger.cooltunnel("HotSwap")` for diagnostics.
+
+### Validation
+
+- `cargo test --release` — 130/130 pass (engine-side
+  unchanged but included for completeness).
+- `cargo clippy --release --all-targets -- -D warnings` —
+  clean.
+- `xcodebuild Release` — succeeds.
+- `scripts/cut_release.sh 2.0.14` — green; all five artefacts
+  emitted.
+- Manual: `nc -v 127.0.0.1 1080` survives unbroken across
+  rapid Smart / Global / Local clicks; `pgrep -f
+  Resources/naive` stays at the same PID through the whole
+  sequence; live log shows one `switched from X to Y` line
+  per click.
+
+Merged via PR #4.
+
+---
+
 ## [2.0.13] — 2026-05-05 (mode-switch UX: no more Stop→Start→Stop button blink)
 
 A user reported that clicking through Smart / Global / Local
