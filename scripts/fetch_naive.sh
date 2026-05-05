@@ -162,7 +162,19 @@ mv "${TMP_DEST}" "${DEST}"
 # Sidecar manifest so future maintainers can audit which upstream
 # release the bundled binary came from. Lives next to the binary so
 # it survives `git mv`.
-cat > "${DEST}.upstream.json" <<EOF
+#
+# Idempotency: only rewrite the manifest when one of the SHAs
+# actually changed. The `fetched_at` timestamp on its own is not a
+# meaningful diff — without this guard, every re-run produces a
+# dirty working tree and forces a no-op commit during release prep.
+# (Audit ref: F4-1, 2026-05-05.)
+if [[ -f "${DEST}.upstream.json" ]] \
+    && grep -q "${ARM64_TARBALL_SHA}" "${DEST}.upstream.json" \
+    && grep -q "${X64_TARBALL_SHA}" "${DEST}.upstream.json" \
+    && grep -q "${UNIVERSAL_SHA}" "${DEST}.upstream.json"; then
+    echo "info: upstream manifest unchanged (same SHAs) — preserving fetched_at"
+else
+    cat > "${DEST}.upstream.json" <<EOF
 {
   "upstream_tag": "${TAG}",
   "arm64_tarball_sha256": "${ARM64_TARBALL_SHA}",
@@ -171,6 +183,7 @@ cat > "${DEST}.upstream.json" <<EOF
   "fetched_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
+fi
 
 echo "ok: wrote universal naive to ${DEST}"
 echo "    architectures: ${UNIVERSAL_INFO#*: }"
