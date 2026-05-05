@@ -195,7 +195,10 @@ fn print_help() {
     println!("    --version, -V       Print version and exit");
     println!("    --help, -h          Print this help and exit");
     println!("    --listen ADDR       Listen address for --mode server");
-    println!("                        (default: {})", server_mode::DEFAULT_LISTEN);
+    println!(
+        "                        (default: {})",
+        server_mode::DEFAULT_LISTEN
+    );
     println!("    --allow-public      Server only: acknowledge that the");
     println!("                        --listen address is non-loopback and");
     println!("                        a reverse proxy with auth is in");
