@@ -9,6 +9,67 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.6] — 2026-05-05 (resizable Live log + release-pipeline hygiene)
+
+Two changes shipped together:
+
+### 1. Live log no longer hides the Server form
+
+The four panes used to live in a single `VStack`. Live log
+had `frame(minHeight: 220)` but no upper bound, so on a tall
+window it ate every extra pixel — the Server form's
+Password and Local-port rows plus the explanatory footer
+disappeared off the bottom of the window with no scroll.
+
+**Fix:** switched the main layout to `VSplitView`, which
+gives the user a draggable divider between the Form pane
+(top) and the Live log (bottom). Pull the divider down to
+surface the hidden Server rows; pull it up for live-tail
+use. Both halves keep their own internal scrolling within
+the user-chosen split.
+
+- Top pane minimum: 360 pt (room for header + control row
+  + four Server form rows + footer text without truncation).
+- Bottom pane: 80 pt minimum, 220 pt ideal, no max — the
+  user resizes freely above the floor.
+
+### 2. `scripts/cut_release.sh` — single-command release prep
+
+Pre-2.0.6 the release flow was implicit: a developer was
+expected to run `fetch_naive.sh`, `cargo clean`, bump
+versions, build Release, then `package_release.sh`. Skip
+any step and you ship a release with stale bundled binaries
+— exactly the *"the apps bundle has 2.0.3 inside a 2.0.5
+.app"* surprise the user reported.
+
+**New:** `scripts/cut_release.sh <VERSION>` runs every
+freshness step in order with hard preconditions:
+
+1. `scripts/fetch_naive.sh` — pulls latest upstream naive
+   into `COOL-TUNNEL/naive` and updates
+   `naive.upstream.json`.
+2. `cargo clean` in `core/` — guarantees the next Xcode
+   build cannot reuse stale rust artefacts.
+3. Verify `core/Cargo.toml` matches the requested version
+   (refuse to proceed otherwise).
+4. `cargo update -p cool-tunnel-core` — refreshes
+   `Cargo.lock` for the new version.
+5. `xcodebuild Release` — Xcode's Build Rust core run
+   script phase now produces a fresh universal cool-
+   tunnel-core because step 2 cleared the cache.
+6. Verify the freshly-built bundled cool-tunnel-core's
+   `--version` matches the requested version.
+7. Verify the bundled naive's SHA-256 matches the pinned
+   manifest in `naive.upstream.json`.
+8. Hand the .app to `package_release.sh`, which runs its
+   own preconditions and emits the .dmg / .pkg / .zip /
+   core-binary / .sha256.
+
+After this completes, `dist/Cool-tunnel-v…` is ready to
+upload via `gh release create`.
+
+---
+
 ## [2.0.5] — 2026-05-05 (hotfix bundle: AppUpdater pre-flight + Match System appearance)
 
 Three issues found in user testing of v2.0.4:

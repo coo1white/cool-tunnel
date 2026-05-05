@@ -19,7 +19,7 @@ traffic that looks indistinguishable from a normal browser visit.**
   Replace with a clean screenshot of the running app
   (Header pill in pink-active, mode chips, log scrolling).
   Recommended: 1200×750 PNG, 2x retina,
-  saved to docs/screenshots/hero-v0.1.7.x.png
+  saved to docs/screenshots/hero-v2.0.x.png
 -->
 
 <img src="docs/screenshots/hero.png" alt="Cool Tunnel running in Smart mode — pink status pill, log streaming a successful connection" width="780" />
@@ -90,7 +90,7 @@ Designed so a non-technical user can finish in one sitting.
 ### Step 1 — Download the latest `.dmg` 📥
 
 Go to **[github.com/coo1white/cool-tunnel/releases/latest][releases]**.
-Pick **`Cool-tunnel-v0.1.7.21.dmg`** if you're not sure which one.
+Pick **`Cool-tunnel-v2.0.6.dmg`** if you're not sure which one.
 
 ### Step 2 — Drag it into Applications 📂
 
@@ -98,9 +98,16 @@ Double-click the `.dmg`. A Finder window opens with a Cool Tunnel
 icon and an **Applications** folder shortcut. Drag the icon onto
 the shortcut.
 
+> **Why .dmg and not .pkg?** The .dmg is recommended because the
+> drag-install preserves your user's ownership of the bundle —
+> `.app` files installed via the `.pkg` route are owned by `root`
+> and the in-app updater can't replace them without admin
+> elevation. Both flavours work; the .dmg path keeps self-update
+> friction-free.
+
 ### Step 3 — First launch (one-time approval) 🔑
 
-Open `/Applications`, find **Cool tunnel**, and **right-click → Open**.
+Open `/Applications`, find **Cool Tunnel**, and **right-click → Open**.
 Click **Open** again in the dialog macOS shows you. After that, you
 can open it normally — every time.
 
@@ -171,7 +178,7 @@ This is what makes the project boring to attack and reliable in practice.
 
 | Defence | What it does |
 | --- | --- |
-| **Hardened runtime** | macOS blocks library-injection and runtime tampering against the app process. Enabled in v0.1.7.17. |
+| **Hardened runtime** | macOS blocks library-injection and runtime tampering against the app process. |
 | **Mode-0600 credentials** | Your NaiveProxy password lives in `~/Library/Application Support/COOL-TUNNEL/credentials.json`, readable only by your user account. Not Keychain (intentional — see [SECURITY.md](./SECURITY.md)). Not UserDefaults. |
 | **SHA-256 update pinning** | When you click "Update Cool Tunnel", the app downloads a SHA-256 manifest separately and refuses to install if the bytes don't match. CDN tampering can't slip a substituted binary past it. |
 | **Trusted-host redirect guard** | All three update flows (app, NaiveProxy, engine) refuse any HTTP redirect that leaves `*.github.com` / `*.githubusercontent.com`. |
@@ -200,8 +207,9 @@ Honesty matters here:
 - A compromised NaiveProxy server you point Cool Tunnel at — it can
   log every request you proxy through it.
 - Bit-flips inside GitHub's CDN during an update of the bundled
-  NaiveProxy or Rust engine — SHA pinning for these is targeted for
-  v0.1.8.
+  NaiveProxy. SHA pinning for the Rust core landed in v0.1.7.18;
+  bundled-NaiveProxy SHA pinning is still targeted for a future
+  release.
 
 The full threat model is in [SECURITY.md](./SECURITY.md).
 
@@ -287,7 +295,7 @@ download size before adopting the new file.
 
 | What | Where |
 | --- | --- |
-| The app itself | `/Applications/Cool tunnel.app` |
+| The app itself | `/Applications/Cool Tunnel.app` |
 | Your saved password | `~/Library/Application Support/COOL-TUNNEL/credentials.json` (mode 0600) |
 | The proxy config | `~/Library/Application Support/COOL-TUNNEL/config.json` |
 | Smart-mode routing rules | `~/Library/Application Support/COOL-TUNNEL/smart-proxy.pac` |

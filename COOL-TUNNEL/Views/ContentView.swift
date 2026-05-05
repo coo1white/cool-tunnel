@@ -85,29 +85,55 @@ public struct ContentView: View {
     }
 
     private var mainStack: some View {
-        VStack(spacing: 0) {
-            HeaderView(
-                isRunning: orchestrator.isRunning,
-                activeMode: orchestrator.activeMode,
-                firewallState: orchestrator.firewallState,
-                lastError: orchestrator.lastError,
-                onDismissError: { orchestrator.dismissLastError() }
-            )
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
+        // **v2.0.6:** the four panes used to live in a single
+        // `VStack`. Live log had `frame(minHeight: 220)` but no
+        // upper bound, so on a tall window it ate every extra
+        // pixel — the Server form's Password and Local-port rows
+        // and the explanatory footer disappeared off the bottom
+        // of the window with no scroll. Switched to `VSplitView`,
+        // which gives the user a draggable divider between the
+        // Form pane and the log: pull it down to surface the
+        // hidden Server rows, pull it up to make the log bigger
+        // for live-tail use. Both halves keep their own internal
+        // scrolling within the user-chosen split.
+        VSplitView {
+            // --- Top pane: header + controls + form ---
+            VStack(spacing: 0) {
+                HeaderView(
+                    isRunning: orchestrator.isRunning,
+                    activeMode: orchestrator.activeMode,
+                    firewallState: orchestrator.firewallState,
+                    lastError: orchestrator.lastError,
+                    onDismissError: { orchestrator.dismissLastError() }
+                )
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
 
-            ControlPanelView(
-                isShowingSettings: $isShowingSettings
-            )
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+                ControlPanelView(
+                    isShowingSettings: $isShowingSettings
+                )
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
 
-            ConnectionFormView()
+                ConnectionFormView()
+            }
+            // Preserve enough vertical room for header + controls
+            // + the four Server form rows + footer text. Below
+            // this minimum the form starts truncating, which the
+            // user can't fix by dragging (the divider just stops).
+            .frame(minHeight: 360)
 
+            // --- Bottom pane: live log ---
             LogConsoleView()
-                .frame(minHeight: 220)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
+                .padding(.top, 8)
+                // Live log can shrink to a single row at the
+                // bottom (collapsing it almost-but-not-quite to
+                // nothing keeps the header + Filter + actions
+                // accessible). Caps at the natural max so it
+                // doesn't grow past the window.
+                .frame(minHeight: 80, idealHeight: 220)
         }
     }
 }
