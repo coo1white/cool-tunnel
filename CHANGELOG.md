@@ -9,6 +9,67 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.2] — 2026-05-05 (Check-then-update for naive + rust core)
+
+`NaiveUpdater` and `RustCoreUpdater` now mirror `AppUpdater`'s
+check-then-update pattern. Pre-2.0.2 every "Update" click did
+a full download regardless of whether you were already on the
+latest — clicking "Update again" on naive pulled the same
+binary again because upstream's `-N` patch suffix re-tags the
+unchanged naive build, and the user-visible verdict pill never
+moved.
+
+### Bug surface
+
+- "Update again" button (naive + rust core) always fired a
+  fresh download. For naive specifically: upstream tags like
+  `v148.0.7778.96-2` re-publish the same naive binary under a
+  new tag suffix, so the download produced cosmetically
+  different bytes (different upstream packaging) but the
+  binary's `--version` stayed at `148.0.7778.96`. Wasteful,
+  confusing, and caused the verdict pill to never look
+  "settled."
+
+### Fix
+
+- **New states on both updaters:** `checking` /
+  `upToDate(currentVersion:latestTag:)` /
+  `available(tag:currentVersion:)`. State machine still
+  monotonic — in-flight checks/updates can't be clobbered.
+- **New method `checkForUpdates(currentVersion:)` on both
+  updaters.** Resolves the latest tag (one HTTP GET, no
+  binary fetch) and compares against the binary's `--version`
+  via `tagIsConsideredCurrent(_:forBinaryVersion:lastInstalled:)`.
+  Two paths qualify as "current": exact tag match against
+  the persisted `lastInstalledTag`, OR semver match after
+  stripping `v` prefix and `-N` suffix from the tag.
+- **`lastInstalledTag` persisted in `UserDefaults`** on both
+  updaters (keys `NaiveUpdater.lastInstalledTag` and
+  `RustCoreUpdater.lastInstalledTag`). Without persistence,
+  every relaunch would falsely report "Update available"
+  against an upstream patch tag the user already installed.
+- **`NaiveUpdater.update()` reuses the resolved tag from
+  `.available`.** Saves one HTTP roundtrip in the typical
+  Check → Update flow.
+- **SettingsView morphing button + subtitle** for both naive
+  and rust core sections, mirroring AppUpdater:
+  - `Check for Updates` (idle / upToDate / failed / succeeded)
+  - `Checking…` (in-flight)
+  - `Update to <tag>` (available)
+  - `Resolving… / Downloading… / Extracting… / Merging… /
+    Installing…` (pipeline phases)
+  - Subtitle reads `You're on the latest version (X)` when
+    `.upToDate`, exactly like AppUpdater.
+
+### Carved out
+
+- `NaiveUpdater.update()` and `RustCoreUpdater.update()`
+  paths still allow direct invocation (no Check first) for
+  back-compat with any future "force update" flow. The
+  Settings UI no longer routes there directly.
+
+---
+
 ## [2.0.1] — 2026-05-05 (hotfix — Rust core version drift + updater verification)
 
 Hotfix on top of v2.0.0. Three findings closed, one user-facing
