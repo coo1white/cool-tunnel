@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Cool Tunnel | Installer distribution descriptor.
+
+    Note: XML forbids double hyphens inside comments, so this
+    file uses pipes ('|') wherever a CLI flag or em-dash would
+    naturally land. Don't rephrase to use double hyphens or the
+    productbuild parser will refuse the file at packaging time.
+
+    Built into a .pkg by the `productbuild` tool with the
+    `distribution` flag, driven from `scripts/package_release.sh`.
+    The {{VERSION}} placeholder is replaced at packaging time
+    with the release's marketing version (e.g. 2.0.10).
+
+    The interesting part of this file is the `installation-check`
+    JavaScript: a poka-yoke (mistake-proof) gate that refuses to
+    install the package while Cool Tunnel is running. Without it,
+    the user could double-click the .pkg with Cool Tunnel still
+    in the menu bar or window. Installer.app would then try to
+    overwrite the running .app's executable on disk, which has
+    two failure modes:
+
+      1. macOS refuses (text busy / EACCES on the executable
+         segment), leaving the user with a partially-replaced
+         bundle and no clear path forward.
+      2. The bundle WAS replaced but the running process
+         continues with the old code in memory; the user thinks
+         they are on the new version but the still-running
+         instance is the old one, until they happen to relaunch.
+
+    The check uses `pgrep` with `'x'` flag to detect the running
+    process by its exact executable name (matches
+    Contents/MacOS/Cool Tunnel | set by PRODUCT_NAME in
+    pbxproj). `system.run` returns the command's exit status:
+    pgrep exits 0 when it finds a match, 1 when it doesn't. So
+    `status === 0` means the app is up and we should block.
+
+    If pgrep itself fails to launch or returns an unexpected
+    code (extremely unlikely on stock macOS, where
+    `/usr/bin/pgrep` ships with the OS), we DO NOT block. Better
+    to let the user proceed than to permanently brick the
+    installer behind a check we can't run reliably. The relaunch
+    helper's own mv error path will surface a real failure
+    message if it actually happens.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>Cool Tunnel</title>
+    <organization>space.coolwhite</organization>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <installation-check script="cool_tunnel_install_check();"/>
+    <script><![CDATA[
+function cool_tunnel_install_check() {
+    // pgrep -x matches the exact process name. Cool Tunnel's
+    // executable is "Cool Tunnel" (with a space) — set by
+    // PRODUCT_NAME in the Xcode project. macOS truncates ps
+    // names at 16 chars; "Cool Tunnel" is 11, so no concern.
+    var pgrepStatus;
+    try {
+        pgrepStatus = system.run("/usr/bin/pgrep", "-x", "Cool Tunnel");
+    } catch (e) {
+        // pgrep launch failure is vanishingly rare on stock
+        // macOS. If we can't run the check, don't block —
+        // surface log + proceed.
+        system.log("cool_tunnel_install_check: pgrep launch failed: " + e);
+        return true;
+    }
+    if (pgrepStatus === 0) {
+        // Match found → Cool Tunnel is currently running.
+        // Block the install with a clear, actionable message.
+        my.result.title = "Cool Tunnel is running";
+        my.result.message = "Please quit Cool Tunnel and re-open this installer to continue. The installer can't replace the application bundle while a copy is running — proceeding would leave you with a half-replaced bundle, or a running instance still on the old version.";
+        my.result.type = "Fatal";
+        return false;
+    }
+    // No match → safe to install.
+    return true;
+}
+    ]]></script>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" visible="false" title="Cool Tunnel">
+        <pkg-ref id="space.coolwhite.cooltunnel.pkg"/>
+    </choice>
+    <pkg-ref id="space.coolwhite.cooltunnel.pkg" version="{{VERSION}}" auth="root">cooltunnel-component.pkg</pkg-ref>
+</installer-gui-script>
