@@ -123,6 +123,20 @@ pub enum RequestKind {
     },
     /// Politely shut the engine down.
     Shutdown,
+    /// Liveness probe — returns whether naive is currently
+    /// running and, if so, its PID. Added for **UX-F#7**: the
+    /// Swift orchestrator's no-restart hot-swap path
+    /// (`applyModeWithoutRestart`) leaves naive untouched while
+    /// reconfiguring system proxy. If naive happens to die in
+    /// that ~50 ms window, the orchestrator's
+    /// `transitionInFlight` gate suppresses the
+    /// `stateChanged(false)` event (UX-F#5) — so the swap
+    /// declares success while the engine is in fact dead.
+    /// Calling `ProbeNaiveLive` *after* the swap converts that
+    /// silent gap into an explicit yes/no answer the
+    /// orchestrator can route on. Cheap: a single in-process
+    /// read of `EngineState.supervisor.is_some()`.
+    ProbeNaiveLive,
 }
 
 /// One frame written by the engine on stdout.
@@ -180,6 +194,18 @@ pub enum ResponsePayload {
     Diagnostic(DiagnosticReport),
     /// `run_latency_test` reply.
     Latency(LatencyReport),
+    /// `probe_naive_live` reply. `running` is the canonical
+    /// flag (`EngineState.supervisor.is_some()`); `pid`
+    /// surfaces the supervisor's PID when running, `None`
+    /// otherwise. The PID is for diagnostics and isn't read
+    /// by the orchestrator's hot-swap routing logic — only
+    /// `running` matters there.
+    NaiveLiveness {
+        /// `true` when the engine has a live `ProxySupervisor`.
+        running: bool,
+        /// PID of the running naive child, when running.
+        pid: Option<u32>,
+    },
 }
 
 /// Structured failure detail accompanying an [`Outbound::Error`] frame.
