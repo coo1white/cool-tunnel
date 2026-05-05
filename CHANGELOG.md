@@ -9,6 +9,84 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.10] — 2026-05-05 (.pkg installer poka-yoke: blocks when app is running)
+
+A user asked for a poka-yoke (mistake-proof) gate on the
+manual `.pkg` installer: if Cool Tunnel is currently running,
+the installer should refuse to proceed and ask the user to
+quit the app first. Pre-2.0.10 the installer would happily
+try to overwrite the running bundle, with two failure modes:
+
+  1. macOS refuses (text-busy / EACCES on the executable
+     segment), leaving the user with a partially-replaced
+     bundle and no clear path forward.
+  2. The bundle WAS replaced but the running process
+     continues with the old code in memory; the user thinks
+     they're on the new version but the still-running
+     instance is the old one, until they happen to relaunch.
+
+### How the gate works
+
+The .pkg is now a **distribution package** (built with
+`productbuild --distribution …`) wrapping the existing
+component. The distribution descriptor carries an
+`installation-check` JavaScript that runs *before* any
+install action:
+
+```javascript
+function cool_tunnel_install_check() {
+    var status = system.run("/usr/bin/pgrep", "-x", "Cool Tunnel");
+    if (status === 0) {
+        // App is running → block the install.
+        my.result.title = "Cool Tunnel is running";
+        my.result.message = "Please quit Cool Tunnel and re-open this installer to continue. ...";
+        my.result.type = "Fatal";
+        return false;
+    }
+    return true;
+}
+```
+
+`pgrep -x "Cool Tunnel"` matches the exact executable name
+(`Contents/MacOS/Cool Tunnel`, set by `PRODUCT_NAME` in
+pbxproj). Exit status 0 means a match was found ⇒ block;
+non-zero means safe to install.
+
+If `pgrep` itself fails to launch (vanishingly rare on stock
+macOS — it ships with the OS), the check **falls through to
+allow** rather than block. Better to let the user proceed
+than to permanently brick the installer behind a check we
+can't run reliably.
+
+### What changed in the build pipeline
+
+- **New file:** `scripts/Distribution.xml.template` carrying
+  the JS check. Note that XML forbids double hyphens inside
+  comments, so the file uses pipes (`|`) instead of em-dashes
+  in prose; rephrasing to use double hyphens would make
+  `productbuild` reject the file.
+- **`package_release.sh` reworked:** the .pkg step now does
+  `pkgbuild` → component, `awk` substitutes `{{VERSION}}`
+  into the template, then `productbuild --distribution …`
+  emits the final wrapper.
+- **Output identifier unchanged** (`space.coolwhite.cooltunnel.pkg`)
+  so a productbuild-signed update still upgrades in place
+  rather than installing alongside.
+
+### Combination with v2.0.9 admin-elevated in-app updates
+
+The two paths are complementary, not redundant:
+
+- **v2.0.9 in-app updater:** handles the "Cool Tunnel is
+  already running and the user clicks Update inside it" case
+  by routing the install through `osascript … with
+  administrator privileges` and a `launchctl asuser` relaunch.
+- **v2.0.10 .pkg installer gate:** handles the "Cool Tunnel
+  is running and the user double-clicks a downloaded .pkg in
+  Finder" case by blocking with a clear message before any
+  install action. After quitting and re-opening the installer,
+  the .pkg installs normally.
+
 ## [2.0.9] — 2026-05-05 (.pkg-installed bundles can now self-update)
 
 A user reported that the in-app Update button on a
