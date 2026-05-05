@@ -109,16 +109,58 @@ hdiutil create \
     "${DMG}" >/dev/null
 
 # --- PKG ---------------------------------------------------------------
-# Component pkg installs straight to /Applications. Identifier matches
-# the bundle id with `.pkg` so a future installer-signed update can
-# upgrade in place rather than installing alongside.
+# **v2.0.10 (poka-yoke):** the .pkg is now a *distribution*
+# package wrapping a component, not a flat component package.
+# The distribution wrapper carries an `installation-check`
+# JavaScript that runs before any install actions: it calls
+# `pgrep -x "Cool Tunnel"` and refuses (Fatal) to install
+# while the app is currently running. Pre-2.0.10 a user could
+# double-click the .pkg with Cool Tunnel still in the menu bar
+# and Installer.app would happily try to overwrite the running
+# bundle — sometimes succeeding (so the in-memory copy was the
+# old version), sometimes failing mid-write (so the bundle was
+# half-replaced). The pre-flight closes both failure modes.
+#
+# Build flow:
+#   1. pkgbuild → cooltunnel-component.pkg     (the payload)
+#   2. Substitute {{VERSION}} into the
+#      Distribution.xml template.
+#   3. productbuild --distribution …           (the wrapper)
+#
+# Identifier still matches the bundle id with `.pkg` so a
+# productbuild-signed update can upgrade in place.
 echo "info: building ${PKG##*/}"
 rm -f "${PKG}"
+PKG_STAGE="${DIST_DIR}/pkg-staging-v${VERSION}"
+rm -rf "${PKG_STAGE}"
+mkdir -p "${PKG_STAGE}"
+COMPONENT_PKG="${PKG_STAGE}/cooltunnel-component.pkg"
 pkgbuild \
     --component "${APP}" \
     --install-location /Applications \
     --identifier space.coolwhite.cooltunnel.pkg \
     --version "${VERSION}" \
+    "${COMPONENT_PKG}" >/dev/null
+
+DIST_XML_TEMPLATE="${REPO_ROOT}/scripts/Distribution.xml.template"
+if [[ ! -f "${DIST_XML_TEMPLATE}" ]]; then
+    echo "error: missing Distribution.xml template at ${DIST_XML_TEMPLATE}" >&2
+    exit 2
+fi
+DIST_XML="${PKG_STAGE}/Distribution.xml"
+# Substitute the {{VERSION}} placeholder. Use awk rather than
+# sed-with-/ so the substitution is safe regardless of what
+# characters appear in VERSION (sed's default delimiter chokes
+# on / or .). awk's gsub takes literal strings unless we use a
+# regex marker, so this is robust.
+awk -v ver="${VERSION}" '{
+    gsub(/\{\{VERSION\}\}/, ver)
+    print
+}' "${DIST_XML_TEMPLATE}" > "${DIST_XML}"
+
+productbuild \
+    --distribution "${DIST_XML}" \
+    --package-path "${PKG_STAGE}" \
     "${PKG}" >/dev/null
 
 # --- ZIP ---------------------------------------------------------------
@@ -193,5 +235,8 @@ echo ""
 echo "the .sha256 manifest is REQUIRED — the in-app updater"
 echo "refuses to install a release that lacks it."
 
-# Clean up the dmg staging directory — it served its purpose.
-rm -rf "${STAGE}"
+# Clean up the dmg + pkg staging directories — they served
+# their purpose. The pkg-staging dir holds the intermediate
+# component .pkg + the version-substituted Distribution.xml;
+# both are recreated from scratch on every packaging run.
+rm -rf "${STAGE}" "${PKG_STAGE}"
