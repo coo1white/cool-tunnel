@@ -100,20 +100,32 @@ public struct ControlPanelView: View {
         .help(modeHelp)
     }
 
-    /// Two-way binding that:
-    ///   - **Reads** the running mode when active, otherwise the
-    ///     user's pending intent.
-    ///   - **Writes** the new selection through `switchMode(...)`
-    ///     when the proxy is already running (instant hot-swap),
-    ///     and only updates `pendingMode` when stopped (the Start
-    ///     button is the explicit activate trigger in that case).
+    /// Two-way binding for the segmented mode picker.
+    ///
+    /// **Reads** `pendingMode` — the user's most recent click — so
+    /// the picker reflects intent instantly. The orchestrator's
+    /// `activeMode` catches up over the next ~200-500 ms while the
+    /// engine restarts; reading `activeMode` directly would make the
+    /// picker visibly lag the click by that long, which is the same
+    /// "the UI feels stuck" symptom that motivated UX-F#5.
+    ///
+    /// **Writes** the new selection through `switchMode(...)` when
+    /// the proxy is already running (instant hot-swap), and only
+    /// updates `pendingMode` when stopped (the Start button is the
+    /// explicit activate trigger in that case).
+    ///
+    /// Pre-UX-F#5 the binding read `activeMode` while running and
+    /// `pendingMode` while stopped. That worked only because
+    /// `switchMode` *also* flickered `isRunning` / `activeMode`
+    /// through `.stopped` mid-swap, which let the binding fall
+    /// through to `pendingMode` for a few ms. Now that the
+    /// orchestrator preserves the public state across a hot-swap,
+    /// the picker has to read `pendingMode` directly to stay
+    /// responsive — the two UI properties (button stability + picker
+    /// responsiveness) have to be solved on both sides.
     private var modeBinding: Binding<ProxyMode> {
         Binding(
-            get: {
-                orchestrator.isRunning && orchestrator.activeMode != .stopped
-                    ? orchestrator.activeMode
-                    : pendingMode
-            },
+            get: { pendingMode },
             set: { newValue in
                 pendingMode = newValue
                 guard orchestrator.isRunning else { return }
