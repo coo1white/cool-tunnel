@@ -197,6 +197,39 @@ final class AppUpdater {
             // never saw the state transition before the
             // window vanished.
             try? await Task.sleep(nanoseconds: 1_200_000_000)
+            // **v2.0.7 (relaunch-stuck-fix):** belt-and-braces
+            // hard-exit fallback. v2.0.6 users reported the UI
+            // sticking on "Relaunching… The app will close in a
+            // moment." indefinitely. The clean path is
+            // `NSApp.terminate(nil)` →
+            // `applicationShouldTerminate` returns
+            // `.terminateLater` → orchestrator shutdown Task
+            // calls `NSApp.reply(toApplicationShouldTerminate:
+            // true)`, with a 5 s watchdog Task as backup. In
+            // some scenarios (e.g. an in-flight URLSession
+            // download holding the run loop, or a SwiftUI
+            // window-close animation racing the reply) neither
+            // Task fires soon enough and the process never
+            // exits — the relaunch helper waits on our PID
+            // forever, and the user sees the spinner stuck.
+            //
+            // We schedule a detached Task that calls
+            // `Darwin.exit(0)` 8 seconds from now,
+            // unconditionally. If the clean shutdown path wins
+            // first we never reach this; otherwise the relaunch
+            // helper sees our PID disappear and proceeds. Any
+            // system-proxy state we'd normally clean up in
+            // `orchestrator.shutdown()` is recovered by the
+            // `recoverFromCrashIfNeeded` sweep on the next
+            // launch — the same path that handles a real crash.
+            //
+            // 8 s is comfortably longer than the 5 s
+            // applicationShouldTerminate watchdog, so the clean
+            // path still has every chance to win.
+            Task.detached {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                Darwin.exit(0)
+            }
             await MainActor.run { NSApp.terminate(nil) }
         } catch let UpdaterError.message(reason) {
             state = .failed(message: reason)

@@ -9,6 +9,49 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.7] — 2026-05-05 (relaunch-stuck hotfix)
+
+Single-issue hotfix on top of v2.0.6.
+
+### Update flow could stall at "Relaunching…"
+
+After a successful in-app update, the UI transitioned to
+`.relaunching` ("The app will close in a moment.") and
+called `NSApp.terminate(nil)`. AppKit's
+`applicationShouldTerminate` returned `.terminateLater` and
+spawned a real shutdown Task plus a 5-second watchdog Task
+to fire `NSApp.reply(toApplicationShouldTerminate: true)`.
+
+In rare conditions — most commonly an in-flight URLSession
+holding the run loop, or a window-close animation racing
+the reply — neither Task fired soon enough and the process
+never exited. The relaunch helper kept waiting on our PID,
+the user saw the spinner stuck indefinitely, and only
+Force Quit recovered.
+
+**Fix (`SystemIntegration/AppUpdater.swift`):** schedule a
+`Task.detached` immediately before `NSApp.terminate(nil)`
+that calls `Darwin.exit(0)` after **8 seconds**,
+unconditionally. The clean shutdown path still has every
+chance to win (5 s watchdog, 8 s hard exit), and any
+system-proxy state we'd normally clean up in
+`orchestrator.shutdown()` is recovered by the
+`recoverFromCrashIfNeeded` sweep on next launch — exactly
+the same path that handles a real crash.
+
+The detached Task does not depend on the MainActor or any
+SwiftUI run loop, so it fires even if the main thread is
+fully stuck.
+
+### Recovery for users currently stuck on v2.0.6
+
+If you're reading this from a stuck v2.0.6 "Relaunching…":
+
+1. Force Quit Cool Tunnel.
+2. Relaunch — the `recoverFromCrashIfNeeded` sweep clears
+   any leaked system-proxy state.
+3. Settings → Cool Tunnel → Update → install v2.0.7.
+
 ## [2.0.6] — 2026-05-05 (resizable Live log + release-pipeline hygiene)
 
 Two changes shipped together:
