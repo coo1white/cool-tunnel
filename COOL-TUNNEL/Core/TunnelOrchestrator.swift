@@ -533,6 +533,19 @@ public final class TunnelOrchestrator {
             if canHotSwapWithoutRestart {
                 do {
                     try await applyModeWithoutRestart(newMode)
+                    // **UX-F#7 (v2.0.15):** verify naive is still
+                    // alive before declaring the swap successful.
+                    // The orchestrator's `transitionInFlight` gate
+                    // (UX-F#5) suppresses any `stateChanged(false)`
+                    // event the engine emits during this window, so
+                    // a naive death that happens between
+                    // `applyModeWithoutRestart` starting and ending
+                    // would otherwise go undetected — the user
+                    // would see "switched to X" with the Stop
+                    // button still red while their browser quietly
+                    // stalls. Throwing here routes the call into
+                    // the fallback full-restart path below.
+                    try await verifyNaiveLiveAfterHotSwap()
                     appendInfo("switched from \(from.title) to \(newMode.title)")
                     return
                 } catch {
@@ -543,6 +556,15 @@ public final class TunnelOrchestrator {
                     // full restart path; stopQuiet's `disableAll()`
                     // will reset proxyController to a clean state
                     // before startCore reapplies the correct config.
+                    //
+                    // Defensive: mark the active profile as edited
+                    // so any later code path that re-checks the
+                    // hot-swap gate sees it as ineligible. The
+                    // current call's fallback below is unconditional
+                    // (it doesn't re-check the gate), so this is
+                    // belt-and-suspenders for future refactors.
+                    // Cleared at the next successful `startCore`.
+                    activeProfileEdited = true
                     Self.hotSwapLogger.notice(
                         "no-restart switch to \(newMode.rawValue, privacy: .public) failed (\(error.localizedDescription, privacy: .public)); falling back to full engine restart"
                     )
@@ -703,6 +725,53 @@ public final class TunnelOrchestrator {
     /// to Y".
     private func startQuiet(mode: ProxyMode) async throws {
         try await startCore(mode: mode, log: false)
+    }
+
+    /// **UX-F#7 (v2.0.15):** post-hot-swap liveness probe.
+    ///
+    /// Sends `probe_naive_live` to the engine and throws if the
+    /// engine reports naive is no longer running. The
+    /// `transitionInFlight` gate (UX-F#5) suppresses
+    /// `stateChanged(false)` events delivered during a hot-swap
+    /// so the UI doesn't blink, but that suppression also hides
+    /// a genuine naive crash if it happens in the ~50 ms swap
+    /// window. This probe converts that silent gap into an
+    /// explicit yes/no answer the orchestrator can route on.
+    ///
+    /// Throws on:
+    ///   - The engine reports `running: false`. Caller's catch
+    ///     arm logs at `.notice` and falls through to the
+    ///     full-restart path; `startCore` re-spawns naive.
+    ///   - The engine itself is dead and `core.send` errors out
+    ///     with broken-pipe / connection-closed. Same recovery
+    ///     path; the full-restart path will surface a more
+    ///     useful error if it can't bring the engine back.
+    ///   - The engine returns a response shape we don't
+    ///     recognise (`.unexpectedResponse`). Defensive — won't
+    ///     fire under normal operation.
+    private func verifyNaiveLiveAfterHotSwap() async throws {
+        let response = try await core.send(.probeNaiveLive)
+        guard case .naiveLiveness(let running, let pid) = response else {
+            throw OrchestratorError.unexpectedResponse
+        }
+        if !running {
+            Self.hotSwapLogger.notice(
+                "post-swap liveness probe says naive is dead (last known pid=\(pid.map(String.init) ?? "none", privacy: .public)); will route to full restart"
+            )
+            throw HotSwapError.engineDied
+        }
+    }
+
+    /// Internal control-flow signal used by
+    /// `verifyNaiveLiveAfterHotSwap` to route the swap back
+    /// through the full-restart fallback. Never surfaces to the
+    /// user — `switchMode`'s catch arm logs and re-tries via
+    /// `stopQuiet`/`startQuiet`. Kept as a private nested type
+    /// (rather than added to `OrchestratorError`) because it
+    /// describes an *internal* recovery transition, not a
+    /// user-facing failure mode.
+    private enum HotSwapError: Error {
+        case engineDied
     }
 
     // MARK: - Lifecycle commands

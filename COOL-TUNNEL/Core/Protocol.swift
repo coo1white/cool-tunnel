@@ -167,6 +167,10 @@ public enum CoreResponse: Sendable, Hashable {
     case stopped
     case diagnostic(DiagnosticReport)
     case latency(LatencyReport)
+    /// `probe_naive_live` reply (UX-F#7 / v2.0.15): `running`
+    /// is the canonical "is naive alive" flag the orchestrator
+    /// routes on; `pid` is for diagnostic logging only.
+    case naiveLiveness(running: Bool, pid: UInt32?)
 
     private enum Tag: String, Decodable {
         case ack
@@ -177,10 +181,11 @@ public enum CoreResponse: Sendable, Hashable {
         case stopped
         case diagnostic
         case latency
+        case naiveLiveness = "naive_liveness"
     }
 
     private enum FlatKeys: String, CodingKey {
-        case type, json, js, pid
+        case type, json, js, pid, running
     }
 }
 
@@ -205,6 +210,11 @@ extension CoreResponse: Decodable {
             self = .diagnostic(try DiagnosticReport(from: decoder))
         case .latency:
             self = .latency(try LatencyReport(from: decoder))
+        case .naiveLiveness:
+            self = .naiveLiveness(
+                running: try flat.decode(Bool.self, forKey: .running),
+                pid: try flat.decodeIfPresent(UInt32.self, forKey: .pid)
+            )
         }
     }
 }
@@ -314,6 +324,15 @@ public enum CoreRequest: Sendable, Hashable {
     case runDiagnostics
     case runLatencyTest(mode: ProxyTestMode)
     case shutdown
+    /// Asks the engine whether naive is currently alive.
+    /// Used by the orchestrator's no-restart hot-swap path
+    /// (UX-F#7 / v2.0.15) to detect a naive crash that
+    /// happened during the swap window — the
+    /// `transitionInFlight` gate suppresses the engine's
+    /// usual `stateChanged(false)` event so without an
+    /// explicit probe the orchestrator would declare success
+    /// over a dead engine.
+    case probeNaiveLive
 
     public var method: String {
         switch self {
@@ -325,6 +344,7 @@ public enum CoreRequest: Sendable, Hashable {
         case .runDiagnostics: "run_diagnostics"
         case .runLatencyTest: "run_latency_test"
         case .shutdown: "shutdown"
+        case .probeNaiveLive: "probe_naive_live"
         }
     }
 }
@@ -348,7 +368,7 @@ public struct CoreRequestFrame: Sendable, Encodable {
         try container.encode(id, forKey: .id)
         try container.encode(request.method, forKey: .method)
         switch request {
-        case .stopProxy, .runDiagnostics, .shutdown:
+        case .stopProxy, .runDiagnostics, .shutdown, .probeNaiveLive:
             try container.encodeNil(forKey: .params)
         case .validateProfile(let profile),
             .generateNaiveConfig(let profile):
