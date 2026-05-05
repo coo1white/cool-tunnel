@@ -1351,13 +1351,35 @@ final class AppUpdater {
             #      Tunnel asking for admin password every
             #      time?" follow-on bugs.
             #
+            # **v2.0.11 (lsregister fix):** after an mv-swap the
+            # inode at $OLD_APP changes; LaunchServices may hold
+            # a stale cache entry for the old inode and serve the
+            # old version the next time the user opens from the
+            # Dock or Finder. `lsregister -f` (force) invalidates
+            # and rebuilds the LS database entry for exactly this
+            # path, ensuring the Dock and Finder pick up the new
+            # bundle on the next open. On the admin-elevated path
+            # we run it as the user (via `launchctl asuser`) so
+            # the user-scoped LS database is updated — running it
+            # as root alone leaves the per-user database stale.
+            # Falls through silently if the binary is absent
+            # (should never happen on stock macOS — it ships with
+            # the OS alongside LaunchServices itself).
+            #
             # On the regular (user-owned) path `id -u` is the
             # user's UID and we just `open` directly — no
             # chown, no asuser indirection.
+            LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
             if [ "$(id -u)" -eq 0 ]; then
                 chown -R "${ORIG_UID}:staff" "$OLD_APP" 2>/dev/null || true
+                if [ -x "$LSREGISTER" ]; then
+                    launchctl asuser "${ORIG_UID}" "$LSREGISTER" -f "$OLD_APP" 2>/dev/null || true
+                fi
                 launchctl asuser "${ORIG_UID}" open "$OLD_APP"
             else
+                if [ -x "$LSREGISTER" ]; then
+                    "$LSREGISTER" -f "$OLD_APP" 2>/dev/null || true
+                fi
                 open "$OLD_APP"
             fi
             """
