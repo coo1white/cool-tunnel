@@ -207,9 +207,13 @@ public struct FirewallBadge: View {
         // the capsule background change on hover (system-default
         // for `.buttonStyle(.plain)` over an interactive surface)
         // gives the click affordance.
-        .help("The macOS Application Firewall is on. Click to open Privacy & Security in System Settings — outbound traffic to your proxy may be blocked until you allow it there.")
+        .help(
+            "The macOS Application Firewall is on. Click to open Privacy & Security in System Settings — outbound traffic to your proxy may be blocked until you allow it there."
+        )
         .accessibilityLabel("Firewall is on. Open Privacy & Security in System Settings.")
-        .accessibilityHint("Opens System Settings to the Firewall pane so you can allow Cool Tunnel through the Application Firewall.")
+        .accessibilityHint(
+            "Opens System Settings to the Firewall pane so you can allow Cool Tunnel through the Application Firewall."
+        )
         .accessibilityAddTraits(.isButton)
     }
 

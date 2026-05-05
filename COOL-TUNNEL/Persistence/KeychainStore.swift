@@ -132,4 +132,3 @@ public struct KeychainStore: Sendable {
 // CredentialStore.swift; KeychainStore already implements every
 // method by name + signature, so the conformance is empty.
 extension KeychainStore: CredentialStore {}
-
