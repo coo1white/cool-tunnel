@@ -530,22 +530,32 @@ final class AppUpdater {
         let extractedAppURL = try locateAppBundle(in: extractDir)
         try await verifyExtractedApp(at: extractedAppURL, expectedVersion: release.version)
 
-        // 9. Refuse if running app is on read-only volume. Use
-        // the symlink-resolved URL so a symlinked install path
-        // (rare on personal Macs, sometimes seen on managed
-        // ones) is rejected based on the *real* destination,
-        // not the visible alias.
+        // 9. Pre-flight the install path. Returns `needsAdmin`
+        // when the bundle is root-owned (.pkg installation);
+        // throws when install can't proceed at all (read-only
+        // volume, locked bundle, owned by an unrelated user).
+        // Use the symlink-resolved URL so a symlinked install
+        // path (rare on personal Macs, sometimes seen on
+        // managed ones) is checked based on the *real*
+        // destination, not the visible alias.
         let runningAppURL = await MainActor.run { Bundle.main.bundleURL.resolvingSymlinksInPath() }
-        try refuseReadOnlyInstall(at: runningAppURL)
+        let needsAdmin = try preflightInstallability(at: runningAppURL)
 
         // 10. Spawn helper. The helper takes ownership of
-        // `tempRoot` and removes it after copying.
+        // `tempRoot` and removes it after copying. When
+        // `needsAdmin` is true the helper is launched via
+        // osascript with administrator privileges, the user
+        // enters their password once, the helper runs as root,
+        // chowns the new bundle back to the user, and re-launches
+        // through `launchctl asuser` (so the new instance lives
+        // in the user's GUI session, not as root).
         let parentPID = ProcessInfo.processInfo.processIdentifier
         try spawnRelaunchHelper(
             oldAppURL: runningAppURL,
             newAppURL: extractedAppURL,
             tempRootToClean: tempRoot,
-            parentPID: parentPID
+            parentPID: parentPID,
+            needsAdminElevation: needsAdmin
         )
     }
 
@@ -1017,30 +1027,35 @@ final class AppUpdater {
         }.value
     }
 
-    /// Refuse to install if the running app is on a read-only
-    /// volume (DMG mount, quarantine staging) OR if the install
-    /// directory or the bundle itself is non-writable for the
-    /// current user.
+    /// Pre-flight the install path. Returns `true` when the
+    /// bundle is reachable but needs admin elevation
+    /// (`.pkg`-installed, root-owned). Throws when the install
+    /// can't proceed at all (read-only volume, locked bundle,
+    /// owned by an unrelated non-root user).
     ///
-    /// **AU-9 fix:** previously this only checked
-    /// `parentDirectory.volumeIsReadOnlyKey`. Two failure modes
-    /// slipped through pre-terminate, leaving the user with no
-    /// app and no UI to report the failure once
-    /// `NSApp.terminate` had fired:
+    /// **v2.0.9 (admin-elevated install path):** prior to
+    /// v2.0.9 the root-owned case threw — the user was told to
+    /// quit, manually drag the .app to Trash with admin auth,
+    /// then reinstall from the .dmg/.zip. That's a hostile UX
+    /// for what is, fundamentally, the same admin-auth gate the
+    /// user already cleared once during the .pkg install.
+    /// v2.0.9 instead returns a "needs admin elevation" flag;
+    /// the caller routes the relaunch helper through
+    /// `osascript ... with administrator privileges` so the
+    /// user enters their password once and the install proceeds
+    /// in-app. After the install the bundle is `chown`'d back
+    /// to the user, so subsequent updates take the regular
+    /// (no-prompt) path.
     ///
-    ///   1. The bundle was on a writable volume but the user's
-    ///      account didn't have write access to /Applications
-    ///      (admin ACL, MDM lockdown). The relaunch helper would
-    ///      fail at `mv "$OLD_APP" "$BACKUP"`.
-    ///   2. The bundle was on a writable volume in a writable
-    ///      folder but the bundle itself was immutable (Get Info
-    ///      → Locked, or `chflags uchg`). Same failure mode.
-    ///
-    /// Now: also test `parentDirectory.isWritableKey` and
-    /// `appURL.isWritableKey`. Both checks happen *before* the
-    /// `NSApp.terminate` so the error round-trips back to the
-    /// Settings panel with a recovery hint.
-    nonisolated private static func refuseReadOnlyInstall(at appURL: URL) throws {
+    /// **AU-9 history:** the pre-flight previously checked
+    /// `parentDirectory.volumeIsReadOnlyKey` only. v0.1.7.x
+    /// expanded to `parentDirectory.isWritable` (catches
+    /// /Applications ACL lockdowns) and `lstat` flags on the
+    /// bundle (catches chflags uchg/schg). v2.0.5 dropped the
+    /// `Darwin.access(W_OK)` test that was over-restrictive on
+    /// macOS 14 App-Management TCC; v2.0.9 inverts the
+    /// root-owned arm from "throw" to "return true".
+    nonisolated private static func preflightInstallability(at appURL: URL) throws -> Bool {
         let parentDirectory = appURL.deletingLastPathComponent()
         let parentValues = try parentDirectory.resourceValues(
             forKeys: [.volumeIsReadOnlyKey, .isWritableKey]
@@ -1051,41 +1066,15 @@ final class AppUpdater {
             )
         }
         // AU-9 part 1: parent folder writable for this user?
-        if parentValues.isWritable == false {
-            appUpdaterLogger.info(
-                "parent not writable: \(parentDirectory.path, privacy: .public)"
-            )
-            throw UpdaterError.message(
-                "Cool Tunnel can't write to its install location. Check your folder permissions and try Update again."
-            )
-        }
-        // AU-9 part 2 (v2.0.5 rework):
-        //
-        // History:
-        //   - Pre-2.0.3 used `URLResourceKey.isWritableKey` →
-        //     too coarse, falsed on App-Management TCC etc.
-        //   - 2.0.3 split: `lstat` for chflags + `Darwin.access(W_OK)`
-        //     for everything else. Better diagnostic for the
-        //     Locked-checkbox case, but `access(W_OK)` was STILL
-        //     over-restrictive on macOS 14+: even with the
-        //     Cool Tunnel toggle ON in System Settings → Privacy
-        //     & Security → App Management, `access(W_OK)` can
-        //     keep returning false (TCC permission grants don't
-        //     consistently propagate to access(2) syscalls in
-        //     the running process until restart). The user
-        //     toggled the permission, restarted, retried —
-        //     same false-positive error, no path forward.
-        //
-        // 2.0.5 posture: pre-flight only the conditions we can
-        // prove block the install — chflags-immutable and
-        // root-owned-bundle-via-pkg-installer. Anything else
-        // (ACL inheritance, App Management TCC residue,
-        // exotic mode bits) is now trusted to surface from the
-        // relaunch helper's actual `mv`/`ditto` call, which
-        // logs to `~/Library/Logs/cool-tunnel-relaunch.log`.
-        // The pre-flight stops being a barrier for users whose
-        // bundle is functionally writable but happens to fail
-        // an over-strict `access` heuristic.
+        // Note: an admin-elevated install can write a non-user-
+        // writable parent (e.g. /Applications under MDM ACLs),
+        // so this check is skipped on the admin-elevation path
+        // — but only AFTER we've confirmed the bundle is
+        // root-owned (the signal that admin elevation is the
+        // right tool). We test the bundle owner first; if it's
+        // root-owned, we trust that admin elevation will get us
+        // past the parent ACL too. If it's user-owned, the
+        // parent must be user-writable for the same UID.
         var st = stat()
         let statOK = appURL.path.withCString { lstat($0, &st) } == 0
         if statOK {
@@ -1099,21 +1088,22 @@ final class AppUpdater {
                 )
             }
             // Root-owned bundle (`.pkg` installer puts files in
-            // /Applications under root:wheel). The user can read
-            // and execute the app, but can't write to it without
-            // admin elevation — which the in-app updater can't
-            // request without a privileged helper tool.
+            // /Applications under root:wheel). v2.0.9: take the
+            // admin-elevated install path instead of refusing.
             let myEUID = geteuid()
             if st.st_uid != myEUID && st.st_uid == 0 {
                 appUpdaterLogger.info(
-                    "bundle is root-owned (likely .pkg-installed): \(appURL.path, privacy: .public)"
+                    "bundle is root-owned (.pkg-installed) — taking admin-elevated install path: \(appURL.path, privacy: .public)"
                 )
-                throw UpdaterError.message(
-                    "Cool Tunnel was installed via the .pkg installer, so its bundle is owned by root. The in-app updater can't get past that without admin auth. To self-update from here on:\n\n  1. Quit Cool Tunnel.\n  2. Drag /Applications/Cool Tunnel.app to the Trash (you'll be asked for admin password).\n  3. Reinstall by dragging Cool Tunnel from the .dmg or .zip into /Applications.\n\nFuture updates from .dmg/.zip installations will Just Work."
-                )
+                return true
             }
             // Bundle owned by another non-root user. Rare but
             // happens after a user-rename or unusual transfer.
+            // Admin elevation could fix this too in principle,
+            // but it's a sufficiently weird case that we'd
+            // rather make the user go check before granting
+            // root to a script that then chowns to the current
+            // user.
             if st.st_uid != myEUID {
                 appUpdaterLogger.info(
                     "bundle owned by uid \(st.st_uid, privacy: .public), running as \(myEUID, privacy: .public)"
@@ -1123,22 +1113,54 @@ final class AppUpdater {
                 )
             }
         }
-        // No `access(W_OK)` pre-flight here — see the long
-        // comment above. The relaunch helper's `mv`/`ditto`
-        // surface real errors (and log them) for any residual
-        // permission case the cheap pre-flight can't classify.
+        // User-owned bundle path. Now check parent writability —
+        // we need our own UID to be able to write to the parent
+        // for the rename pair to succeed. (The admin-elevated
+        // path bypassed this above because root can write
+        // anywhere on the local volume.)
+        if parentValues.isWritable == false {
+            appUpdaterLogger.info(
+                "parent not writable: \(parentDirectory.path, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "Cool Tunnel can't write to its install location. Check your folder permissions and try Update again."
+            )
+        }
+        // No `access(W_OK)` pre-flight here — see the v2.0.5
+        // rework comment above. The relaunch helper's
+        // `mv`/`ditto` surface real errors (and log them) for
+        // any residual permission case the cheap pre-flight
+        // can't classify.
+        return false
     }
 
     /// Writes the relaunch helper script into `tempRootToClean`
     /// (NOT /tmp — see AU-1) atomically with mode 0700, then
     /// spawns it detached. The helper waits for the parent PID
-    /// to exit, dittos the new app over the old, and `open -a`s
+    /// to exit, dittos the new app over the old, and `open`s
     /// the new copy.
+    ///
+    /// **v2.0.9 (admin-elevated install path):** when
+    /// `needsAdminElevation` is `true` (root-owned bundle from
+    /// .pkg install), the spawn goes through
+    /// `osascript -e 'do shell script "..." with administrator
+    /// privileges'` which surfaces the standard macOS auth
+    /// dialog. After the user enters their password, the
+    /// privileged shell runs a tiny wrapper that backgrounds
+    /// the real helper and exits — so osascript returns to us
+    /// promptly instead of blocking 30+ s on the parent-PID
+    /// wait. The real helper continues running as root,
+    /// performs the swap, `chown`s the new bundle back to the
+    /// user (so subsequent updates take the no-prompt path),
+    /// and `launchctl asuser`s the new copy into the user's
+    /// GUI session (rather than `open` running as root, which
+    /// would launch the new copy as root — bad).
     nonisolated private static func spawnRelaunchHelper(
         oldAppURL: URL,
         newAppURL: URL,
         tempRootToClean: URL,
-        parentPID: Int32
+        parentPID: Int32,
+        needsAdminElevation: Bool
     ) throws {
         // **AU-1 fix:** the helper script lives inside the
         // per-update tempRoot (already restrictive perms; about
@@ -1179,6 +1201,16 @@ final class AppUpdater {
         // .old copy on any failure step. `set -e` guarantees
         // we abort on the first error; `trap` handles cleanup
         // on every exit path, including the 30 s timeout.
+        // **v2.0.9:** capture the original (current, non-root)
+        // user's UID so the relaunch helper can chown the new
+        // bundle back to the user and `launchctl asuser` it
+        // back into the user's GUI session even when the
+        // helper itself is running as root via osascript.
+        // Reading getuid() here (in the parent app) is the
+        // only place we have a reliable source of truth — by
+        // the time the privileged helper runs, `id -u` is `0`.
+        let origUID = getuid()
+
         let script = """
             #!/bin/bash
             set -eu
@@ -1187,6 +1219,7 @@ final class AppUpdater {
             NEW_APP=\(shellQuote(newAppURL.path))
             TEMP_ROOT=\(shellQuote(tempRootToClean.path))
             LOG=\(shellQuote(logURL.path))
+            ORIG_UID=\(origUID)
             STAGED="${OLD_APP}.new"
             BACKUP="${OLD_APP}.old-update"
 
@@ -1212,7 +1245,7 @@ final class AppUpdater {
             # but bash can't open the file" — vanishingly rare,
             # and no worse than pre-Q-F#2 behaviour.
             exec 2>>"$LOG"
-            echo "[$(date '+%FT%T%z')] cool-tunnel-relaunch starting (parent=$PARENT_PID)"
+            echo "[$(date '+%FT%T%z')] cool-tunnel-relaunch starting (parent=$PARENT_PID, uid=$(id -u))"
 
             # AU-11 (R4): pre-swap trap. Until step 4 commits the
             # swap, an unexpected exit MUST preserve the recovery
@@ -1295,7 +1328,38 @@ final class AppUpdater {
             #    treats "Cool" as the app name and "tunnel.app"
             #    as a document, misfiring the relaunch. The
             #    bareword form opens the bundle directly.
-            open "$OLD_APP"
+            #
+            # **v2.0.9 (admin-elevated install path):** when the
+            # script runs as root (via osascript-with-admin-
+            # privileges, because the original bundle was .pkg-
+            # installed and root-owned), two extra steps run
+            # before the open:
+            #
+            #   a. `chown -R ${ORIG_UID}:staff` the new bundle
+            #      back to the user. Without this, every
+            #      subsequent update would re-prompt for admin
+            #      password — annoying and unnecessary, since
+            #      after the .pkg → in-app-update transition
+            #      the bundle no longer needs to be root-owned.
+            #
+            #   b. `launchctl asuser ${ORIG_UID} open …` to
+            #      re-launch in the user's Aqua session. A
+            #      bare `open` from a root process would launch
+            #      the new copy AS root, and a root GUI app
+            #      promptly creates a tangled mess of TCC
+            #      grants, keychain access, and "Why is Cool
+            #      Tunnel asking for admin password every
+            #      time?" follow-on bugs.
+            #
+            # On the regular (user-owned) path `id -u` is the
+            # user's UID and we just `open` directly — no
+            # chown, no asuser indirection.
+            if [ "$(id -u)" -eq 0 ]; then
+                chown -R "${ORIG_UID}:staff" "$OLD_APP" 2>/dev/null || true
+                launchctl asuser "${ORIG_UID}" open "$OLD_APP"
+            else
+                open "$OLD_APP"
+            fi
             """
 
         // Helper script lives in tempRoot (already restrictive
@@ -1317,7 +1381,110 @@ final class AppUpdater {
             )
         }
 
-        // Spawn detached — the parent is about to NSApp.terminate.
+        // **v2.0.9 (admin-elevated install path):** when the
+        // bundle was .pkg-installed and is therefore root-owned,
+        // route the spawn through `osascript ... with
+        // administrator privileges` so the user enters their
+        // password once and the helper runs as root. We can't
+        // synchronously wait for the *real* helper (it sleeps
+        // 30 s for the parent PID to die — including ours), so
+        // the privileged shell runs a tiny **wrapper** that
+        // backgrounds the real helper via nohup/disown and
+        // exits immediately. osascript returns to us as soon as
+        // the wrapper exits, so we know within a couple of
+        // seconds whether the user authorised; if they did, we
+        // proceed to .relaunching/terminate; if they cancelled,
+        // we throw a normal error and stay running.
+        if needsAdminElevation {
+            let wrapperURL = tempRootToClean
+                .appendingPathComponent("cool-tunnel-relaunch-wrapper.sh", isDirectory: false)
+            // The wrapper runs AS ROOT. Its only job is to
+            // detach the real helper into a background process
+            // group so osascript can return to the parent
+            // promptly. nohup ignores SIGHUP, `< /dev/null`
+            // closes stdin (osascript's stdin would otherwise
+            // block reads), `> /dev/null 2>&1` discards stdout/
+            // stderr (the real helper redirects its own stderr
+            // to $LOG with `exec 2>>"$LOG"` once it starts).
+            // `disown` removes the job from the wrapper's job
+            // table so the wrapper's exit doesn't SIGHUP it
+            // anyway. The combo is the standard Unix recipe
+            // for "fire-and-forget detach."
+            let wrapper = """
+                #!/bin/bash
+                set -e
+                # Running as root via osascript admin privileges.
+                # Detach the real relaunch helper into the
+                # background and exit fast so osascript returns
+                # to the parent (Cool Tunnel) without blocking
+                # on the helper's 30-s parent-PID wait.
+                nohup /bin/bash \(shellQuote(scriptURL.path)) > /dev/null 2>&1 < /dev/null &
+                disown
+                exit 0
+                """
+            guard let wrapperData = wrapper.data(using: .utf8) else {
+                throw UpdaterError.message(
+                    "Internal error: privileged wrapper not encodable as UTF-8."
+                )
+            }
+            do {
+                try RestrictedFile.write(wrapperData, to: wrapperURL, mode: 0o700)
+            } catch {
+                throw UpdaterError.message(
+                    "Couldn't create the privileged wrapper script: \(error.localizedDescription)"
+                )
+            }
+            // Build the AppleScript. `do shell script ... with
+            // administrator privileges` shows the standard
+            // macOS authorisation dialog (Touch ID / password
+            // / Apple Watch) and runs the command as root.
+            // `with prompt` customises the dialog text so the
+            // user sees Cool Tunnel-specific copy and not just
+            // the generic "osascript wants to make changes."
+            let appleScript = "do shell script \"/bin/bash \" & quoted form of \(appleScriptStringLiteral(wrapperURL.path)) with prompt \"Cool Tunnel needs to update its application bundle. (It was originally installed via the .pkg installer, so the bundle is owned by root.)\" with administrator privileges"
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            task.arguments = ["-e", appleScript]
+            task.standardInput = nil
+            task.standardOutput = Pipe()
+            let stderrPipe = Pipe()
+            task.standardError = stderrPipe
+            do {
+                try task.run()
+            } catch {
+                throw UpdaterError.message(
+                    "Couldn't launch the admin-privileges prompt: \(error.localizedDescription)"
+                )
+            }
+            task.waitUntilExit()
+            if task.terminationStatus != 0 {
+                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let errText = String(data: errData, encoding: .utf8) ?? ""
+                appUpdaterLogger.warning(
+                    "osascript admin privileges failed (status \(task.terminationStatus, privacy: .public)): \(errText, privacy: .public)"
+                )
+                // osascript exits with status 1 and stderr
+                // "User canceled. (-128)" when the user dismisses
+                // the auth dialog. Surface a friendly message
+                // for that specific case; everything else is a
+                // generic "couldn't run."
+                if errText.contains("-128") || errText.contains("User canceled") || errText.contains("User cancelled") {
+                    throw UpdaterError.message(
+                        "Update cancelled — admin password not entered. Click Update to try again."
+                    )
+                }
+                throw UpdaterError.message(
+                    "Couldn't run the privileged installer. Try again, or reinstall from the .dmg."
+                )
+            }
+            // osascript returned successfully → wrapper ran →
+            // real helper is now detached and waiting on our
+            // PID. Caller proceeds to .relaunching/terminate.
+            return
+        }
+
+        // Regular (user-owned bundle) path: spawn detached.
+        // The parent is about to NSApp.terminate.
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [scriptURL.path]
@@ -1331,6 +1498,18 @@ final class AppUpdater {
                 "Couldn't launch the relaunch helper: \(error.localizedDescription)"
             )
         }
+    }
+
+    /// Encode a Swift string as an AppleScript string literal —
+    /// wrap in double quotes and backslash-escape backslashes
+    /// and double quotes. Used to safely interpolate file paths
+    /// into the `do shell script` AppleScript without breaking
+    /// the AppleScript parse.
+    nonisolated private static func appleScriptStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     /// **Edge-F#11 (v0.1.7.16) + v0.1.7.20 false-positive fix:**

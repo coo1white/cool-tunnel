@@ -90,7 +90,7 @@ Designed so a non-technical user can finish in one sitting.
 ### Step 1 — Download the latest `.dmg` 📥
 
 Go to **[github.com/coo1white/cool-tunnel/releases/latest][releases]**.
-Pick **`Cool-tunnel-v2.0.8.dmg`** if you're not sure which one.
+Pick **`Cool-tunnel-v2.0.9.dmg`** if you're not sure which one.
 
 ### Step 2 — Drag it into Applications 📂
 
