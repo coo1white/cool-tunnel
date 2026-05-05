@@ -9,6 +9,101 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.12] — 2026-05-05 (logic-integrity sweep: validate_profile semantics + clippy clean)
+
+The v2.0.7 → v2.0.11 stretch was an **industrial-hardening**
+arc: relaunch-stuck watchdog, .pkg admin-elevation, .pkg
+poka-yoke gate, LaunchServices cache flush. Each fix made the
+update *path* more robust under hostile filesystem and OS
+state. v2.0.12 closes that arc and shifts focus to **logic
+integrity** — the *engine's* contracts now match the tests
+that describe them, and the lint baseline is clean again.
+
+### Two fixes, both behind the wire
+
+#### 1. `validate_profile` rejects invalid profiles at deserialization
+
+The stdio test
+`tests/protocol_roundtrip.rs::rejects_invalid_profile_during_deserialization`
+had been failing on `main` since v0.1.7.16 (Rust-F#1). The
+test sends a `validate_profile` request with `localPort: "0"`
+and expects an `Outbound::Error` frame with code
+`invalid_request`. Instead the engine returned a *successful*
+`Outbound::Response` carrying
+`ValidationReport { ok: false, reason: "invalid profile" }`.
+
+**Root cause:** the v0.1.7.16 change moved
+`RequestKind::ValidateProfile` to carry an unvalidated
+`RawProfile` so the dispatcher could surface the `ok: false`
+branch of `ValidationReport`. That design fits the HTTP server
+mode (SM-3 — clients want a uniform 200-with-payload), but
+stdio mode treats every "you sent me bad data" as an
+`Outbound::Error`. The test was written for the original
+"fail at serde-deserialize" behavior and never updated.
+
+**Fix:** revert `ValidateProfile`'s wire variant to carry a
+fully-validated `Profile`. Validation runs at serde
+deserialization through Profile's `try_from = "RawProfile"`
+attribute, so an invalid profile fails the outer
+`from_value::<Request>` call upstream and emits an
+`invalid_request` error frame. The dispatcher arm collapses
+to a clean unconditional `Ok(ValidationReport { ok: true,
+reason: None })`.
+
+`server_mode.rs` (HTTP `/naive/validate`) is **unchanged** —
+it still returns 200-with-`ok:false` per SM-3, deliberately
+diverging from stdio. Doc comments on both sides now spell
+out the divergence.
+
+Merged via PR #3.
+
+#### 2. Clippy `-D warnings` baseline restored
+
+A newer Rust toolchain pedantic-lint update added two checks
+that triggered in `core/src/server_mode.rs`:
+
+- `clippy::needless_pass_by_value` on
+  `ApiError::from_json_rejection` — body only used `err` for
+  `tracing::warn!(error = %err, …)` (Display via reference).
+  Switched to `&JsonRejection`; updated the two `map_err`
+  call sites to pass a reference.
+- `clippy::doc_overindented_list_items` on the `naive_validate`
+  doc — the `Err(e) →` bullet's continuation was indented 16
+  spaces past `///`. Reduced to 5 spaces so the continuation
+  aligns with the bullet's text-start (standard markdown rule).
+
+`cargo clippy --release --all-targets -- -D warnings` now
+exits 0.
+
+### Validation
+
+- `cargo test --release` — **130/130 pass** (was: 129/130 with
+  `rejects_invalid_profile_during_deserialization` failing on
+  v2.0.11).
+  - lib unit tests: 104/104
+  - chaos: 18/18
+  - protocol_roundtrip: 6/6 (the previously-failing test is
+    now green)
+  - doc tests: 2/2
+- `cargo clippy --release --all-targets -- -D warnings` — clean.
+- Full release pipeline (`scripts/cut_release.sh 2.0.12`) —
+  green: universal binary built, `--version` reports 2.0.12,
+  bundled naive verified against upstream pin, all four
+  artefacts + sha256 manifest emitted.
+
+### Files changed
+
+- `core/src/protocol.rs` — `RequestKind::ValidateProfile`
+  variant + doc comment.
+- `core/src/client_mode.rs` — dispatcher arm simplified;
+  unused `Profile` import dropped.
+- `core/src/server_mode.rs` — `from_json_rejection` takes
+  `&JsonRejection`; doc list continuation re-indented.
+- `core/Cargo.toml`, `core/Cargo.lock`, project.pbxproj —
+  version 2.0.11 → 2.0.12.
+
+---
+
 ## [2.0.11] — 2026-05-05 (lsregister fix: app no longer shows old version after in-app update)
 
 After updating via the in-app updater (especially from a
