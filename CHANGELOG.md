@@ -9,6 +9,46 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.11] — 2026-05-05 (lsregister fix: app no longer shows old version after in-app update)
+
+After updating via the in-app updater (especially from a
+`.pkg`-installed, root-owned bundle), restarting the app
+from the Dock showed the old version instead of the newly
+installed one.
+
+**Root cause:** the relaunch helper swaps the bundle via an
+`mv`-pair — old → `.old-update`, staged → `$OLD_APP`. The
+inode at `$OLD_APP` changes; LaunchServices may retain a
+stale cache entry for the old inode and serve the cached
+(old) bundle metadata on the next `open` from the Dock or
+Finder, even though the correct new `.app` is on disk.
+
+**Fix:** the relaunch script now calls
+
+```bash
+lsregister -f "$OLD_APP"
+```
+
+immediately after the chown (admin-elevated path) / bundle
+swap (regular path), before the `open`/`launchctl asuser open`.
+`-f` forces LaunchServices to invalidate and rebuild its
+database entry for that exact path, so subsequent opens
+always get the freshly installed bundle.
+
+On the admin-elevated path (`launchctl asuser`) the call
+is routed through `launchctl asuser ${ORIG_UID}` so the
+*user-scoped* LaunchServices database is updated — running
+`lsregister` as root alone would leave the per-user database
+stale. Falls through silently if the binary is absent
+(should never happen on stock macOS; it ships with the OS).
+
+### Files changed
+
+- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` — step 5
+  of the relaunch script.
+
+---
+
 ## [2.0.10] — 2026-05-05 (.pkg installer poka-yoke: blocks when app is running)
 
 A user asked for a poka-yoke (mistake-proof) gate on the
