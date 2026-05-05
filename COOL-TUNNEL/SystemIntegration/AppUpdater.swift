@@ -1026,25 +1026,33 @@ final class AppUpdater {
                 "Cool Tunnel can't write to its install location. Check your folder permissions and try Update again."
             )
         }
-        // AU-9 part 2 (v2.0.3 rework):
+        // AU-9 part 2 (v2.0.5 rework):
         //
-        // Pre-2.0.3 we checked `URLResourceKey.isWritableKey` on
-        // the bundle and threw "bundle is locked" on `false`.
-        // That key reports `false` for a *superset* of the
-        // condition we wanted — true Locked-flag cases land on
-        // `false`, but so do ACL inheritance quirks, mode bits
-        // tweaked by Time Machine restores, and macOS 14+ App-
-        // Management TCC denials. Users without an actually-
-        // locked bundle saw the misleading "uncheck the Locked
-        // checkbox" hint with nothing to uncheck.
+        // History:
+        //   - Pre-2.0.3 used `URLResourceKey.isWritableKey` →
+        //     too coarse, falsed on App-Management TCC etc.
+        //   - 2.0.3 split: `lstat` for chflags + `Darwin.access(W_OK)`
+        //     for everything else. Better diagnostic for the
+        //     Locked-checkbox case, but `access(W_OK)` was STILL
+        //     over-restrictive on macOS 14+: even with the
+        //     Cool Tunnel toggle ON in System Settings → Privacy
+        //     & Security → App Management, `access(W_OK)` can
+        //     keep returning false (TCC permission grants don't
+        //     consistently propagate to access(2) syscalls in
+        //     the running process until restart). The user
+        //     toggled the permission, restarted, retried —
+        //     same false-positive error, no path forward.
         //
-        // Now: probe chflags directly via `lstat` for the
-        // canonical Locked / chflags-immutable case, and fall
-        // back to `access(W_OK)` for everything else with a
-        // different message. The Locked message stays accurate
-        // for the case it's intended to catch; non-Locked
-        // permission denials get a message that actually points
-        // at the underlying cause.
+        // 2.0.5 posture: pre-flight only the conditions we can
+        // prove block the install — chflags-immutable and
+        // root-owned-bundle-via-pkg-installer. Anything else
+        // (ACL inheritance, App Management TCC residue,
+        // exotic mode bits) is now trusted to surface from the
+        // relaunch helper's actual `mv`/`ditto` call, which
+        // logs to `~/Library/Logs/cool-tunnel-relaunch.log`.
+        // The pre-flight stops being a barrier for users whose
+        // bundle is functionally writable but happens to fail
+        // an over-strict `access` heuristic.
         var st = stat()
         let statOK = appURL.path.withCString { lstat($0, &st) } == 0
         if statOK {
@@ -1057,22 +1065,35 @@ final class AppUpdater {
                     "Cool Tunnel's bundle is locked. Right-click the app, choose Get Info, uncheck the Locked checkbox, then try Update again."
                 )
             }
+            // Root-owned bundle (`.pkg` installer puts files in
+            // /Applications under root:wheel). The user can read
+            // and execute the app, but can't write to it without
+            // admin elevation — which the in-app updater can't
+            // request without a privileged helper tool.
+            let myEUID = geteuid()
+            if st.st_uid != myEUID && st.st_uid == 0 {
+                appUpdaterLogger.info(
+                    "bundle is root-owned (likely .pkg-installed): \(appURL.path, privacy: .public)"
+                )
+                throw UpdaterError.message(
+                    "Cool Tunnel was installed via the .pkg installer, so its bundle is owned by root. The in-app updater can't get past that without admin auth. To self-update from here on:\n\n  1. Quit Cool Tunnel.\n  2. Drag /Applications/Cool Tunnel.app to the Trash (you'll be asked for admin password).\n  3. Reinstall by dragging Cool Tunnel from the .dmg or .zip into /Applications.\n\nFuture updates from .dmg/.zip installations will Just Work."
+                )
+            }
+            // Bundle owned by another non-root user. Rare but
+            // happens after a user-rename or unusual transfer.
+            if st.st_uid != myEUID {
+                appUpdaterLogger.info(
+                    "bundle owned by uid \(st.st_uid, privacy: .public), running as \(myEUID, privacy: .public)"
+                )
+                throw UpdaterError.message(
+                    "Cool Tunnel's bundle is owned by another user (UID \(st.st_uid)). The in-app updater can only modify files owned by the user running the app. Either change the bundle's ownership or reinstall as the current user."
+                )
+            }
         }
-        // POSIX / ACL / TCC writability. `access(W_OK)` is
-        // authoritative for "can this EUID write to this path"
-        // on macOS — it consults POSIX mode bits, ACLs, and
-        // BSD flags as a single answer. If THIS fails after
-        // chflags came back clean, the cause is something the
-        // Locked-checkbox hint won't address.
-        let writable = appURL.path.withCString { Darwin.access($0, W_OK) == 0 }
-        if !writable {
-            appUpdaterLogger.info(
-                "bundle not writable (non-chflags reason): \(appURL.path, privacy: .public)"
-            )
-            throw UpdaterError.message(
-                "Cool Tunnel can't modify its own bundle. On macOS 14 and later, open System Settings → Privacy & Security → App Management and turn on Cool Tunnel. If you've already done that — or if you're on an older macOS — move the app to /Applications and try Update again."
-            )
-        }
+        // No `access(W_OK)` pre-flight here — see the long
+        // comment above. The relaunch helper's `mv`/`ditto`
+        // surface real errors (and log them) for any residual
+        // permission case the cheap pre-flight can't classify.
     }
 
     /// Writes the relaunch helper script into `tempRootToClean`

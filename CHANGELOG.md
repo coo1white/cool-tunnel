@@ -9,6 +9,72 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.5] — 2026-05-05 (hotfix bundle: AppUpdater pre-flight + Match System appearance)
+
+Three issues found in user testing of v2.0.4:
+
+### 1. "Match System" appearance stayed locked dark/light
+
+`.preferredColorScheme(nil)` does NOT mean "follow system" the
+way the docs suggest on macOS — once the modifier has been
+applied with a concrete `.light` or `.dark` and then re-applied
+with `nil`, the scheme stays *locked* at whatever was last
+concrete. Users picked Match System and the app stayed in the
+previous mode regardless of their System Settings → Appearance.
+
+**Fix:** new `conditionallyPreferredColorScheme(_:)` view
+helper that simply DOES NOT apply the modifier when the value
+is `nil`. SwiftUI then follows the window's `NSAppearance`
+dynamically, which is what Match System should always have
+done.
+
+### 2. AppUpdater pre-flight kept rejecting writable bundles
+
+The v2.0.3 `Darwin.access(W_OK)` check was over-restrictive on
+macOS 14+ — even after the user toggled Cool Tunnel ON in
+System Settings → Privacy & Security → App Management,
+`access(W_OK)` kept returning `false` (TCC permission grants
+don't consistently propagate to `access(2)` syscalls in the
+running process until the process is restarted, and even then
+sometimes not). The user got the same error after taking every
+step the message recommended.
+
+**Fix:** removed the `access(W_OK)` pre-flight. The pre-flight
+now only catches conditions we can prove block the install:
+- `chflags uchg|schg` (Locked checkbox / immutable flag)
+- root-owned bundle (`.pkg`-installer leaves the app owned by
+  root, blocks user-level `mv`)
+- bundle owned by another non-root user (rare; user-rename
+  edge case)
+
+Anything else (App Management TCC residue, exotic ACLs) is now
+trusted to surface from the relaunch helper's actual `mv`/`ditto`
+call, which logs to `~/Library/Logs/cool-tunnel-relaunch.log`.
+
+### 3. Update-failed banner truncated multi-line guidance
+
+The .pkg-ownership recovery message has multiple steps; the
+existing UI capped the error banner at 3 lines (`lineLimit(3)`)
+and gave only a Dismiss button. The user couldn't read past
+"...installed via the .pkg installer..." before the message
+hit the truncation.
+
+**Fix:** raised `lineLimit` to 12, restructured the banner as
+a `VStack` with a button row, and added a **"Reveal in Finder"**
+button next to Dismiss — one click takes the user to the
+bundle they need to drag to Trash for the manual reinstall.
+
+### Carved out
+
+- Deep-link to System Settings → Privacy & Security → App
+  Management. The error message now mentions the full path
+  textually; a one-click button is a 2.1 nicety.
+- Privileged-helper architecture (Sparkle-style `SMJobBless`
+  for self-update of root-owned bundles) — substantial
+  architecture change; deferred.
+
+---
+
 ## [2.0.4] — 2026-05-05 (hotfix — phantom spinner next to "You're on the latest version")
 
 The Settings → Naive Binary and Settings → Rust Core sections
