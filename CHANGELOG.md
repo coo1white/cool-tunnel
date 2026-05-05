@@ -9,6 +9,89 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.9] — 2026-05-05 (.pkg-installed bundles can now self-update)
+
+A user reported that the in-app Update button on a
+.pkg-installed Cool Tunnel showed:
+
+> Cool Tunnel was installed via the .pkg installer, so its
+> bundle is owned by root. The in-app updater can't get past
+> that without admin auth. To self-update from here on:
+> 1. Quit Cool Tunnel.
+> 2. Drag /Applications/Cool Tunnel.app to the Trash (you'll
+>    be asked for admin password).
+> 3. Reinstall by dragging Cool Tunnel from the .dmg or .zip
+>    into /Applications.
+
+That's a bad UX. The user already cleared one admin-auth gate
+when running the .pkg installer, and what they really want is
+an in-app update path that handles the second gate the same
+way every other privileged macOS operation does — by showing
+the standard system authorisation dialog.
+
+### Auto-update now handles root-owned bundles
+
+`refuseReadOnlyInstall` is renamed to `preflightInstallability`
+and now **returns** `needsAdminElevation: Bool` for the
+root-owned case instead of throwing. When the flag is set,
+`spawnRelaunchHelper` routes the install through:
+
+```
+osascript -e 'do shell script "/bin/bash <wrapper>"
+              with prompt "Cool Tunnel needs to update its
+              application bundle. (It was originally installed
+              via the .pkg installer, so the bundle is owned
+              by root.)"
+              with administrator privileges'
+```
+
+The user sees the standard macOS authorisation sheet (Touch
+ID / password / Apple Watch). After authorisation:
+
+1. The privileged **wrapper** script runs as root, `nohup`s
+   the real relaunch helper into the background, and exits
+   fast — so `osascript` returns to the parent within a
+   second or two instead of blocking 30+ s on the parent-PID
+   wait. If the user cancels the dialog, `osascript` exits
+   non-zero and Cool Tunnel surfaces a friendly "Update
+   cancelled" message and stays running.
+2. The **real helper** (now running as root, detached, parent
+   = launchd) waits for Cool Tunnel to exit, performs the
+   atomic ditto/mv/mv swap exactly like the user-owned path,
+   and then runs two extra steps:
+   - `chown -R ${ORIG_UID}:staff "$OLD_APP"` — restores
+     ownership to the user, so **subsequent updates take the
+     regular no-prompt path**. The .pkg → first-update
+     transition is the only time the password dialog appears.
+   - `launchctl asuser ${ORIG_UID} open "$OLD_APP"` — relaunches
+     the new copy in the user's GUI session, NOT as root.
+     A bare `open` from a root process would launch the new
+     instance as root — which would mangle TCC grants and
+     keychain access.
+3. `ORIG_UID` is captured from `getuid()` in the parent app
+   (Swift) and interpolated into the script. Reading it
+   inside the privileged shell isn't safe — `id -u` returns
+   `0` there.
+
+### What stays the same
+
+- **chflags-locked bundle** (Get Info → Locked, or
+  `chflags uchg`) still throws — admin elevation can't fix
+  that, the user really does need to unlock it.
+- **Bundle owned by another non-root user** still throws —
+  weird state, deserves manual investigation rather than a
+  silent ownership change.
+- **Read-only volume / parent-not-writable for user-owned
+  bundle** still throws.
+- The user-owned (regular .dmg/.zip-installed) path is
+  byte-identical to v2.0.8: no osascript, no extra prompt,
+  just the existing detached `bash` spawn.
+
+The `osascript`'s `with prompt` parameter customises the
+dialog text so the user sees Cool Tunnel-specific copy
+explaining what's about to happen, rather than the generic
+"osascript wants to make changes" string.
+
 ## [2.0.8] — 2026-05-05 (UI compaction + appearance scroll-jump fix)
 
 Two surfaced-by-screenshot fixes shipped together.
