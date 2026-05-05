@@ -386,13 +386,22 @@ public struct SettingsView: View {
                 .disabled(isInspecting || updaterIsBusy)
 
                 Button(updaterButtonTitle) {
-                    // Updater itself has a state-machine guard, but
-                    // we mirror the synchronous-flag pattern for
-                    // consistency and to keep the button label
-                    // ("Update" → "Resolving…") in lock-step with
-                    // the click.
+                    // **v2.0.2:** state-aware action.
+                    //   - `.available(tag, …)` → start the
+                    //     download (existing `runUpdate` flow).
+                    //   - any other state → run the lightweight
+                    //     `checkForUpdates` (HTTP GET only, no
+                    //     binary fetch). Pre-2.0.2 every click
+                    //     fired a download whether the user was
+                    //     already current or not, producing the
+                    //     "Update again" footgun + the cosmetic
+                    //     `-N` upstream patch re-pulls.
                     guard !updaterIsBusy && !isInspecting else { return }
-                    Task { await runUpdate() }
+                    if case .available = updater.state {
+                        Task { await runUpdate() }
+                    } else {
+                        Task { await runCheckForUpdates() }
+                    }
                 }
                 .disabled(updaterIsBusy || isInspecting)
 
@@ -531,26 +540,38 @@ public struct SettingsView: View {
 
     private var updaterIsBusy: Bool {
         switch updater.state {
-        case .resolvingTag, .downloading, .extracting, .merging, .installing: true
+        case .checking, .resolvingTag, .downloading, .extracting, .merging, .installing: true
         default: false
         }
     }
 
+    /// **v2.0.2:** morphing button label, mirrors the AppUpdater
+    /// pattern. Idle / upToDate / failed / succeeded all show
+    /// "Check for Updates" — clicking re-queries upstream.
+    /// `.available(tag)` morphs to "Update to <tag>" so the user
+    /// sees what they're committing to before the download
+    /// fires. In-flight phases show their stage name.
     private var updaterButtonTitle: String {
         switch updater.state {
+        case .checking: "Checking…"
         case .resolvingTag: "Resolving…"
         case .downloading: "Downloading…"
         case .extracting: "Extracting…"
         case .merging: "Merging…"
         case .installing: "Installing…"
-        case .succeeded: "Update again"
-        default: "Update"
+        case .available(let tag, _): "Update to \(tag)"
+        default: "Check for Updates"
         }
     }
 
     private var updaterMessage: String? {
         switch updater.state {
         case .idle: nil
+        case .checking: "Checking upstream NaiveProxy releases…"
+        case .upToDate(let current, _):
+            "You're on the latest version (\(current))."
+        case .available(let tag, _):
+            "Update available: \(tag)."
         case .resolvingTag: "Resolving latest upstream NaiveProxy tag…"
         case .downloading(let p) where p > 0: "Downloading… \(Int(p * 100))%"
         case .downloading: "Downloading arm64 + x86_64 builds…"
@@ -707,6 +728,17 @@ public struct SettingsView: View {
         // the button stays disabled across the post-update probe.
         isInspecting = true
         await runInspectionWork()
+    }
+
+    /// **v2.0.2:** lightweight upstream check — resolves the
+    /// latest tag and compares against the inspected binary's
+    /// `--version`. Fast (one HTTP GET, no binary download).
+    /// Leaves the updater in `.upToDate` (subtitle "You're on
+    /// the latest version (X)") or `.available(tag)` (button
+    /// becomes "Update to <tag>"), depending on the result.
+    private func runCheckForUpdates() async {
+        let currentVersion = inspection?.version ?? ""
+        await updater.checkForUpdates(currentVersion: currentVersion)
     }
 
     @ViewBuilder
@@ -1187,8 +1219,14 @@ public struct SettingsView: View {
                 .disabled(isRustInspecting || rustUpdaterIsBusy)
 
                 Button(rustUpdaterButtonTitle) {
+                    // **v2.0.2:** state-aware action — see naive
+                    // section above for the rationale.
                     guard !rustUpdaterIsBusy && !isRustInspecting else { return }
-                    Task { await runRustUpdate() }
+                    if case .available = rustUpdater.state {
+                        Task { await runRustUpdate() }
+                    } else {
+                        Task { await runRustCheckForUpdates() }
+                    }
                 }
                 .disabled(rustUpdaterIsBusy || isRustInspecting)
 
@@ -1319,24 +1357,32 @@ public struct SettingsView: View {
 
     private var rustUpdaterIsBusy: Bool {
         switch rustUpdater.state {
-        case .resolvingRelease, .downloading, .installing: true
+        case .checking, .resolvingRelease, .downloading, .installing: true
         default: false
         }
     }
 
+    /// **v2.0.2:** see `updaterButtonTitle` for the morphing
+    /// rationale. Same shape for the engine binary.
     private var rustUpdaterButtonTitle: String {
         switch rustUpdater.state {
+        case .checking: "Checking…"
         case .resolvingRelease: "Resolving…"
         case .downloading: "Downloading…"
         case .installing: "Installing…"
-        case .succeeded: "Update again"
-        default: "Update"
+        case .available(let tag, _): "Update to \(tag)"
+        default: "Check for Updates"
         }
     }
 
     private var rustUpdaterMessage: String? {
         switch rustUpdater.state {
         case .idle: nil
+        case .checking: "Checking Cool Tunnel releases…"
+        case .upToDate(let current, _):
+            "You're on the latest version (\(current))."
+        case .available(let tag, _):
+            "Update available: \(tag)."
         case .resolvingRelease: "Resolving latest cool-tunnel release…"
         case .downloading(let p) where p > 0: "Downloading… \(Int(p * 100))%"
         case .downloading: "Downloading universal cool-tunnel-core…"
@@ -1453,6 +1499,13 @@ public struct SettingsView: View {
         // button stays disabled across the post-update probe.
         isRustInspecting = true
         await runRustInspectionWork()
+    }
+
+    /// **v2.0.2:** lightweight upstream check for the Rust core.
+    /// See `runCheckForUpdates` (naive equivalent) for shape.
+    private func runRustCheckForUpdates() async {
+        let currentVersion = rustInspection?.version ?? ""
+        await rustUpdater.checkForUpdates(currentVersion: currentVersion)
     }
 
     private func chooseRustCore() {

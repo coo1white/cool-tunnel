@@ -52,8 +52,18 @@ private let rustCoreUpdaterLogger = Logger.cooltunnel("RustCoreUpdater")
 final class RustCoreUpdater {
 
     /// What the updater is doing right now.
+    /// **v2.0.2:** `checking` / `upToDate` / `available` mirror
+    /// AppUpdater + NaiveUpdater. Pre-2.0.2 the only entry point
+    /// was `update()` which always re-downloaded — clicking
+    /// "Update again" on an already-current engine pulled the
+    /// same bytes again. The check phase surfaces "you're on the
+    /// latest version (X)" when the installed binary's
+    /// `--version` matches the release tag's stripped semver.
     enum State: Sendable, Equatable {
         case idle
+        case checking
+        case upToDate(currentVersion: String, latestTag: String)
+        case available(tag: String, currentVersion: String)
         case resolvingRelease
         case downloading(progress: Double)
         case installing
@@ -65,12 +75,26 @@ final class RustCoreUpdater {
     }
 
     private(set) var state: State = .idle
-    private(set) var lastInstalledTag: String?
+    /// Most recently installed Cool Tunnel release tag for the
+    /// engine binary. Persisted so a relaunch doesn't reset the
+    /// comparison baseline (the engine version is shared with the
+    /// app marketing version, so this is mostly a belt-and-braces
+    /// match against `lastInstalledTag == latestTag`).
+    private(set) var lastInstalledTag: String? {
+        didSet {
+            UserDefaults.standard.set(
+                lastInstalledTag, forKey: Self.lastInstalledTagKey)
+        }
+    }
+
+    private static let lastInstalledTagKey = "RustCoreUpdater.lastInstalledTag"
 
     private let supportDirectory: URL
 
     init(supportDirectory: URL) {
         self.supportDirectory = supportDirectory
+        self.lastInstalledTag = UserDefaults.standard.string(
+            forKey: Self.lastInstalledTagKey)
     }
 
     convenience init(paths: AppSupportPaths) {
@@ -86,17 +110,86 @@ final class RustCoreUpdater {
         )
     }
 
+    /// **v2.0.2:** queries `/releases` for the newest engine
+    /// asset and compares against the running binary's
+    /// `--version`. Leaves the updater in `.upToDate` (no action
+    /// needed) or `.available` (Update button now meaningful).
+    /// Re-running while a previous check OR update is in flight
+    /// is a no-op so the state machine stays monotonic.
+    func checkForUpdates(currentVersion: String) async {
+        switch state {
+        case .checking, .resolvingRelease, .downloading, .installing:
+            return
+        default:
+            break
+        }
+        state = .checking
+        do {
+            let resolved = try await Self.resolveLatestAsset()
+            if Self.tagIsConsideredCurrent(
+                resolved.tag,
+                forBinaryVersion: currentVersion,
+                lastInstalled: lastInstalledTag
+            ) {
+                state = .upToDate(
+                    currentVersion: currentVersion,
+                    latestTag: resolved.tag
+                )
+            } else {
+                state = .available(
+                    tag: resolved.tag, currentVersion: currentVersion)
+            }
+        } catch let UpdaterError.message(reason) {
+            state = .failed(message: reason)
+        } catch {
+            state = .failed(message: error.localizedDescription)
+        }
+    }
+
+    /// See `NaiveUpdater.tagIsConsideredCurrent` for rationale.
+    /// Same shape: exact tag match against the persisted
+    /// `lastInstalledTag` OR semver match against the binary's
+    /// `--version` line (after stripping `v` prefix and `-N`
+    /// suffix from the tag).
+    nonisolated static func tagIsConsideredCurrent(
+        _ tag: String,
+        forBinaryVersion binaryVersion: String,
+        lastInstalled: String?
+    ) -> Bool {
+        if let lastInstalled, lastInstalled == tag {
+            return true
+        }
+        let stripV = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let tagSemver =
+            stripV.components(separatedBy: "-").first ?? stripV
+        // binaryVersion is like "cool-tunnel-core 2.0.1" — last
+        // whitespace token is the bare semver.
+        let binarySemver =
+            binaryVersion
+            .split(whereSeparator: \.isWhitespace).last
+            .map(String.init) ?? binaryVersion
+        return !tagSemver.isEmpty && tagSemver == binarySemver
+    }
+
     /// Kicks off the update. Re-entry while a previous run is
     /// in flight is a no-op so the state machine stays monotonic.
     @discardableResult
     func update() async -> URL? {
         switch state {
-        case .resolvingRelease, .downloading, .installing:
+        case .checking, .resolvingRelease, .downloading, .installing:
             return nil
         default:
             break
         }
 
+        // **v2.0.2 note:** in the Check → Update flow we re-
+        // fetch `/releases` here even though `checkForUpdates`
+        // just did. The full `ResolvedAsset` (download URL +
+        // manifest URL + asset filename) isn't part of the
+        // observable State, so the only cheap way to keep
+        // structural correctness is a fresh resolve. One extra
+        // metadata GET; not the redundant binary download the
+        // user-visible bug was about.
         do {
             state = .resolvingRelease
             let resolved = try await Self.resolveLatestAsset()
@@ -170,7 +263,7 @@ final class RustCoreUpdater {
 
     func reset() {
         switch state {
-        case .resolvingRelease, .downloading, .installing:
+        case .checking, .resolvingRelease, .downloading, .installing:
             return
         default:
             state = .idle
