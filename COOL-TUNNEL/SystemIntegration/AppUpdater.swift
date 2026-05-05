@@ -163,8 +163,8 @@ final class AppUpdater {
         }
         // **Edge-F#11 (v0.1.7.16):** detect multiple installed
         // copies of Cool Tunnel BEFORE the helper writes anything.
-        // If the user has /Applications/Cool tunnel.app AND
-        // ~/Applications/Cool tunnel.app (or any other copy with
+        // If the user has /Applications/Cool Tunnel.app AND
+        // ~/Applications/Cool Tunnel.app (or any other copy with
         // matching bundle ID), the relaunch helper would update
         // whichever was launched but LaunchServices' identifier-
         // resolution may pick a different one on next double-
@@ -695,7 +695,7 @@ final class AppUpdater {
         // walk. `ditto -x -k` (PKZip mode) preserves symlinks
         // inside the archive, including ones that point OUTSIDE
         // the extraction directory. A malicious zip with an
-        // entry like `Cool tunnel.app/Contents/Resources/foo ->
+        // entry like `Cool Tunnel.app/Contents/Resources/foo ->
         // /Users/<you>/.ssh/config` would, after extraction,
         // leave a side-channel symlink Cool Tunnel might later
         // follow. Bundle-id + version + codesign verification
@@ -723,7 +723,7 @@ final class AppUpdater {
     /// inspected entries with `isSymbolicLink == true`. PKZip's
     /// `ditto`-extension preserves hard links — a malicious zip
     /// can plant an entry like
-    /// `Cool tunnel.app/Contents/Resources/foo` as a hard link
+    /// `Cool Tunnel.app/Contents/Resources/foo` as a hard link
     /// to `/etc/passwd` or to a user file (e.g. `~/.ssh/config`).
     /// Post-extraction the bundle reads attacker-chosen bytes
     /// (or, more dangerously, writes to the linked file when
@@ -1201,7 +1201,7 @@ final class AppUpdater {
             #    AU-10: use `open PATH` (path-based bundle launch)
             #    rather than `open -a NAME` (name-based app
             #    lookup). With bundle paths containing spaces
-            #    ("/Applications/Cool tunnel.app") the `-a` form
+            #    ("/Applications/Cool Tunnel.app") the `-a` form
             #    treats "Cool" as the app name and "tunnel.app"
             #    as a document, misfiring the relaunch. The
             #    bareword form opens the bundle directly.

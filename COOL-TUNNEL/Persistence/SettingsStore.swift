@@ -44,7 +44,7 @@ public struct AppSettings: Sendable, Codable, Equatable {
     public var customNaiveBinaryPath: String
     /// Optional override for the `cool-tunnel-core` binary the
     /// orchestrator spawns at boot. Empty = use the bundled engine
-    /// inside `Cool tunnel.app/Contents/Resources/`. Populated by
+    /// inside `Cool Tunnel.app/Contents/Resources/`. Populated by
     /// the Settings → Rust Core → Update flow once
     /// `RustCoreUpdater` finishes installing the downloaded binary
     /// into Application Support; takes effect on the next launch.

@@ -11,6 +11,18 @@
 // shadowed by the Back button's keyboard shortcut while this view
 // is in the responder chain).
 //
+// **Phase 2.0 Settings Contract (v0.2):** the previous draft /
+// commit() pattern is gone. Every settings field binds directly
+// to `orchestrator.settings.X` via `@Bindable`; a single
+// `.onChange(of: bindable.settings)` fires the orchestrator's
+// debounced `persistSettings()` after any field mutation, and
+// `dismiss()` calls `flushSettings()` so any in-flight 250 ms
+// debounce is forced to disk before the panel closes. Net
+// effect: storage and UI state are now the same value, never a
+// snapshot to be reconciled. There is no longer a way to "lose"
+// edits by skipping a Done button — Cmd+W, Back, or even the app
+// crashing flush whatever the user typed.
+//
 // Sections, top to bottom:
 //
 //   - Direct Domains
@@ -21,7 +33,9 @@
 //   - About        (app version footer)
 
 import AppKit
+import ServiceManagement
 import SwiftUI
+import os
 
 /// Inline Settings panel — direct-domains list, This-Mac hardware
 /// readout, Naive Binary section (Test + Update + OK/NG verdict),
@@ -36,16 +50,20 @@ public struct SettingsView: View {
 
     /// Mode-aware alpha for the green/red/blue/red pill
     /// backgrounds across the verdict + updater rows. v0.1.7.7
-    /// shipped with a flat 0.10 that vanished on dark; this
-    /// reaches `CTSurface.statusPillAlpha` so light stays
-    /// 0.10 and dark gets 0.22.
-    private var pillAlpha: Double { CTSurface.statusPillAlpha(colorScheme) }
+    /// shipped with a flat 0.10 that vanished on dark; the
+    /// dark variant ramps to 0.22 so the pill stays legible
+    /// against `.windowBackground` material.
+    ///
+    /// **Phase 2.4 (v0.2):** previously this delegated to
+    /// `CTSurface.statusPillAlpha` from MalteseTheme. The
+    /// theme module is being retired; the rule is so simple
+    /// it doesn't warrant a separate type.
+    private var pillAlpha: Double { colorScheme == .dark ? 0.22 : 0.10 }
 
     /// Two-way binding to ContentView's `isShowingSettings`. Flipping
     /// to `false` swaps the panel back out for the main view.
     @Binding public var isShowing: Bool
 
-    @State private var draft: AppSettings = .default
     @State private var newDomain: String = ""
 
     // -- Naive Binary state
@@ -79,10 +97,19 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
+        // **Phase 2.0 Settings Contract (v0.2):** binding the
+        // orchestrator with `@Bindable` lets every field write
+        // directly to `orchestrator.settings.X`. The single
+        // `.onChange` at the end of the Form auto-persists any
+        // change through the orchestrator's debounced
+        // `persistSettings()`. No draft, no commit, no
+        // reconciliation step.
+        @Bindable var bindable = orchestrator
+
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Button {
-                    commit()
+                    dismiss()
                 } label: {
                     Label("Back", systemImage: "chevron.left")
                 }
@@ -99,7 +126,7 @@ public struct SettingsView: View {
 
                 Spacer()
 
-                Button("Done") { commit() }
+                Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
 
@@ -120,7 +147,7 @@ public struct SettingsView: View {
                         Button("Add") { addDomain() }
                             .disabled(newDomain.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
-                    if draft.directDomains.isEmpty {
+                    if orchestrator.settings.directDomains.isEmpty {
                         Text("No direct domains. All traffic will be proxied.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -128,7 +155,8 @@ public struct SettingsView: View {
                         domainList
                     }
                     Button("Restore defaults") {
-                        draft.directDomains = AppSettings.defaultDirectDomains
+                        orchestrator.settings.directDomains =
+                            AppSettings.defaultDirectDomains
                     }
                 }
 
@@ -180,7 +208,11 @@ public struct SettingsView: View {
                 }
 
                 Section("Behaviour") {
-                    Toggle("Skip proxy mode confirmations", isOn: $draft.skipProxyConfirmations)
+                    LoginItemRow()
+                    Toggle(
+                        "Skip proxy mode confirmations",
+                        isOn: $bindable.settings.skipProxyConfirmations
+                    )
                 }
 
                 Section("About") {
@@ -188,6 +220,29 @@ public struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            // **Phase 2.0 Settings Contract (v0.2):** single
+            // auto-persist hook for the entire form. Any field
+            // change anywhere in `orchestrator.settings`
+            // re-fires `persistSettings()`, which is debounced
+            // 250 ms inside the orchestrator — a typed paragraph
+            // collapses to one disk write, and dismissing the
+            // panel calls `flushSettings()` to force-flush the
+            // last edit. Replaces the old `draft` indirection +
+            // `commit()` step.
+            .onChange(of: bindable.settings) { _, _ in
+                orchestrator.persistSettings()
+            }
+            // **Phase 2.0 Settings Contract (v0.2):** when the
+            // custom naive-binary path changes (Update / Choose…
+            // / Reset), the orchestrator must re-resolve its
+            // cached descriptor — otherwise the Settings verdict
+            // pill keeps showing the previous binary's verdict.
+            // Previously triggered explicitly inside `commit()`;
+            // now wired off the same observable that drives
+            // persistence.
+            .onChange(of: bindable.settings.customNaiveBinaryPath) { _, _ in
+                Task { await orchestrator.refreshNaiveDescriptor() }
+            }
         }
         .padding(16)
         .background {
@@ -198,15 +253,24 @@ public struct SettingsView: View {
             // visible region. The Settings panel reads as a
             // full-window slide-in, so a flat background is what
             // the layout actually wants.
+            // **Phase 2.4 (v0.2):** swapped from
+            // `CTPalette.platinum.opacity(0.6)` (custom token)
+            // to `Color(nsColor: .windowBackgroundColor)` so
+            // the inline panel reads as the same material as
+            // the rest of macOS Settings panes — Light, Dark,
+            // and Increased Contrast all resolved by AppKit.
             Rectangle()
-                .fill(CTPalette.platinum.opacity(0.6))
+                .fill(Color(nsColor: .windowBackgroundColor))
                 .ignoresSafeArea()
         }
         .onAppear {
-            draft = orchestrator.settings
-            // Mirror the orchestrator's cached descriptor so the panel
-            // shows real data the first time it opens, before the user
-            // touches Test.
+            // **Phase 2.0 Settings Contract (v0.2):** the
+            // previous `draft = orchestrator.settings` snapshot
+            // is gone — fields now bind directly to the
+            // orchestrator. Only the binary-inspection cache
+            // needs hydration on appear so the verdict pill
+            // shows the orchestrator's last result before the
+            // user clicks Test.
             inspection = orchestrator.activeNaiveDescriptor
         }
         .task {
@@ -253,12 +317,12 @@ public struct SettingsView: View {
                     // Curated palette colour, not the system tint —
                     // the latter renders as Apple aqua and clashes
                     // with the System 7-leaning palette.
-                    .foregroundStyle(CTPalette.macBlue)
+                    .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(host.architecture.displayName)
                         .font(.body.weight(.semibold))
                     Text("(\(host.architecture.machOArchName))")
-                        .font(CTTypography.monoSmall)
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -282,7 +346,7 @@ public struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
             Text(value)
-                .font(monospaced ? CTTypography.monoSmall : .caption)
+                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -513,7 +577,7 @@ public struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .leading)
             Text(value)
-                .font(monospaced ? CTTypography.monoSmall : .caption)
+                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -610,11 +674,11 @@ public struct SettingsView: View {
 
         let url: URL
         let origin: NaiveBinaryDescriptor.Origin
-        if draft.customNaiveBinaryPath.isEmpty {
+        if orchestrator.settings.customNaiveBinaryPath.isEmpty {
             url = NaiveBinaryResolver.bundledURL()
             origin = .bundled
         } else {
-            url = URL(fileURLWithPath: draft.customNaiveBinaryPath)
+            url = URL(fileURLWithPath: orchestrator.settings.customNaiveBinaryPath)
             origin = .userSupplied
         }
         do {
@@ -638,7 +702,7 @@ public struct SettingsView: View {
         guard let installedURL = await updater.update() else {
             return  // Failure is surfaced via `updater.state` already.
         }
-        draft.customNaiveBinaryPath = installedURL.path
+        orchestrator.settings.customNaiveBinaryPath = installedURL.path
         // Owned re-inspection — set the flag synchronously here so
         // the button stays disabled across the post-update probe.
         isInspecting = true
@@ -649,12 +713,12 @@ public struct SettingsView: View {
     private var naiveBinaryPicker: some View {
         HStack(alignment: .firstTextBaseline) {
             Group {
-                if draft.customNaiveBinaryPath.isEmpty {
+                if orchestrator.settings.customNaiveBinaryPath.isEmpty {
                     Text("Bundled (default)")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(draft.customNaiveBinaryPath)
-                        .font(CTTypography.mono)
+                    Text(orchestrator.settings.customNaiveBinaryPath)
+                        .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -667,10 +731,10 @@ public struct SettingsView: View {
             Button("Choose…") { chooseNaiveBinary() }
                 .disabled(isInspecting || updaterIsBusy)
 
-            if !draft.customNaiveBinaryPath.isEmpty {
+            if !orchestrator.settings.customNaiveBinaryPath.isEmpty {
                 Button("Reset") {
                     guard !isInspecting && !updaterIsBusy else { return }
-                    draft.customNaiveBinaryPath = ""
+                    orchestrator.settings.customNaiveBinaryPath = ""
                     binaryPickerError = nil
                 }
                 .disabled(isInspecting || updaterIsBusy)
@@ -681,7 +745,7 @@ public struct SettingsView: View {
     // MARK: - Appearance picker (new in v0.1.7.7)
 
     /// Three-way segmented picker: Match System / Light / Dark.
-    /// Bound to `draft.appearanceMode`; the change is published
+    /// Bound to `orchestrator.settings.appearanceMode`; the change is published
     /// to the orchestrator via the `.onChange` below so the
     /// chosen scheme applies *immediately* (not only on Done).
     /// The dynamic `CTPalette` colours pick up the new scheme
@@ -689,8 +753,15 @@ public struct SettingsView: View {
     /// `preferredColorScheme`.
     @ViewBuilder
     private var appearancePicker: some View {
+        // **Phase 2.0 Settings Contract (v0.2):** @Bindable
+        // declared inside the computed view so the Picker can
+        // bind directly to `orchestrator.settings.appearanceMode`.
+        // Persistence is wired off the form-level `.onChange` in
+        // `body`, so this picker no longer needs its own
+        // imperative `.onChange { persistSettings() }` step.
+        @Bindable var bindable = orchestrator
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Appearance", selection: $draft.appearanceMode) {
+            Picker("Appearance", selection: $bindable.settings.appearanceMode) {
                 ForEach(AppearanceMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
@@ -703,15 +774,15 @@ public struct SettingsView: View {
             // segment is selected. The value name pairs the
             // picker readout with the same string the visible
             // subtitle uses.
-            .accessibilityValue(draft.appearanceMode.displayName)
-            .onChange(of: draft.appearanceMode) { _, newValue in
-                // Push to the orchestrator immediately so the
-                // app re-renders with the new scheme. The full
-                // settings blob still flushes on Done via
-                // `commit()`; this is the live-preview path.
-                orchestrator.settings.appearanceMode = newValue
-                orchestrator.persistSettings()
-            }
+            .accessibilityValue(orchestrator.settings.appearanceMode.displayName)
+            // **Phase 2.0 Settings Contract (v0.2):** the
+            // previous `.onChange` here mirrored the picker's
+            // value into `orchestrator.settings` and called
+            // `persistSettings()` — both are now handled by
+            // the form-level `.onChange(of: bindable.settings)`
+            // in `body`. Removed to avoid double-persisting
+            // and to keep one source of truth for the
+            // settings-write contract.
             Text(appearanceSubtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -719,7 +790,7 @@ public struct SettingsView: View {
     }
 
     private var appearanceSubtitle: String {
-        switch draft.appearanceMode {
+        switch orchestrator.settings.appearanceMode {
         case .system:
             "Follows the macOS appearance setting (System Settings → Appearance)."
         case .light:
@@ -749,7 +820,7 @@ public struct SettingsView: View {
             HStack(alignment: .firstTextBaseline) {
                 Image(systemName: "shippingbox.fill")
                     .font(.title3)
-                    .foregroundStyle(CTPalette.macBlue)
+                    .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Cool Tunnel \(appVersion.marketingVersion)")
                         .font(.body.weight(.semibold))
@@ -857,7 +928,7 @@ public struct SettingsView: View {
         case .available(let release):
             HStack(spacing: 6) {
                 Image(systemName: "doc.text.fill")
-                    .foregroundStyle(CTPalette.macBlue)
+                    .foregroundStyle(Color.accentColor)
                 // Self-describing single Link — VoiceOver hears
                 // one element ("View release notes for v0.1.7.9,
                 // link") rather than two disconnected ones.
@@ -877,7 +948,7 @@ public struct SettingsView: View {
             .padding(.vertical, 5)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(CTPalette.macBlue.opacity(pillAlpha))
+                    .fill(Color.accentColor.opacity(pillAlpha))
             }
         case .failed(let message):
             // `alignment: .top` so on multi-line messages the
@@ -919,32 +990,37 @@ public struct SettingsView: View {
     // MARK: - Version footer
 
     /// "About" row at the bottom of the Settings sheet — version +
-    /// build number + a one-line aesthetic credit so the user can
-    /// quote the exact build in any support thread.
+    /// build number + Acknowledgements button so the user can
+    /// quote the exact build in any support thread and reach the
+    /// upstream license attribution required by the bundled
+    /// dependencies' license terms.
     private var versionFooter: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(appVersion.displayString)
                     .font(.callout.weight(.medium))
-                // Footer text reflects the actual current state:
-                // Apache 2.0 licence, classic Macintosh theme (the
-                // codebase used to be the "Maltese" theme before
-                // the v0.1.5.7 platinum retune), and the real
-                // deployment-target floor of macOS 14 (was
-                // claiming "12+" since before the floor was raised
-                // for performance work).
-                Text("Apache 2.0 · Classic Mac theme · macOS 14+")
+                Text("Apache 2.0 · macOS 14+")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Image(systemName: "pawprint.fill")
-                // Use the curated Mac blue token, not the system
-                // tint which renders as Apple aqua and clashes
-                // with the System 7-leaning palette.
-                .foregroundStyle(CTPalette.macBlue)
+            Button("Acknowledgements…") {
+                openWindow(id: WindowID.acknowledgements)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Show acknowledgements")
+            .accessibilityHint("Opens the upstream open-source attribution and licenses.")
         }
     }
+
+    /// **Phase 2.4 (v0.2):** SwiftUI `openWindow` action used by
+    /// the Acknowledgements button. The scene is declared as
+    /// `Window(_:id:)` (single-instance) in `CoolTunnelApp.swift`,
+    /// so a second click brings the existing Acknowledgements
+    /// window forward instead of stacking duplicates.
+    @Environment(\.openWindow) private var openWindow
 
     private var domainList: some View {
         // Cap the inline list height so very long direct-domain
@@ -955,14 +1031,14 @@ public struct SettingsView: View {
         // section structure stable.
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(draft.directDomains, id: \.self) { domain in
+                ForEach(orchestrator.settings.directDomains, id: \.self) { domain in
                     HStack {
                         Text(domain)
-                            .font(CTTypography.mono)
+                            .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
                         Spacer()
                         Button(role: .destructive) {
-                            draft.directDomains.removeAll { $0 == domain }
+                            orchestrator.settings.directDomains.removeAll { $0 == domain }
                         } label: {
                             Image(systemName: "minus.circle")
                                 // Pad to a 24×24 hit target so
@@ -990,8 +1066,8 @@ public struct SettingsView: View {
             newDomain
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        guard !trimmed.isEmpty, !draft.directDomains.contains(trimmed) else { return }
-        draft.directDomains.append(trimmed)
+        guard !trimmed.isEmpty, !orchestrator.settings.directDomains.contains(trimmed) else { return }
+        orchestrator.settings.directDomains.append(trimmed)
         newDomain = ""
     }
 
@@ -1006,8 +1082,8 @@ public struct SettingsView: View {
         panel.message = "The selected file must be a code-signed Mach-O executable."
         panel.prompt = "Use"
         panel.treatsFilePackagesAsDirectories = true
-        if !draft.customNaiveBinaryPath.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: draft.customNaiveBinaryPath)
+        if !orchestrator.settings.customNaiveBinaryPath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: orchestrator.settings.customNaiveBinaryPath)
                 .deletingLastPathComponent()
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -1028,7 +1104,7 @@ public struct SettingsView: View {
                 binaryPickerError = "Rejected: code signature is invalid or missing."
                 return
             }
-            draft.customNaiveBinaryPath = url.path
+            orchestrator.settings.customNaiveBinaryPath = url.path
             binaryPickerError = nil
         } catch let error as NaiveResolverError {
             binaryPickerError = "Rejected: \(error.localizedDescription)"
@@ -1039,10 +1115,16 @@ public struct SettingsView: View {
         }
     }
 
-    private func commit() {
-        orchestrator.settings = draft
-        orchestrator.persistSettings()
-        Task { await orchestrator.refreshNaiveDescriptor() }
+    /// **Phase 2.0 Settings Contract (v0.2):** replaces the
+    /// previous `commit()`. Fields bind directly to the
+    /// orchestrator, so there is no draft to flush — but we do
+    /// force the debounced `persistSettings()` window to flush
+    /// synchronously via `flushSettings()` so any in-flight
+    /// 250 ms write hits disk before the panel dismisses.
+    /// This guarantees that `Cmd+W` followed immediately by
+    /// `Cmd+Q` cannot drop the user's last keystroke.
+    private func dismiss() {
+        orchestrator.flushSettings()
         // Inline panel: flip the binding instead of calling
         // `dismiss()`. The parent view animates the swap.
         isShowing = false
@@ -1056,12 +1138,12 @@ public struct SettingsView: View {
     private var rustCorePicker: some View {
         HStack(alignment: .firstTextBaseline) {
             Group {
-                if draft.customRustCorePath.isEmpty {
+                if orchestrator.settings.customRustCorePath.isEmpty {
                     Text("Bundled (default)")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(draft.customRustCorePath)
-                        .font(CTTypography.mono)
+                    Text(orchestrator.settings.customRustCorePath)
+                        .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -1075,10 +1157,10 @@ public struct SettingsView: View {
             Button("Choose…") { chooseRustCore() }
                 .disabled(isRustInspecting || rustUpdaterIsBusy)
 
-            if !draft.customRustCorePath.isEmpty {
+            if !orchestrator.settings.customRustCorePath.isEmpty {
                 Button("Reset") {
                     guard !isRustInspecting && !rustUpdaterIsBusy else { return }
-                    draft.customRustCorePath = ""
+                    orchestrator.settings.customRustCorePath = ""
                     rustPickerError = nil
                     isRustInspecting = true
                     Task { await runRustInspectionWork() }
@@ -1345,11 +1427,11 @@ public struct SettingsView: View {
         defer { isRustInspecting = false }
         let url: URL
         let origin: RustCoreDescriptor.Origin
-        if draft.customRustCorePath.isEmpty {
+        if orchestrator.settings.customRustCorePath.isEmpty {
             url = RustCoreResolver.bundledURL()
             origin = .bundled
         } else {
-            url = URL(fileURLWithPath: draft.customRustCorePath)
+            url = URL(fileURLWithPath: orchestrator.settings.customRustCorePath)
             origin = .userSupplied
         }
         do {
@@ -1366,7 +1448,7 @@ public struct SettingsView: View {
 
     private func runRustUpdate() async {
         guard let installedURL = await rustUpdater.update() else { return }
-        draft.customRustCorePath = installedURL.path
+        orchestrator.settings.customRustCorePath = installedURL.path
         // Owned re-inspection: set the flag synchronously so the
         // button stays disabled across the post-update probe.
         isRustInspecting = true
@@ -1382,8 +1464,8 @@ public struct SettingsView: View {
         panel.message = "The selected file must be a code-signed Mach-O executable."
         panel.prompt = "Use"
         panel.treatsFilePackagesAsDirectories = true
-        if !draft.customRustCorePath.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: draft.customRustCorePath)
+        if !orchestrator.settings.customRustCorePath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: orchestrator.settings.customRustCorePath)
                 .deletingLastPathComponent()
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -1400,7 +1482,7 @@ public struct SettingsView: View {
                 rustPickerError = "Rejected: code signature is invalid or missing."
                 return
             }
-            draft.customRustCorePath = url.path
+            orchestrator.settings.customRustCorePath = url.path
             rustPickerError = nil
         } catch let error as RustCoreResolverError {
             rustPickerError = "Rejected: \(error.localizedDescription)"
@@ -1411,3 +1493,98 @@ public struct SettingsView: View {
         }
     }
 }
+
+// MARK: - Login Item row
+
+/// **Phase 2.3 (v0.2):** "Open at Login" toggle backed by
+/// `SMAppService.mainApp`. Renders three states cleanly:
+///
+///   1. **Off** — toggle is off, no subtitle. Default.
+///   2. **On** — `register()` succeeded, status `.enabled`. No
+///      subtitle.
+///   3. **Pending approval** — `register()` succeeded but the
+///      user hasn't yet approved the launch agent in System
+///      Settings → General → Login Items. Subtitle deep-links
+///      to that pane via `x-apple.systempreferences:`.
+///
+/// The Toggle's binding is computed: `get` reads the system's
+/// authoritative `SMAppService.Status`; `set` calls register /
+/// unregister and re-reads the status. The view never holds a
+/// stale "what we *think* the system thinks" boolean — the
+/// system is the source of truth on every read, which prevents
+/// the off-by-one feedback loops a naïve `@State var enabled`
+/// + `.onChange` produces when the system rejects the call.
+@MainActor
+private struct LoginItemRow: View {
+    @State private var status: SMAppService.Status = .notRegistered
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Open at Login", isOn: toggleBinding)
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityElement(children: .combine)
+            } else if status == .requiresApproval {
+                approvalHint
+            }
+        }
+        .onAppear {
+            status = SMAppService.mainApp.status
+        }
+    }
+
+    private var toggleBinding: Binding<Bool> {
+        Binding(
+            get: { status == .enabled || status == .requiresApproval },
+            set: { newValue in
+                do {
+                    if newValue {
+                        try SMAppService.mainApp.register()
+                    } else {
+                        try SMAppService.mainApp.unregister()
+                    }
+                    errorMessage = nil
+                } catch {
+                    errorMessage = error.localizedDescription
+                    Self.logger.error(
+                        "SMAppService \(newValue ? "register" : "unregister", privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                // Re-read system truth regardless of throw — the
+                // system is the source of state, not our local flag.
+                status = SMAppService.mainApp.status
+            }
+        )
+    }
+
+    /// Inline subtitle shown when the launch agent registered
+    /// but is awaiting the user's approval click in System
+    /// Settings → General → Login Items. macOS 13+ requires
+    /// this approval gesture for new login items.
+    private var approvalHint: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+            Text("Pending approval —")
+                .foregroundStyle(.secondary)
+            Button("open Login Items") {
+                let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!
+                if !NSWorkspace.shared.open(url) {
+                    // Fallback to System Settings root.
+                    _ = NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:")!)
+                }
+            }
+            .buttonStyle(.link)
+        }
+        .font(.caption)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Pending approval. Click to open Login Items in System Settings.")
+    }
+
+    private static let logger = Logger.cooltunnel("UI.LoginItem")
+}
+
