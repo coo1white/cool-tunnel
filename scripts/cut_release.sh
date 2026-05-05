@@ -95,8 +95,13 @@ if [[ ! -d "${APP}" ]]; then
     die "expected .app at ${APP} but it doesn't exist" 4
 fi
 
-# Quick smoke check — bundled rust core --version matches request
-BUNDLED_RUST_VERSION="$(${APP}/Contents/Resources/cool-tunnel-core --version 2>/dev/null | head -1 | awk '{print $NF}')"
+# Quick smoke check — bundled rust core --version matches request.
+# The .app path contains a space ("Cool Tunnel.app"), so every
+# reference to ${APP} **must** be double-quoted. v2.0.6's first
+# cut_release.sh forgot to quote on this line and exited 127
+# ("command not found") right after a successful build, because
+# bash word-split the path. Fixed in v2.0.7.
+BUNDLED_RUST_VERSION="$("${APP}/Contents/Resources/cool-tunnel-core" --version 2>/dev/null | head -1 | awk '{print $NF}')"
 if [[ "${BUNDLED_RUST_VERSION}" != "${VERSION}" ]]; then
     die "freshly-built bundled cool-tunnel-core self-reports '${BUNDLED_RUST_VERSION}', expected '${VERSION}'" 4
 fi
