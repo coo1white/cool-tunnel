@@ -117,6 +117,12 @@ fi
 if [[ -n "${SWIFT_FORMAT}" ]]; then
     log "${SWIFT_FORMAT} lint --strict (recursive on COOL-TUNNEL/)"
     # `find -print0` + `xargs -0` so paths with spaces don't split.
+    # `${SWIFT_FORMAT}` is intentionally unquoted: it holds either
+    # `swift-format` (one token) or `swift format` (two tokens), and
+    # the two-token branch needs the word-split to land as separate
+    # argv entries to `xargs`. Quoting would call `swift format ...`
+    # as the single binary `swift format`, which doesn't exist.
+    # shellcheck disable=SC2086
     if find "${REPO_ROOT}/COOL-TUNNEL" -name '*.swift' -print0 \
         | xargs -0 ${SWIFT_FORMAT} lint --strict; then
         :

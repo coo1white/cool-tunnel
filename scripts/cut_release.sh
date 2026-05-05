@@ -145,6 +145,7 @@ fi
 # constrained (scheme name + fixed-alphabet hash, no spaces); BSD
 # `find` lacks `-printf` for sort-by-mtime, so `ls -td | head -1`
 # is the safe pragmatic choice on macOS. (Audit ref: F2-1.)
+# shellcheck disable=SC2012  # see comment above; constrained DerivedData paths.
 DD="$(ls -td "${HOME}/Library/Developer/Xcode/DerivedData/COOL-TUNNEL-"* 2>/dev/null | head -1)"
 APP="${DD}/Build/Products/Release/Cool Tunnel.app"
 if [[ ! -d "${APP}" ]]; then
