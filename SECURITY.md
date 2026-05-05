@@ -82,9 +82,12 @@ into production.
   requires manual verification per release. The redirect
   guard + 100 MB size cap close most of the threat surface,
   but a CDN-internal byte tamper between upstream's publish
-  and the user's click would not be caught. **Targeted for
-  v0.1.8**: a Cool Tunnel-side manifest of "trusted Naive
-  versions and hashes" that the in-app updater pins against.
+  and the user's click would not be caught. **Targeted for a
+  future v2.x release**: a Cool Tunnel-side manifest of
+  "trusted Naive versions and hashes" that the in-app updater
+  pins against. (As of v2.0.2, NaiveUpdater compares against
+  `lastInstalledTag` to avoid redundant downloads, but doesn't
+  yet SHA-pin the binary itself.)
 
   As of **v0.1.7.18**, the **Rust Core (`cool-tunnel-core`)
   binary IS SHA-pinned**: the in-app updater downloads the
