@@ -332,6 +332,23 @@ public final class TunnelOrchestrator {
     /// shows the new value — confusing.
     private var activeProfileID: String?
 
+    /// **UX-F#6 (v2.0.14):** dirty flag set by the
+    /// `selectedProfile.set` UX-F#3 detection path. While `true`
+    /// the running naive instance's config is stale; a mode
+    /// switch must therefore go through the full
+    /// stop-engine / start-engine path so naive picks up the
+    /// edits. Cleared on every successful `startCore` —
+    /// re-launching the engine resyncs naive to the current
+    /// profile, so subsequent mode switches can take the
+    /// no-restart hot-swap path again.
+    ///
+    /// The flag is intentionally separate from `lastError` (which
+    /// the same setter writes a banner into) — `lastError` is a
+    /// user-facing surface that may be cleared independently
+    /// (e.g. dismissing a banner) without affecting the
+    /// orchestrator's internal "engine config is stale" truth.
+    private var activeProfileEdited: Bool = false
+
     // MARK: - Profile management
 
     public var selectedProfile: Profile? {
@@ -357,6 +374,13 @@ public final class TunnelOrchestrator {
                 if let prior = prior, prior != updated {
                     lastError =
                         "Profile edits applied — click Stop, then a mode chip to use them. The running connection is still on the old config."
+                    // **UX-F#6 (v2.0.14):** mark the running
+                    // engine's config as stale so subsequent
+                    // `switchMode` calls take the full restart
+                    // path (which picks up the edits) instead of
+                    // the no-restart hot-swap path (which would
+                    // keep naive on the old config).
+                    activeProfileEdited = true
                 }
             }
             if let index = profiles.firstIndex(where: { $0.id == updated.id }) {
@@ -450,6 +474,27 @@ public final class TunnelOrchestrator {
     /// bring-up the engine is genuinely dead, so we restore truthful
     /// state (`isRunning = false`, `activeMode = .stopped`) before
     /// re-throwing — the UI must not lie about a non-running engine.
+    ///
+    /// **UX-F#6 (v2.0.14):** skip the engine restart entirely when
+    /// the active profile is unchanged. Smart / Global / Local modes
+    /// only differ in **system proxy configuration** (PAC vs SOCKS5
+    /// vs none) and, for Smart, **PAC file regeneration**. The naive
+    /// process binds to 127.0.0.1:port with the same config in all
+    /// three modes, so killing and re-spawning it on every mode
+    /// switch is unnecessary work that also drops in-flight TCP
+    /// connections (apps see ~200-500 ms of "connection refused"
+    /// during the gap). The new no-restart path reapplies the
+    /// system-proxy + PAC bits and updates `activeMode` in a single
+    /// observable transition, with naive untouched. Falls through to
+    /// the full restart path if:
+    ///
+    ///   - the active profile has been edited (`activeProfileEdited`)
+    ///     — naive must restart to pick up the new config;
+    ///   - the user switched the *selected* profile to a different one
+    ///     (`selectedProfileID != activeProfileID`) — same reasoning;
+    ///   - `applyModeWithoutRestart` itself throws — partial
+    ///     `proxyController` state is recovered by stopQuiet's
+    ///     `disableAll()`, then startCore writes the correct config.
     public func switchMode(to newMode: ProxyMode) async throws {
         // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
         // rapid second click while a prior switchMode is
@@ -476,6 +521,34 @@ public final class TunnelOrchestrator {
             // user experiences as one tap. Quiet-stop here and let the
             // post-start switch line do the talking.
             let from = activeMode
+
+            // **UX-F#6 (v2.0.14):** try the no-restart path first.
+            // Gating: same-profile + not-edited + currently-running.
+            // Anything else falls through to the full restart below
+            // (which preserves the old behaviour exactly).
+            let canHotSwapWithoutRestart =
+                !activeProfileEdited
+                && selectedProfileID == activeProfileID
+                && activeMode != .stopped
+            if canHotSwapWithoutRestart {
+                do {
+                    try await applyModeWithoutRestart(newMode)
+                    appendInfo("switched from \(from.title) to \(newMode.title)")
+                    return
+                } catch {
+                    // No-restart attempt failed — `proxyController`
+                    // state may be partial (e.g. enableSmartPAC
+                    // succeeded for some network services but not
+                    // others before throwing). Fall through to the
+                    // full restart path; stopQuiet's `disableAll()`
+                    // will reset proxyController to a clean state
+                    // before startCore reapplies the correct config.
+                    Self.hotSwapLogger.notice(
+                        "no-restart switch to \(newMode.rawValue, privacy: .public) failed (\(error.localizedDescription, privacy: .public)); falling back to full engine restart"
+                    )
+                }
+            }
+
             // UX-F#5: skip the published `isRunning = false /
             // activeMode = .stopped` flips in stopQuiet. The user's
             // intent is "still running, just under a different mode",
@@ -499,6 +572,93 @@ public final class TunnelOrchestrator {
             return
         }
         try await start(mode: newMode)
+    }
+
+    /// **UX-F#6 (v2.0.14):** hot-swap mode without restarting the
+    /// engine. Reapplies the system-proxy configuration for
+    /// `newMode` and, when switching *to* Smart, regenerates the
+    /// PAC file. The running naive process is left untouched —
+    /// `127.0.0.1:port` keeps accepting connections throughout, so
+    /// long-lived TCP sessions don't drop and apps connecting
+    /// during the swap don't get refused.
+    ///
+    /// Order of operations:
+    ///
+    ///   1. Regenerate PAC (only if `newMode == .smart`). Done
+    ///      before touching `proxyController` so a PAC-gen failure
+    ///      surfaces before any system-proxy change has happened.
+    ///   2. Apply the system-proxy configuration for `newMode`
+    ///      (the same `enableSmartPAC` / `enableGlobalSOCKS` /
+    ///      `disableAll` calls `startCore` makes at the equivalent
+    ///      step in the full path).
+    ///   3. Update the recovery sentinel (`ProxyActiveFlag`) so a
+    ///      hard crash before the next clean stop is recoverable —
+    ///      same invariant as the full path.
+    ///   4. Publish `activeMode = newMode` as a single observable
+    ///      transition. The picker and any other UI bound to
+    ///      `activeMode` re-renders once.
+    ///
+    /// Throws on any failure. The caller (`switchMode`) handles
+    /// the error by falling through to the full engine restart —
+    /// see the `do/catch` around the call site for the rationale.
+    private func applyModeWithoutRestart(_ newMode: ProxyMode) async throws {
+        // Mirror `startCore`'s optimistic banner clear (line ~582):
+        // a successful mode switch should not leave the user
+        // staring at a stale failure banner. If the body below
+        // throws, `switchMode` falls through to `startCore`, which
+        // also clears `lastError` at its own top — so either path
+        // ends with a coherent banner state.
+        lastError = nil
+
+        guard let profile = selectedProfile else {
+            throw OrchestratorError.noProfile
+        }
+        let port = try parsePort(profile.localPort)
+
+        if newMode == .smart {
+            // The set of direct-domains may have changed in
+            // `settings` since the last start; regenerate the PAC
+            // every time we hot-swap into Smart so the routing
+            // table reflects the user's current intent. (The full
+            // `startCore` path does the same — this is parity, not
+            // a new policy.)
+            let pacResponse = try await core.send(
+                .generatePac(directDomains: settings.directDomains, port: port)
+            )
+            guard case .pac(let pacJS) = pacResponse else {
+                throw OrchestratorError.unexpectedResponse
+            }
+            try RestrictedFile.write(pacJS, to: paths.pacFile)
+        }
+
+        switch newMode {
+        case .smart:
+            try await proxyController.enableSmartPAC(pacURL: paths.pacFile)
+            ProxyActiveFlag.write(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory),
+                mode: "smart"
+            )
+        case .global:
+            try await proxyController.enableGlobalSOCKS(port: port)
+            ProxyActiveFlag.write(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory),
+                mode: "global"
+            )
+        case .localOnly:
+            try await proxyController.disableAll()
+            ProxyActiveFlag.clear(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory))
+        case .stopped:
+            // switchMode never calls this with `.stopped` — that
+            // branch routes to `stop()` instead. Keep the case
+            // defensively explicit so a future caller can't slip
+            // through to silently no-op.
+            return
+        }
+
+        // Single observable transition for SwiftUI. `isRunning` is
+        // already true and stays true; only the mode chip changes.
+        activeMode = newMode
     }
 
     /// Internal stop path used by `switchMode` — same teardown work as
@@ -681,6 +841,9 @@ public final class TunnelOrchestrator {
             // compares against this to detect edits to the
             // currently-active profile.
             activeProfileID = selectedProfileID
+            // **UX-F#6 (v2.0.14):** the engine just resynced to
+            // the current profile — clear the stale-config flag.
+            activeProfileEdited = false
             if log {
                 appendInfo("started in \(mode.title)")
             }
@@ -865,6 +1028,16 @@ public final class TunnelOrchestrator {
     /// `ProxyActiveFlag.logger` (`ProxyRecovery`) so the full
     /// recovery story shows up under one `log show` predicate.
     private static let recoveryLogger = Logger.cooltunnel("ProxyRecovery")
+
+    /// **UX-F#6 (v2.0.14):** dedicated logger for the no-restart
+    /// mode-switch path (`applyModeWithoutRestart`). When the
+    /// no-restart attempt fails and we fall back to the full
+    /// engine restart, the diagnostic goes here at `.notice` so a
+    /// support engineer can confirm whether the hot-swap path is
+    /// the right shape for the failures they see in the field.
+    /// User-visible errors come from the subsequent
+    /// `startCore` catch arm via `recordError`.
+    private static let hotSwapLogger = Logger.cooltunnel("HotSwap")
 
     /// **UX-F#4 (v0.1.7.18):** called by AppDelegate when the
     /// system wakes from sleep. If the proxy is still nominally
