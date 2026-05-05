@@ -91,7 +91,8 @@ public enum ProxyActiveFlag {
             logger.info("proxy-active flag cleared")
         } catch CocoaError.fileNoSuchFile {
             // Already gone — fine.
-        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain
             && error.code == NSFileNoSuchFileError
         {
             // Same. Older Swift bridges raise the NSError variant.

@@ -1658,4 +1658,3 @@ private struct LoginItemRow: View {
 
     private static let logger = Logger.cooltunnel("UI.LoginItem")
 }
-
