@@ -1,181 +1,175 @@
 // Views/ControlPanelView.swift
 //
-// v0.1.5.4: redesigned as a Maltese-pup mode picker.
+// **Phase 2.1 (v0.2):** the custom mode-chip rail is replaced by
+// a real `Picker(.segmented)` (renders as `NSSegmentedControl`) +
+// a primary `Start` / `Stop` button styled `.borderedProminent`.
+// Diagnostics, Latency, and Settings are standard `.bordered`
+// buttons. Every CTPalette / SoftButtonStyle / pupCard reference
+// is gone from this surface — the row sits on the inherited
+// window background with no card around it, the same way Wi-Fi
+// or Time Machine settings rows do.
 //
-// One row, four interaction surfaces:
+// Behaviour:
 //
-//   [ Smart ] [ Global ] [ Local ]   ⏻ Stop   🩺 Diag   ⏱ Latency   ⚙ Settings
+//   - The Picker selection drives the *intent* — what mode the
+//     proxy will run in. While stopped, the Start button reads
+//     the selection. While running, changing the segment hot-
+//     swaps (`switchMode(to:)`) immediately, the same UX the
+//     menu-bar mode rows use.
 //
-// The three mode chips are mutually exclusive (radio-style) — picking
-// one while the proxy is running calls `switchMode(to:)`, which
-// hot-swaps the active mode in place rather than forcing the user to
-// stop first. That removes the awkward "Start Smart is greyed out
-// because Global is running" state from earlier versions.
+//   - `transitionInFlight` and `userStopInFlight` (see
+//     TunnelOrchestrator) cover the menu-bar / window race —
+//     the Picker setter and the Start/Stop button both go
+//     through `switchMode(...)`, never directly through
+//     `start(...)` / `stop()`, so the lifecycle guard sees
+//     every click.
 //
-// macOS 26 features in use here:
-//   - `.glassEffect()` on the wrapper card (via `pupCard`)
-//   - `.symbolEffect(.bounce)` on the active chip's icon when the
-//     mode changes
-//   - `.sensoryFeedback(.selection, trigger:)` on chip taps
-//   - `.contentTransition(.symbolEffect(.replace))` on the run-state
-//     toggle icon
+//   - The Latency button is a `Menu` with two routes (Smart /
+//     Global) — Local mode bypasses the proxy so a Local
+//     latency probe has no proxied path to measure; that
+//     option is shown disabled with an explanatory tooltip.
 
 import SwiftUI
+import os
 
-/// Single-row controls: three radio-style mode chips (Smart /
-/// Global / Local) plus Stop, Diag, Latency, and Settings.
-/// Tapping a chip while the proxy is running calls
-/// `TunnelOrchestrator.switchMode(to:)` to hot-swap modes
-/// without a stop / start dance.
+/// Mode picker + lifecycle button + secondary actions.
 public struct ControlPanelView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
     @Binding public var isShowingSettings: Bool
+
+    /// User-intent mode. Picker reads this when the proxy is
+    /// stopped; while running it mirrors `orchestrator.activeMode`
+    /// via the `.onChange` below.
+    @State private var pendingMode: ProxyMode = .smart
 
     public init(isShowingSettings: Binding<Bool>) {
         self._isShowingSettings = isShowingSettings
     }
 
     public var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             modePicker
-            // Hairline using the same borderInk family as the rest
-            // of the design system, instead of the system Divider's
-            // adaptive grey at low opacity. Reads as part of the
-            // platinum theme rather than chrome.
-            Capsule()
-                .fill(CTPalette.borderInk.opacity(0.35))
-                .frame(width: 1, height: 22)
-            stopButton
+            Spacer(minLength: 8)
+            primaryButton
             diagnosticsButton
             latencyMenu
-            Spacer()
             settingsButton
         }
-        .padding(12)
-        // Mode-aware tint — same accent the active chip uses, so the
-        // control row reads as part of the chosen mode's "mood" rather
-        // than a neutral chrome strip. Smart=blue, Global=pink,
-        // Local=green; idle stays platinum-grey.
-        .pupCard(cornerRadius: 8, tint: CTPalette.accent(for: orchestrator.activeMode))
-        // Selection feedback on the trackpad — feels "genki" without
-        // being noisy. macOS only honours certain feedback kinds on
-        // hardware that supports them; the modifier no-ops elsewhere.
-        .sensoryFeedback(.selection, trigger: orchestrator.activeMode)
-        .sensoryFeedback(.success, trigger: orchestrator.isRunning) { _, new in new }
+        // Sync `pendingMode` when the orchestrator's running mode
+        // changes from another surface (menu-bar tap, deep link).
+        // Keeps the Picker selection consistent with the engine's
+        // truth without the Picker having to bind directly to the
+        // orchestrator's `.stopped` sentinel.
+        .onChange(of: orchestrator.activeMode) { _, new in
+            if new != .stopped {
+                pendingMode = new
+            }
+        }
     }
 
-    // MARK: - Mode picker (the headline change)
+    // MARK: - Mode picker
 
-    /// Three radio-style chips wrapped in a pill rail. Tapping a chip
-    /// while idle starts the proxy in that mode; while running, it
-    /// hot-swaps via [`TunnelOrchestrator.switchMode(to:)`].
     private var modePicker: some View {
-        HStack(spacing: 8) {
-            modeChip(
-                .smart,
-                label: "Smart",
-                system: "bolt.horizontal.fill"
-            )
-            modeChip(
-                .global,
-                label: "Global",
-                system: "globe.americas.fill"
-            )
-            modeChip(
-                .localOnly,
-                label: "Local",
-                system: "house.fill"
-            )
+        Picker("Mode", selection: modeBinding) {
+            Text("Smart").tag(ProxyMode.smart)
+            Text("Global").tag(ProxyMode.global)
+            Text("Local").tag(ProxyMode.localOnly)
         }
-        .padding(4)
-        .background {
-            Capsule(style: .continuous).fill(.ultraThinMaterial)
-        }
-        .overlay {
-            Capsule(style: .continuous).strokeBorder(CTPalette.borderInk.opacity(0.35), lineWidth: 0.6)
-        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(maxWidth: 260)
+        .disabled(orchestrator.selectedProfile == nil)
+        .help(modeHelp)
     }
 
-    /// One mode chip. `isActive` is true when the orchestrator is
-    /// running AND in this mode — so a chip never looks selected when
-    /// the proxy is actually stopped, even if it was the last-used
-    /// mode.
-    private func modeChip(_ mode: ProxyMode, label: String, system: String) -> some View {
-        let isActive = orchestrator.isRunning && orchestrator.activeMode == mode
-        let tint = CTPalette.accent(for: mode)
-        // Tapping the *currently active* chip is a redundant request
-        // — switchMode handles it as a no-op, but we save the tap
-        // round-trip + visible "press" feedback by disabling it.
-        let isCurrent = orchestrator.isRunning && orchestrator.activeMode == mode
-        return Button {
-            // Re-entry guard: a fast double-tap on the same chip
-            // would otherwise queue two `switchMode` tasks. Both
-            // serialise on the MainActor so it's not a correctness
-            // bug, but the second task does redundant stop/start
-            // work we can skip outright.
-            guard !isCurrent else { return }
-            Task {
-                do {
-                    try await orchestrator.switchMode(to: mode)
-                } catch {
-                    // `lastError` carries the user-facing surface;
-                    // logging it here would be redundant.
+    /// Two-way binding that:
+    ///   - **Reads** the running mode when active, otherwise the
+    ///     user's pending intent.
+    ///   - **Writes** the new selection through `switchMode(...)`
+    ///     when the proxy is already running (instant hot-swap),
+    ///     and only updates `pendingMode` when stopped (the Start
+    ///     button is the explicit activate trigger in that case).
+    private var modeBinding: Binding<ProxyMode> {
+        Binding(
+            get: {
+                orchestrator.isRunning && orchestrator.activeMode != .stopped
+                    ? orchestrator.activeMode
+                    : pendingMode
+            },
+            set: { newValue in
+                pendingMode = newValue
+                guard orchestrator.isRunning else { return }
+                Task {
+                    do {
+                        try await orchestrator.switchMode(to: newValue)
+                    } catch {
+                        Self.uiLogger.error(
+                            "mode hot-swap to \(newValue.title, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                        )
+                    }
                 }
             }
-        } label: {
-            Label(label, systemImage: system)
-                .symbolEffect(.bounce, options: .speed(1.3), value: isActive)
-        }
-        .buttonStyle(ModeChipStyle(isActive: isActive, tint: tint))
-        .disabled(isCurrent)
-        .help(modeHelp(for: mode))
-        // VoiceOver hears the mode name + current state ("Smart,
-        // selected" or "Global, not selected"); the hint explains
-        // what the button does without spelling out the
-        // implementation.
-        .accessibilityLabel("\(label) mode")
-        .accessibilityValue(isActive ? "selected" : "not selected")
-        .accessibilityHint(modeHelp(for: mode))
+        )
     }
 
-    private func modeHelp(for mode: ProxyMode) -> String {
-        switch mode {
+    private var modeHelp: String {
+        switch pendingMode {
         case .smart:
-            "Route the direct-domains list around the proxy; everything else through SOCKS."
+            "Smart: route the direct-domains list around the proxy; everything else through SOCKS."
         case .global:
-            "Route every TCP connection through the proxy."
+            "Global: route every TCP connection through the proxy."
         case .localOnly:
-            "Run naive on 127.0.0.1; leave the system proxy untouched."
+            "Local: run naive on 127.0.0.1; leave the system proxy untouched."
         case .stopped:
             ""
         }
     }
 
-    // MARK: - Secondary actions
+    // MARK: - Start / Stop primary button
 
-    private var stopButton: some View {
-        Button(role: .destructive) {
-            Task { await orchestrator.stop() }
+    private var primaryButton: some View {
+        Button {
+            Task { await togglePrimary() }
         } label: {
-            Label("Stop", systemImage: "stop.fill")
-                .contentTransition(.symbolEffect(.replace))
+            Label(
+                orchestrator.isRunning ? "Stop" : "Start",
+                systemImage: orchestrator.isRunning ? "stop.fill" : "play.fill"
+            )
+            .frame(minWidth: 60)
         }
-        .buttonStyle(SoftButtonStyle(tint: orchestrator.isRunning ? CTPalette.cherryRose : .secondary))
-        .disabled(!orchestrator.isRunning)
-        .accessibilityLabel("Stop proxy")
-        .accessibilityHint("Stops the proxy and reverts the system network settings.")
+        .buttonStyle(.borderedProminent)
+        .controlSize(.regular)
+        .tint(orchestrator.isRunning ? .red : .accentColor)
+        .disabled(orchestrator.selectedProfile == nil)
+        .help(orchestrator.isRunning ? "Stop the proxy" : "Start in \(pendingMode.title) mode")
+        .accessibilityLabel(orchestrator.isRunning ? "Stop proxy" : "Start proxy in \(pendingMode.title) mode")
     }
+
+    private func togglePrimary() async {
+        let target: ProxyMode = orchestrator.isRunning ? .stopped : pendingMode
+        do {
+            try await orchestrator.switchMode(to: target)
+        } catch {
+            Self.uiLogger.error(
+                "primary toggle (target=\(target.rawValue, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    // MARK: - Secondary actions
 
     private var diagnosticsButton: some View {
         Button {
             Task { await orchestrator.runDiagnostics() }
         } label: {
-            Label("Diag", systemImage: "stethoscope")
+            Label("Diagnostics", systemImage: "stethoscope")
+                .labelStyle(.iconOnly)
         }
-        .buttonStyle(SoftButtonStyle(tint: orchestrator.isRunning ? CTPalette.inkBlue : .secondary))
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
         .disabled(!orchestrator.isRunning)
+        .help("Run diagnostics through the active proxy connection.")
         .accessibilityLabel("Run diagnostics")
-        .accessibilityHint("Sends a test request through the proxy and prints the timing in the live log.")
     }
 
     private var latencyMenu: some View {
@@ -186,57 +180,39 @@ public struct ControlPanelView: View {
             Button("Global route") {
                 Task { await orchestrator.runLatencyTest(mode: .global) }
             }
-            // Local mode bypasses the proxy, so there is no
-            // "via-proxy" latency to measure. Show the option so
-            // users don't think it's missing — disabled with a
-            // tooltip explains it in one line.
             Button("Local route (bypasses proxy)") {}
                 .disabled(true)
                 .help("Local mode runs naive on 127.0.0.1 without changing the system proxy — there is no proxied path to measure.")
         } label: {
             Label("Latency", systemImage: "speedometer")
-                // Same single-line guard as ModeChipStyle /
-                // SoftButtonStyle so a localized "Latency" label
-                // never wraps mid-row.
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+                .labelStyle(.iconOnly)
         }
         .menuStyle(.borderlessButton)
-        // Padding tightened from 14/9 to 12/7 so the menu sits at
-        // the same height as the surrounding SoftButtonStyle
-        // buttons (Stop / Diag / Settings); the row no longer
-        // jumps height when the menu opens.
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background {
-            Capsule(style: .continuous).fill(.ultraThinMaterial)
-        }
-        .overlay {
-            // Stroke is the same `borderInk × 0.35` the rest of
-            // the design system uses, replacing the lilac that
-            // shipped before and disagreed with the mode-aware
-            // tinting story.
-            Capsule(style: .continuous).strokeBorder(
-                CTPalette.borderInk.opacity(orchestrator.isRunning ? 0.40 : 0.20),
-                lineWidth: 0.6
-            )
-        }
-        .foregroundStyle(orchestrator.isRunning ? CTPalette.inkBlue : .secondary)
+        .menuIndicator(.visible)
+        .frame(width: 36)
         .disabled(!orchestrator.isRunning)
-        .fixedSize()
-        .accessibilityLabel("Latency test")
-        .accessibilityHint("Measures DNS, connect, TLS, and first-byte timings to a couple of test URLs.")
+        .help("Measure DNS, connect, TLS, and first-byte timings through the proxy.")
+        .accessibilityLabel("Latency test menu")
     }
 
     private var settingsButton: some View {
         Button {
             isShowingSettings = true
         } label: {
-            Label("Settings", systemImage: "gearshape.fill")
+            Label("Settings", systemImage: "gear")
+                .labelStyle(.iconOnly)
         }
-        .buttonStyle(SoftButtonStyle(tint: CTPalette.inkBlue))
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .keyboardShortcut(",", modifiers: .command)
+        .help("Open Settings")
         .accessibilityLabel("Settings")
-        .accessibilityHint(
-            "Opens the Settings panel with profile direct domains, naive binary, Rust core, and About.")
     }
+
+    /// **Engine-F#P2.4 (v0.2):** project-wide UI logger for the
+    /// main-window control surface. Same subsystem as
+    /// CoreClient / Orchestrator so a single `log show` predicate
+    /// captures the full failure path (UI tap → orchestrator →
+    /// engine wire error).
+    private static let uiLogger = Logger.cooltunnel("UI.ControlPanel")
 }

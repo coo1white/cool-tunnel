@@ -17,7 +17,7 @@ import Foundation
 /// full picture without firing extra subprocesses.
 public struct NaiveBinaryDescriptor: Sendable, Equatable {
     public enum Origin: Sendable, Equatable {
-        /// The binary that ships inside `Cool tunnel.app/Contents/Resources/`.
+        /// The binary that ships inside `Cool Tunnel.app/Contents/Resources/`.
         case bundled
         /// A path the user picked themselves via Settings → Choose…
         case userSupplied
