@@ -117,7 +117,17 @@ jobs:
         # macos-14 GitHub-hosted runners ship swift-format with
         # Xcode; if a future runner image drops it, we want a
         # loud failure so we can reinstall it explicitly.
-        run: swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
+        #
+        # **F8a (2026-05-05):** invoke via `xcrun` so the toolchain
+        # binary is found regardless of PATH state on the runner.
+        # The macos-14 runner has swift-format at
+        # `Xcode.app/Contents/Developer/Toolchains/.../bin/swift-format`
+        # but Xcode's toolchain bin is not on the default $PATH —
+        # bare `swift-format` exited 127 ("command not found")
+        # silently every run since the `--lint` step landed.
+        # `xcrun` is the canonical macOS shim that resolves to
+        # the active toolchain.
+        run: xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
 
   shellcheck:
     name: ShellCheck
