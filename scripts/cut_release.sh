@@ -88,7 +88,12 @@ if ! xcodebuild \
     die "xcodebuild failed — see ${REPO_ROOT}/dist/build-${VERSION}.log" 4
 fi
 
-# Locate the freshly-built .app
+# Locate the freshly-built .app.
+# shellcheck disable=SC2012  # Xcode DerivedData paths are constrained
+# (Xcode generates them from the scheme name + a fixed-alphabet hash;
+# no spaces, no newlines, no shell-meta characters), and BSD `find`
+# lacks `-printf` for sort-by-mtime. `ls -td | head -1` is the safe
+# pragmatic choice on macOS here. (Audit ref: F2-1, 2026-05-05.)
 DD="$(ls -td "${HOME}/Library/Developer/Xcode/DerivedData/COOL-TUNNEL-"* 2>/dev/null | head -1)"
 APP="${DD}/Build/Products/Release/Cool Tunnel.app"
 if [[ ! -d "${APP}" ]]; then

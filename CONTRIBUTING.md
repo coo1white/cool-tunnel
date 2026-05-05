@@ -32,6 +32,11 @@ You'll need:
   ```
 - `shellcheck` (`brew install shellcheck`)
 - `swift format` (ships with the Xcode toolchain)
+- `cargo deny` (`cargo install cargo-deny`) — gates the dep tree
+  against duplicate versions, advisories, and non-permissive
+  licences per `core/deny.toml`. CI enforces it; running it
+  locally avoids the round-trip when a new crate or feature flag
+  trips a rule.
 
 Then:
 
@@ -68,6 +73,7 @@ cd core
 cargo fmt --all -- --check
 cargo clippy --release --all-targets -- -D warnings
 cargo test --release           # unit + protocol_roundtrip + chaos
+cargo deny check               # advisories, dup versions, licences
 
 # Chaos suite alone (12 scenarios — oversized frames, no-newline
 # floods, concurrent start_proxy races, malformed bursts, stdin
