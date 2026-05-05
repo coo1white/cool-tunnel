@@ -96,9 +96,9 @@ run_check() {
 
 # Wrapper: run a command from inside a directory using a subshell, so
 # the parent CWD is not modified between checks. Both helpers are
-# invoked indirectly via `run_check "$label" in_core <cmd>...` —
-# shellcheck can't see indirect invocation through positional args,
-# hence the SC2329 disable.
+# invoked indirectly via `run_check "$label" in_core <cmd>...` — the
+# linter can't see indirect invocation through positional args, hence
+# the SC2329 disable below.
 # shellcheck disable=SC2329
 in_core() { (cd "${CORE_DIR}" && "$@"); }
 # shellcheck disable=SC2329
