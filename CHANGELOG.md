@@ -9,6 +9,66 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.1] — 2026-05-05 (hotfix — Rust core version drift + updater verification)
+
+Hotfix on top of v2.0.0. Three findings closed, one user-facing
+bug, two preventive.
+
+### Bug fix
+
+- **`core/Cargo.toml` was never bumped from `0.1.7`.** The
+  Rust binary in v2.0.0's `cool-tunnel-core-v2.0.0-universal`
+  asset self-reported `cool-tunnel-core 0.1.7` because that's
+  what `env!("CARGO_PKG_VERSION")` resolved to at compile
+  time. Settings → Rust Core → Update on a v2.0.0 install
+  appeared to "succeed" (download + SHA-256 match passed) but
+  the verdict pill kept showing 0.1.7. Cargo.toml is now at
+  `2.0.1`; the rebuilt binary self-reports correctly. **U#1**
+
+### Updater hardening (catches future drift)
+
+- **RustCoreUpdater post-install `--version` verification.**
+  After `atomicallyInstall`, the updater now runs the new
+  binary's `--version` and refuses to enter `.succeeded` if
+  the self-reported semver doesn't match the release tag's
+  semver. Pre-2.0.1, the updater trusted the SHA-256 match —
+  which proves byte integrity but says nothing about whether
+  those bytes were built from a `Cargo.toml` matching the
+  tag. The new check would have caught v2.0.0's drift at
+  install time, surfacing a clear error instead of letting
+  the user discover it via the verdict pill. **U#2**
+
+### Build-pipeline hardening (catches drift at packaging)
+
+- **`scripts/package_release.sh` Cargo.toml precondition.**
+  At the top of the script: parse `core/Cargo.toml`'s
+  `version` field and exit with a clear error if it doesn't
+  match the version arg. Would have rejected v2.0.0's
+  packaging run with "core/Cargo.toml version is '0.1.7' but
+  you requested '2.0.0'." **U#6**
+
+- **`scripts/package_release.sh` Resources/cool-tunnel-core
+  precondition.** Verify the .app's bundled engine binary
+  self-reports the requested version too (catches the case
+  where Cargo.toml was bumped but the .app wasn't rebuilt
+  from it). **U#5**
+
+### Carved out for a future release
+
+- **U#3** (Settings UI shows two version sources without
+  reconciliation) — addressed in part by U#2's fail-fast
+  posture; the conflicting display will go away naturally
+  once a release ships with mismatched versions blocked at
+  install time. Pure-UI reconciliation pass deferred.
+- **U#4** (NaiveUpdater has the same "tag-only success"
+  shape as RustCoreUpdater pre-2.0.1) — naive is upstream-
+  authoritative (klzgrad publishes binary == tag) so the
+  divergence is very unlikely. Symmetry fix deferred.
+- **U#7** (`lastInstalledTag` short-circuit) — minor;
+  bandwidth optimisation only.
+
+---
+
 ## [2.0.0] — 2026-05-05 (full identity rebuild — first-class macOS app)
 
 Major version. The v0.1.x line was a custom-painted experiment;
