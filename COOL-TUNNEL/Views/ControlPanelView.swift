@@ -172,7 +172,8 @@ public struct ControlPanelView: View {
         .tint(orchestrator.isRunning ? .red : .accentColor)
         .disabled(orchestrator.selectedProfile == nil)
         .help(orchestrator.isRunning ? "Stop the proxy" : "Start in \(pendingMode.title) mode")
-        .accessibilityLabel(orchestrator.isRunning ? "Stop proxy" : "Start proxy in \(pendingMode.title) mode")
+        .accessibilityLabel(
+            orchestrator.isRunning ? "Stop proxy" : "Start proxy in \(pendingMode.title) mode")
     }
 
     private func togglePrimary() async {
@@ -212,7 +213,9 @@ public struct ControlPanelView: View {
             }
             Button("Local route (bypasses proxy)") {}
                 .disabled(true)
-                .help("Local mode runs naive on 127.0.0.1 without changing the system proxy — there is no proxied path to measure.")
+                .help(
+                    "Local mode runs naive on 127.0.0.1 without changing the system proxy — there is no proxied path to measure."
+                )
         } label: {
             Label("Latency", systemImage: "speedometer")
                 .labelStyle(.iconOnly)

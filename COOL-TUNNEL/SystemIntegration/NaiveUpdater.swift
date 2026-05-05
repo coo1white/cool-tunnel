@@ -122,7 +122,7 @@ final class NaiveUpdater {
     func checkForUpdates(currentVersion: String) async {
         switch state {
         case .checking, .resolvingTag, .downloading, .extracting,
-             .merging, .installing:
+            .merging, .installing:
             return
         default:
             break
@@ -194,7 +194,7 @@ final class NaiveUpdater {
         // -> `downloading(0.1)` regressions.
         switch state {
         case .checking, .resolvingTag, .downloading, .extracting,
-             .merging, .installing:
+            .merging, .installing:
             return nil
         default:
             break
@@ -293,7 +293,7 @@ final class NaiveUpdater {
     func reset() {
         switch state {
         case .checking, .resolvingTag, .downloading, .extracting,
-             .merging, .installing:
+            .merging, .installing:
             return  // Don't clobber an in-flight check or update.
         default:
             state = .idle

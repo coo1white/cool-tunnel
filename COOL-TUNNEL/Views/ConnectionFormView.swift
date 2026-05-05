@@ -90,7 +90,8 @@ public struct ConnectionFormView: View {
                 Text("Profile")
             } footer: {
                 if let profile = orchestrator.selectedProfile,
-                   isPlaceholderProfile(profile) {
+                    isPlaceholderProfile(profile)
+                {
                     firstRunFooter
                 }
             }

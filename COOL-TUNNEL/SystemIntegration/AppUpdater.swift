@@ -78,8 +78,8 @@ final class AppUpdater {
 
     /// What the GitHub API said about the newest release.
     struct AvailableRelease: Sendable, Equatable {
-        let tag: String              // e.g. "v0.1.7.6"
-        let version: String          // e.g. "0.1.7.6"
+        let tag: String  // e.g. "v0.1.7.6"
+        let version: String  // e.g. "0.1.7.6"
         let zipURL: URL
         let shaManifestURL: URL
         let releaseNotesURL: URL
@@ -409,7 +409,8 @@ final class AppUpdater {
     /// the matching .sha256 manifest, AND that both asset URLs
     /// point at trusted GitHub-served hosts (AU-2). Called only
     /// when there's genuinely a newer version to install.
-    nonisolated private static func validateInstallAssets(_ meta: ReleaseMetadata) throws -> AvailableRelease {
+    nonisolated private static func validateInstallAssets(_ meta: ReleaseMetadata) throws -> AvailableRelease
+    {
         let zipName = "Cool-tunnel-\(meta.tag).zip"
         let shaName = "Cool-tunnel-\(meta.tag).sha256"
         guard let zipAsset = meta.assets.first(where: { $0.name == zipName }) else {
@@ -602,7 +603,8 @@ final class AppUpdater {
         // streaming-cancel needs `URLSessionDownloadDelegate`,
         // deferred to v0.2.) Reject the manifest at 1 MB
         // (manifests are ~250 bytes) and the .zip at 100 MB.
-        let cap: Int64 = url.pathExtension == "sha256"
+        let cap: Int64 =
+            url.pathExtension == "sha256"
             ? 1 * 1024 * 1024
             : Self.maxDownloadBytes
         if let attrs = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
@@ -894,8 +896,9 @@ final class AppUpdater {
         )
         let apps = items.filter { url in
             guard url.pathExtension == "app" else { return false }
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey])
-                .isDirectory) ?? false
+            let isDir =
+                (try? url.resourceValues(forKeys: [.isDirectoryKey])
+                    .isDirectory) ?? false
             return isDir
         }
         guard apps.count == 1 else {
@@ -925,7 +928,8 @@ final class AppUpdater {
         // I/O ran on @MainActor (because runPipeline was
         // implicitly MainActor-isolated) and could stall the
         // UI on slow disks.
-        let infoURL = appURL
+        let infoURL =
+            appURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Info.plist", isDirectory: false)
         let info = try await readAppInfo(at: infoURL)
@@ -1171,7 +1175,8 @@ final class AppUpdater {
         // The script is created via `open(O_CREAT|O_EXCL|O_WRONLY,
         // 0o700)` so the file is born with the correct mode and
         // never exists with any other.
-        let scriptURL = tempRootToClean
+        let scriptURL =
+            tempRootToClean
             .appendingPathComponent("cool-tunnel-relaunch.sh", isDirectory: false)
 
         // **Q-F#2:** the helper script's stderr previously went
@@ -1418,7 +1423,8 @@ final class AppUpdater {
         // proceed to .relaunching/terminate; if they cancelled,
         // we throw a normal error and stay running.
         if needsAdminElevation {
-            let wrapperURL = tempRootToClean
+            let wrapperURL =
+                tempRootToClean
                 .appendingPathComponent("cool-tunnel-relaunch-wrapper.sh", isDirectory: false)
             // The wrapper runs AS ROOT. Its only job is to
             // detach the real helper into a background process
@@ -1463,7 +1469,8 @@ final class AppUpdater {
             // `with prompt` customises the dialog text so the
             // user sees Cool Tunnel-specific copy and not just
             // the generic "osascript wants to make changes."
-            let appleScript = "do shell script \"/bin/bash \" & quoted form of \(appleScriptStringLiteral(wrapperURL.path)) with prompt \"Cool Tunnel needs to update its application bundle. (It was originally installed via the .pkg installer, so the bundle is owned by root.)\" with administrator privileges"
+            let appleScript =
+                "do shell script \"/bin/bash \" & quoted form of \(appleScriptStringLiteral(wrapperURL.path)) with prompt \"Cool Tunnel needs to update its application bundle. (It was originally installed via the .pkg installer, so the bundle is owned by root.)\" with administrator privileges"
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             task.arguments = ["-e", appleScript]
@@ -1490,7 +1497,9 @@ final class AppUpdater {
                 // the auth dialog. Surface a friendly message
                 // for that specific case; everything else is a
                 // generic "couldn't run."
-                if errText.contains("-128") || errText.contains("User canceled") || errText.contains("User cancelled") {
+                if errText.contains("-128") || errText.contains("User canceled")
+                    || errText.contains("User cancelled")
+                {
                     throw UpdaterError.message(
                         "Update cancelled — admin password not entered. Click Update to try again."
                     )
@@ -1528,7 +1537,8 @@ final class AppUpdater {
     /// into the `do shell script` AppleScript without breaking
     /// the AppleScript parse.
     nonisolated private static func appleScriptStringLiteral(_ value: String) -> String {
-        let escaped = value
+        let escaped =
+            value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
@@ -1563,7 +1573,7 @@ final class AppUpdater {
             result = try await Subprocess.run(
                 executable: URL(fileURLWithPath: "/usr/bin/mdfind"),
                 arguments: [
-                    "kMDItemCFBundleIdentifier == \"\(canonicalBundleID)\"",
+                    "kMDItemCFBundleIdentifier == \"\(canonicalBundleID)\""
                 ],
                 timeout: 10
             )
@@ -1598,7 +1608,8 @@ final class AppUpdater {
             // to look — without this, the v0.1.7.16 message
             // ("move all but one to the Trash") leaves users
             // hunting for installs in Finder by hand.
-            let pathList = paths
+            let pathList =
+                paths
                 .map { "  • \($0)" }
                 .joined(separator: "\n")
             throw UpdaterError.message(
@@ -1659,7 +1670,7 @@ final class AppUpdater {
     /// per-pipeline.
     nonisolated private static func requireFreeSpace(at url: URL, atLeast bytes: Int64) throws {
         let values = try url.resourceValues(forKeys: [
-            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityForImportantUsageKey
         ])
         if let available = values.volumeAvailableCapacityForImportantUsage,
             available < bytes
@@ -1698,15 +1709,17 @@ final class AppUpdater {
     /// v0.1.5.9 audit (see `NaiveUpdater.resolveLatestStableTag`
     /// for the same pattern on a hardcoded URL).
     nonisolated private static func makeRelaunchLogPath() throws -> URL {
-        guard let library = FileManager.default
-            .urls(for: .libraryDirectory, in: .userDomainMask)
-            .first
+        guard
+            let library = FileManager.default
+                .urls(for: .libraryDirectory, in: .userDomainMask)
+                .first
         else {
             throw UpdaterError.message(
                 "Couldn't locate user Library directory."
             )
         }
-        let dir = library
+        let dir =
+            library
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("cool-tunnel", isDirectory: true)
         try FileManager.default.createDirectory(
