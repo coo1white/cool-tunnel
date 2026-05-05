@@ -56,12 +56,22 @@ public struct ContentView: View {
         // window inherits the system's `.windowBackground`
         // material, which respects Light / Dark / Increased
         // Contrast / accent tint with no per-state animation.
-        // Apply the user's appearance choice. `.system` returns
-        // nil from `colorScheme`, which leaves the appearance to
-        // follow `NSAppearance.current` (the macOS system
-        // setting). `.light` / `.dark` lock the app regardless
-        // of the system.
-        .preferredColorScheme(orchestrator.settings.appearanceMode.colorScheme)
+        //
+        // **v2.0.5 fix:** SwiftUI's `.preferredColorScheme(nil)`
+        // does NOT mean "follow system" the way the docs imply
+        // on macOS — once the modifier has been applied with a
+        // concrete value (`.light` or `.dark`) and then
+        // re-applied with `nil`, the scheme stays locked at
+        // whatever was last concrete. The user reported "Match
+        // System will show black and white" — the app stayed
+        // dark even when System Settings → Appearance is light.
+        // Conditionally applying the modifier only when there's
+        // an explicit override fixes it: in `.system` mode the
+        // modifier is never attached, so SwiftUI follows the
+        // window's `NSAppearance.current` dynamically.
+        .conditionallyPreferredColorScheme(
+            orchestrator.settings.appearanceMode.colorScheme
+        )
         // **Menu-F#1 (v0.2):** observe ⌘, / "Settings…" from the
         // App scene's CommandGroup. Flipping `isShowingSettings`
         // here keeps the inline-panel architecture intact — the
@@ -113,3 +123,25 @@ public struct ContentView: View {
             .environment(TunnelOrchestrator.bootstrap())
     }
 #endif
+
+extension View {
+    /// **v2.0.5 fix:** apply `.preferredColorScheme(_:)` only
+    /// when the caller has a concrete `.light` or `.dark`
+    /// override. Passing `nil` to `.preferredColorScheme(_:)`
+    /// directly does not actually free the view to follow
+    /// system appearance — once SwiftUI has seen a concrete
+    /// scheme, re-applying with `nil` leaves the scheme
+    /// locked at the last value. Conditionally NOT applying
+    /// the modifier (this helper) is the correct way to
+    /// say "follow system."
+    @ViewBuilder
+    fileprivate func conditionallyPreferredColorScheme(
+        _ scheme: ColorScheme?
+    ) -> some View {
+        if let scheme {
+            self.preferredColorScheme(scheme)
+        } else {
+            self
+        }
+    }
+}
