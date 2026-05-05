@@ -223,7 +223,10 @@ mod tests {
         let out = redact(line);
         assert!(out.ends_with("***"), "expected trailing ***: {out}");
         assert!(!out.contains("bmljazpodW50ZXIy"), "payload leaked: {out}");
-        assert!(out.starts_with("Proxy-Authorization:"), "header rewritten: {out}");
+        assert!(
+            out.starts_with("Proxy-Authorization:"),
+            "header rewritten: {out}"
+        );
     }
 
     /// Mixed case + leading whitespace — matches the form curl
@@ -232,14 +235,12 @@ mod tests {
     fn redacts_proxy_authorization_with_whitespace_and_case() {
         for line in [
             "  proxy-authorization:   Bearer eyJhbGc...",
-            "Proxy-Authorization:Basic abcdef==",  // no space after colon
+            "Proxy-Authorization:Basic abcdef==", // no space after colon
             "PROXY-AUTHORIZATION: Digest nonce=...",
         ] {
             let out = redact(line);
             assert!(
-                !out.contains("eyJhbGc")
-                    && !out.contains("abcdef")
-                    && !out.contains("nonce"),
+                !out.contains("eyJhbGc") && !out.contains("abcdef") && !out.contains("nonce"),
                 "credentials leaked: {out}"
             );
         }

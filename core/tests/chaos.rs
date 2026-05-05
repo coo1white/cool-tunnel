@@ -143,7 +143,9 @@ async fn chaos_malformed_burst_does_not_crash_engine() {
     let mut sentinel_seen = false;
     let drain_deadline = std::time::Instant::now() + Duration::from_secs(15);
     while std::time::Instant::now() < drain_deadline {
-        let Ok(Some(line)) = timeout(Duration::from_secs(2), harness.recv_raw()).await else { break };
+        let Ok(Some(line)) = timeout(Duration::from_secs(2), harness.recv_raw()).await else {
+            break;
+        };
         let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
         let id = frame["id"].as_u64().unwrap_or(0);
         if id == sentinel_id {
@@ -156,8 +158,14 @@ async fn chaos_malformed_burst_does_not_crash_engine() {
         }
         burst_replies += 1;
     }
-    assert!(burst_replies > 0, "expected error replies from malformed burst");
-    assert!(sentinel_seen, "engine wedged after malformed burst — sentinel reply never arrived");
+    assert!(
+        burst_replies > 0,
+        "expected error replies from malformed burst"
+    );
+    assert!(
+        sentinel_seen,
+        "engine wedged after malformed burst — sentinel reply never arrived"
+    );
 
     harness.shutdown().await;
 }
@@ -212,7 +220,9 @@ async fn chaos_concurrent_start_proxy_does_not_double_spawn() {
     let mut started_response_seen = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 2 && std::time::Instant::now() < deadline {
-        let Ok(Some(line)) = timeout(Duration::from_secs(5), harness.recv_raw()).await else { break };
+        let Ok(Some(line)) = timeout(Duration::from_secs(5), harness.recv_raw()).await else {
+            break;
+        };
         let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
         let kind = frame["kind"].as_str().unwrap_or("?").to_owned();
         if kind == "event" {
@@ -276,7 +286,9 @@ async fn chaos_stdin_closed_mid_frame_exits_cleanly() {
     let mut harness = spawn().await;
 
     // Send a partial JSON frame with no newline.
-    harness.send_raw(r#"{"id": 1, "method": "validate_pro"#).await;
+    harness
+        .send_raw(r#"{"id": 1, "method": "validate_pro"#)
+        .await;
     drop(harness.stdin);
 
     let exit = timeout(Duration::from_secs(5), harness.child.wait()).await;
@@ -312,7 +324,10 @@ async fn chaos_empty_and_whitespace_lines_are_skipped() {
         .await;
 
     let frame = harness.recv().await;
-    assert_eq!(frame["kind"], "response", "blank lines triggered an error: {frame}");
+    assert_eq!(
+        frame["kind"], "response",
+        "blank lines triggered an error: {frame}"
+    );
     assert_eq!(frame["id"], 5);
 
     harness.shutdown().await;
@@ -485,7 +500,9 @@ async fn chaos_newline_flood_does_not_emit_per_line_errors() {
     let mut error_frames_seen = 0_usize;
     let mut sentinel_seen = false;
     while std::time::Instant::now() < deadline {
-        let Ok(Some(line)) = timeout(Duration::from_secs(2), harness.recv_raw()).await else { break };
+        let Ok(Some(line)) = timeout(Duration::from_secs(2), harness.recv_raw()).await else {
+            break;
+        };
         let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
         if frame["kind"] == "error" {
             error_frames_seen += 1;
@@ -537,9 +554,15 @@ async fn chaos_shutdown_during_inflight_requests_exits_cleanly() {
     drop(harness.stdin);
 
     let exit = timeout(Duration::from_secs(5), harness.child.wait()).await;
-    assert!(exit.is_ok(), "engine did not exit within 5s of shutdown-after-burst");
+    assert!(
+        exit.is_ok(),
+        "engine did not exit within 5s of shutdown-after-burst"
+    );
     let status = exit.unwrap().expect("wait succeeds");
-    assert!(status.success(), "engine exited non-zero on shutdown: {status}");
+    assert!(
+        status.success(),
+        "engine exited non-zero on shutdown: {status}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -573,10 +596,17 @@ async fn siege_concurrent_request_burst_with_random_delays() {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let frame = harness.recv().await;
         let id = frame["id"].as_u64().expect("id present");
-        assert_eq!(frame["kind"], "response", "burst response was not a response: {frame}");
+        assert_eq!(
+            frame["kind"], "response",
+            "burst response was not a response: {frame}"
+        );
         received_ids.insert(id);
     }
-    assert_eq!(received_ids.len(), SALVO_SIZE as usize, "missing replies under siege");
+    assert_eq!(
+        received_ids.len(),
+        SALVO_SIZE as usize,
+        "missing replies under siege"
+    );
 
     // Engine still responsive.
     harness
@@ -840,7 +870,10 @@ async fn siege_concurrent_stop_proxy_race() {
         }
     }
 
-    assert_eq!(stopped_responses, 1, "expected exactly one Stopped response");
+    assert_eq!(
+        stopped_responses, 1,
+        "expected exactly one Stopped response"
+    );
     assert_eq!(
         not_running_errors, 1,
         "expected exactly one not_running error from the racing stop"
@@ -947,7 +980,9 @@ impl XorShift {
             .map(|d| d.subsec_nanos() as u64)
             .unwrap_or(1);
         // Avoid a zero seed — xorshift's fixed point.
-        Self { state: nanos.max(1) }
+        Self {
+            state: nanos.max(1),
+        }
     }
 
     fn next(&mut self) -> u64 {
