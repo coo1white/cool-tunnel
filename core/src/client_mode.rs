@@ -345,12 +345,12 @@ async fn dispatch(
         // trusted Swift app and uses `Outbound::Error` for any
         // "you sent me bad data" — see the `RequestKind::
         // ValidateProfile` doc comment for the full rationale.
-        RequestKind::ValidateProfile { profile: _ } => Ok(ResponsePayload::Validation(
-            ValidationReport {
+        RequestKind::ValidateProfile { profile: _ } => {
+            Ok(ResponsePayload::Validation(ValidationReport {
                 ok: true,
                 reason: None,
-            },
-        )),
+            }))
+        }
         RequestKind::GenerateNaiveConfig { profile } => {
             let config = NaiveConfig::from_profile(&profile);
             let json = config
