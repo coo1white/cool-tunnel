@@ -105,7 +105,7 @@ public struct SystemProxyController: Sendable {
                 arguments: arguments,
                 timeout: 30
             )
-        } catch let SubprocessError.launchFailed(message) {
+        } catch SubprocessError.launchFailed(let message) {
             throw SystemProxyError.spawnFailed(
                 NSError(
                     domain: "SystemProxyError",

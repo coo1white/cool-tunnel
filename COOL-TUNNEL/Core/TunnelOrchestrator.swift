@@ -131,7 +131,8 @@ public final class TunnelOrchestrator {
         do {
             paths = try AppSupportPaths()
         } catch {
-            bootstrapError = "Application Support unavailable: \(error.localizedDescription) — engine will refuse to start. Free disk space and relaunch."
+            bootstrapError =
+                "Application Support unavailable: \(error.localizedDescription) — engine will refuse to start. Free disk space and relaunch."
             paths = AppSupportPaths.fallback()
         }
 
@@ -924,7 +925,8 @@ public final class TunnelOrchestrator {
             // (`ErrorPayload`) include the engine's own message
             // string, which is what we want surfaced for things
             // like "address already in use".
-            let detail = (error as? LocalizedError)?.errorDescription
+            let detail =
+                (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
             recordError("Couldn't start \(mode.title): \(detail)")
             throw error
@@ -987,9 +989,8 @@ public final class TunnelOrchestrator {
         }
         let payload = ProxyActiveFlag.readPayload(at: flagURL)
         appendInfo(
-            "previous run crashed with system proxy enabled" +
-            (payload.map { " (mode=\($0.mode))" } ?? "") +
-            " — reverting"
+            "previous run crashed with system proxy enabled" + (payload.map { " (mode=\($0.mode))" } ?? "")
+                + " — reverting"
         )
         try? await proxyController.disableAll()
         ProxyActiveFlag.clear(at: flagURL)
@@ -1129,7 +1130,8 @@ public final class TunnelOrchestrator {
             guard let profile = selectedProfile else { return }
             _ = try await core.send(.validateProfile(profile))
         } catch {
-            recordError("connection became unresponsive while system slept — click Stop, then restart your mode")
+            recordError(
+                "connection became unresponsive while system slept — click Stop, then restart your mode")
         }
     }
 

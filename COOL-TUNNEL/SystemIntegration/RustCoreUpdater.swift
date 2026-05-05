@@ -139,7 +139,7 @@ final class RustCoreUpdater {
                 state = .available(
                     tag: resolved.tag, currentVersion: currentVersion)
             }
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -256,7 +256,7 @@ final class RustCoreUpdater {
             lastInstalledTag = resolved.tag
             state = .succeeded(tag: resolved.tag, installedPath: installedURL)
             return installedURL
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
             return nil
         } catch {
@@ -352,9 +352,11 @@ final class RustCoreUpdater {
         let releases = try JSONDecoder().decode([Release].self, from: data)
         for release in releases {
             // Engine asset
-            guard let engineAsset = release.assets.first(where: {
-                $0.name.hasPrefix("cool-tunnel-core-v") && $0.name.hasSuffix("-universal")
-            }) else {
+            guard
+                let engineAsset = release.assets.first(where: {
+                    $0.name.hasPrefix("cool-tunnel-core-v") && $0.name.hasSuffix("-universal")
+                })
+            else {
                 continue
             }
             // **Sw#C4 partial (v0.1.7.18):** require the
@@ -366,9 +368,11 @@ final class RustCoreUpdater {
             // the in-app updater will retry next time the user
             // clicks Update.
             let manifestName = "Cool-tunnel-\(release.tagName).sha256"
-            guard let manifestAsset = release.assets.first(where: {
-                $0.name == manifestName
-            }) else {
+            guard
+                let manifestAsset = release.assets.first(where: {
+                    $0.name == manifestName
+                })
+            else {
                 rustCoreUpdaterLogger.info(
                     "skipping \(release.tagName, privacy: .public) — no SHA-256 manifest"
                 )

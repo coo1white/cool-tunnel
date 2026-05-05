@@ -122,7 +122,7 @@ final class NaiveUpdater {
     func checkForUpdates(currentVersion: String) async {
         switch state {
         case .checking, .resolvingTag, .downloading, .extracting,
-             .merging, .installing:
+            .merging, .installing:
             return
         default:
             break
@@ -146,7 +146,7 @@ final class NaiveUpdater {
                 state = .available(
                     tag: tag, currentVersion: currentVersion)
             }
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -194,7 +194,7 @@ final class NaiveUpdater {
         // -> `downloading(0.1)` regressions.
         switch state {
         case .checking, .resolvingTag, .downloading, .extracting,
-             .merging, .installing:
+            .merging, .installing:
             return nil
         default:
             break
@@ -278,7 +278,7 @@ final class NaiveUpdater {
             lastInstalledTag = tag
             state = .succeeded(tag: tag, installedPath: installedURL)
             return installedURL
-        } catch let UpdaterError.message(reason) {
+        } catch UpdaterError.message(let reason) {
             state = .failed(message: reason)
             return nil
         } catch {
@@ -293,7 +293,7 @@ final class NaiveUpdater {
     func reset() {
         switch state {
         case .checking, .resolvingTag, .downloading, .extracting,
-             .merging, .installing:
+            .merging, .installing:
             return  // Don't clobber an in-flight check or update.
         default:
             state = .idle
