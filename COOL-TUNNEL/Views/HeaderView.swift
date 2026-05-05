@@ -1,23 +1,39 @@
 // Views/HeaderView.swift
 //
-// Title bar redesigned for the v0.1.5.4 visual refresh: app icon on
-// a pastel gradient card, animated status pill that bounces on
-// state-change, inline firewall warning. Pulls all colours from
-// `CTPalette` so the look stays consistent with the mode picker.
+// **Phase 2.1 (v0.2):** rewritten as a quiet status row in the
+// system idiom — semantic colour dot (red / orange / green /
+// secondary) + headline + subtitle, sitting on the inherited
+// `.windowBackground` material with no card around it.
+//
+// Earlier versions wrapped the same information in a pastel
+// gradient card with an animated `shippingbox` glyph and a
+// gradient `COOL TUNNEL` brand mark. The v2.0 audit flagged that
+// as the loudest "doesn't look like a Mac app" surface. The
+// status itself was already clear; the chrome around it was the
+// problem.
+//
+// **Phase 2.2 (v0.2):** the firewall badge is now a real button
+// that deep-links to `x-apple.systempreferences:` →
+// Privacy & Security / Firewall. Pre-2.2 it was a tooltip-only
+// pill with no path to resolution — the audit's "warning with
+// no recourse" finding. Tapping it now sends the user one click
+// from the actual fix, the same way Apple's own apps hand off
+// to System Settings panes.
+//
+// **UX-F#1 (v0.1.7.17):** the dismissible error banner is
+// preserved — `lastError` still surfaces here as an inline row
+// with destructive tint and an `xmark.circle.fill` close button.
+// The banner is the user's main signal that an engine error
+// occurred (paired with the new Engine-F#P0 fix that finally
+// populates `lastError` on Start failure).
 
+import AppKit
 import SwiftUI
+import os
 
-/// Top card showing the app icon, name, current proxy mode, and
-/// any firewall warning. Inputs are plain values rather than the
-/// full orchestrator so the view stays cheap to re-render and
-/// trivially previewable.
-///
-/// **UX-F#1 (v0.1.7.17):** added `lastError` input + dismiss
-/// callback. Previously `TunnelOrchestrator.recordError()` set
-/// `lastError` on every failure but no view ever read it; errors
-/// only appeared as a single buried `[error]` line in the log
-/// console. The header now shows a dismissible error banner —
-/// the same surface where the user already looks for status.
+/// Status row at the top of the main window. Inputs are plain
+/// values rather than the full orchestrator so the view stays
+/// cheap to re-render and trivially previewable.
 public struct HeaderView: View {
     public let isRunning: Bool
     public let activeMode: ProxyMode
@@ -41,27 +57,157 @@ public struct HeaderView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            mainRow
-            if let lastError = lastError, !lastError.isEmpty {
+            statusRow
+            if let lastError, !lastError.isEmpty {
                 errorBanner(message: lastError)
             }
         }
     }
 
-    /// **UX-F#1 (v0.1.7.17):** dismissible error banner. Background
-    /// uses `cherryRose` to read distinct from the mode-themed
-    /// status pill, with a contrast-safe foreground.
-    @ViewBuilder
+    // MARK: - Status row
+
+    private var statusRow: some View {
+        HStack(alignment: .center, spacing: 10) {
+            statusDot
+            VStack(alignment: .leading, spacing: 2) {
+                Text(headline)
+                    .font(.headline)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 8)
+            if firewallState == .enabled {
+                firewallBadge
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(headline). \(subtitle).")
+    }
+
+    /// Colour + shape redundancy: the status is communicated by
+    /// both the dot's tint AND the surrounding text, so users with
+    /// red-green colour blindness still read state correctly.
+    /// Filled vs. outlined is also implicit in the system colour
+    /// (red error / green active / muted idle), which is the
+    /// same pattern Wi-Fi and Bluetooth menus use.
+    private var statusDot: some View {
+        Circle()
+            .fill(statusTint)
+            .frame(width: 10, height: 10)
+            .accessibilityHidden(true)
+    }
+
+    private var statusTint: Color {
+        if lastError != nil { return .red }
+        if isRunning { return .green }
+        return .secondary
+    }
+
+    private var headline: String {
+        if lastError != nil { return "Error" }
+        if isRunning { return "Connected" }
+        return "Not connected"
+    }
+
+    private var subtitle: String {
+        if isRunning {
+            return activeMode.title
+        }
+        return "Pick a mode below to connect."
+    }
+
+    // MARK: - Firewall badge
+
+    /// Compact warning badge — a Button that deep-links to
+    /// System Settings → Privacy & Security → Firewall via the
+    /// `x-apple.systempreferences:` URL scheme. Phase 2.2 closes
+    /// the audit's "warning with no recourse" finding: clicking
+    /// the badge takes the user one hop from the actual fix.
+    /// `.buttonStyle(.plain)` keeps the visual identical to the
+    /// pre-2.2 capsule so existing users don't have to relearn
+    /// what the indicator means.
+    private var firewallBadge: some View {
+        Button {
+            Self.openFirewallPane()
+        } label: {
+            Label("Firewall on", systemImage: "exclamationmark.shield")
+                .font(.caption)
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(.orange.opacity(0.12), in: .capsule)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        // `.pointerStyle(.link)` would be the right cursor hint
+        // here but it's macOS 15+. The deployment target is 14,
+        // so we lean on `.help(...)` + button affordance instead;
+        // the capsule background change on hover (system-default
+        // for `.buttonStyle(.plain)` over an interactive surface)
+        // gives the click affordance.
+        .help("The macOS Application Firewall is on. Click to open Privacy & Security in System Settings — outbound traffic to your proxy may be blocked until you allow it there.")
+        .accessibilityLabel("Firewall is on. Open Privacy & Security in System Settings.")
+        .accessibilityHint("Opens System Settings to the Firewall pane so you can allow Cool Tunnel through the Application Firewall.")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// Opens the macOS Privacy & Security pane (where the
+    /// Application Firewall lives in macOS 13+). Tries the
+    /// canonical pane URL first; if that fails (a future macOS
+    /// renames the pane), falls back to the bare
+    /// `x-apple.systempreferences:` root which always opens
+    /// System Settings to its sidebar so the user can navigate
+    /// manually. We never block the user behind a click that
+    /// silently does nothing.
+    @MainActor
+    private static func openFirewallPane() {
+        let primary = URL(string: "x-apple.systempreferences:com.apple.preference.security?Firewall")!
+        if NSWorkspace.shared.open(primary) {
+            Self.uiLogger.info("opened Firewall pane via primary URL")
+            return
+        }
+        let fallback = URL(string: "x-apple.systempreferences:")!
+        if NSWorkspace.shared.open(fallback) {
+            Self.uiLogger.notice(
+                "Firewall pane URL failed; opened System Settings root as fallback"
+            )
+            return
+        }
+        Self.uiLogger.error(
+            "could not open System Settings — both URLs failed"
+        )
+    }
+
+    /// Subsystem-scoped logger for the header-view surface.
+    /// Same `subsystem == "space.coolwhite.cooltunnel"` umbrella
+    /// the rest of the UI uses, so a single `log show` predicate
+    /// captures the deep-link handoff alongside engine /
+    /// orchestrator traces.
+    private static let uiLogger = Logger.cooltunnel("UI.Header")
+
+    // MARK: - Error banner
+
+    /// Inline, dismissible error banner. Renders below the
+    /// status row when `lastError` is non-nil. Uses the system
+    /// `.red` accent through `.background`/`.foregroundStyle` so
+    /// the banner picks up Increased Contrast and accessibility
+    /// preferences for free.
     private func errorBanner(message: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.white)
+                .padding(.top, 1)
                 .accessibilityHidden(true)
             Text(message)
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.white)
-                .lineLimit(2)
-                .truncationMode(.tail)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
             Spacer(minLength: 8)
             Button {
                 onDismissError()
@@ -73,125 +219,9 @@ public struct HeaderView: View {
             .accessibilityLabel("Dismiss error")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(CTPalette.cherryRose.opacity(0.85))
-        }
+        .padding(.vertical, 8)
+        .background(Color.red, in: .rect(cornerRadius: 8, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Error: \(message). Double-tap to dismiss.")
-    }
-
-    private var mainRow: some View {
-        HStack(alignment: .center, spacing: 14) {
-            // App icon on a pastel gradient circle. The gradient
-            // tracks the active mode so the icon itself becomes a
-            // mood indicator without a second label.
-            ZStack {
-                Circle()
-                    .fill(CTPalette.dreamGradient(for: activeMode))
-                    .frame(width: 52, height: 52)
-                    .shadow(color: CTPalette.accent(for: activeMode).opacity(0.3), radius: 8, x: 0, y: 4)
-                Image(systemName: isRunning ? "shippingbox.and.arrow.backward.fill" : "shippingbox.fill")
-                    .font(.system(size: 24, weight: .medium))
-                    .foregroundStyle(.white)
-                    // macOS 26 symbol effects: bounces when the run
-                    // state flips so the user sees the state change
-                    // in their peripheral vision.
-                    .symbolEffect(.bounce, options: .speed(1.2), value: isRunning)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("COOL TUNNEL")
-                    .font(CTTypography.title)
-                    .foregroundStyle(
-                        // Classic Mac blue → primary text. The
-                        // second stop is `Color.primary` (not the
-                        // hardcoded `bodyInk` light-mode ink) so
-                        // the gradient remains legible in dark mode
-                        // — `bodyInk` is a near-black RGB literal
-                        // that disappears on dark backgrounds.
-                        LinearGradient(
-                            colors: [CTPalette.macBlue, .primary],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.opacity)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-
-            Spacer()
-
-            statusPill
-
-            if firewallState == .enabled {
-                firewallBadge
-            }
-        }
-        .padding(14)
-        // 8pt matches the rest of the design system; the older 10pt
-        // header was drift from the v0.1.5.7 platinum-theme pass.
-        .pupCard(cornerRadius: 8, tint: CTPalette.accent(for: activeMode))
-    }
-
-    private var subtitle: String {
-        isRunning ? "Active · \(activeMode.title)" : "Idle · ready when you are"
-    }
-
-    /// Status pill — pastel gradient when active, soft material when
-    /// idle. Reads the same accent the icon uses so the two surfaces
-    /// move together when the mode changes. The repeating pulse on
-    /// the dot is gated by `PerformanceProfile` so older Intel Macs
-    /// don't burn GPU on a continuously-animating heartbeat.
-    private var statusPill: some View {
-        let tint = CTPalette.accent(for: activeMode)
-        let allowPulse = PerformanceProfile.current.repeatingSymbolEffectsAllowed
-        let scale = PerformanceProfile.current.animationScale
-        return HStack(spacing: 6) {
-            Circle()
-                .fill(tint)
-                .frame(width: 8, height: 8)
-                .shadow(color: tint.opacity(0.6), radius: 4)
-                .symbolEffect(.pulse, options: .repeating, isActive: isRunning && allowPulse)
-            Text(activeMode.title)
-                .font(.caption.weight(.bold))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background {
-            Capsule(style: .continuous).fill(tint.opacity(isRunning ? 0.22 : 0.12))
-        }
-        .overlay {
-            Capsule(style: .continuous).strokeBorder(tint.opacity(0.6), lineWidth: 0.7)
-        }
-        .foregroundStyle(tint)
-        .animation(.spring(response: 0.32 * scale, dampingFraction: 0.72), value: activeMode)
-    }
-
-    private var firewallBadge: some View {
-        Label(firewallState.description, systemImage: "exclamationmark.shield.fill")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(CTPalette.cherryRose)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background {
-                // Use the same `cherryRose` tint family as the
-                // foreground/border so the badge reads as a single
-                // alert colour. The previous `bunnyPink` background
-                // was a holdover from the v0.1.5.4 Maltese palette
-                // and disagreed with the rose stroke + ink-blue
-                // window after the v0.1.5.7 theme retune.
-                Capsule(style: .continuous).fill(CTPalette.cherryRose.opacity(0.12))
-            }
-            .overlay {
-                Capsule(style: .continuous).strokeBorder(CTPalette.cherryRose.opacity(0.4), lineWidth: 0.6)
-            }
     }
 }
