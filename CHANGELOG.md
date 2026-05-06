@@ -40,6 +40,15 @@ scripted test).
   empty-password class — PR #12 fixed it at the UI layer in
   v2.0.17; this closes the same gap at the engine. Wire-format
   bytes unchanged. 132 / 132 tests pass (+2 new). Fixed in #14.
+- **`textInputAutocapitalization` guarded for macOS.** The
+  subscription-import field's `.textInputAutocapitalization(.never)`
+  is an iOS-only `View` modifier; on the Xcode 26.4 macOS SDK the
+  call trips `error: value of type 'some View' has no member
+  'textInputAutocapitalization'`. The line was added in the
+  v2.0.18 subscription-import UI cycle (#15) but tolerated by the
+  prior SDK. Wrapped in `#if !os(macOS)` / `#endif` — semantically
+  a no-op on the only target this project ships, ready for an
+  eventual iOS target. Caught at the v2.0.19 binary cut.
 
 ### Repository discipline (internal)
 - **GitHub Actions versions bumped** by Dependabot, both rebased
