@@ -54,7 +54,7 @@ jobs:
       # so the GITHUB_TOKEN doesn't sit in `.git/config` after
       # checkout. A compromised dependency or test fixture
       # executed in a later step could otherwise read it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       # rust-toolchain.toml is honoured automatically by rustup —
@@ -106,7 +106,7 @@ jobs:
     name: Swift (format lint)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: swift-format --lint
@@ -133,7 +133,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Install shellcheck
