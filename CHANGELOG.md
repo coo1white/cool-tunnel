@@ -9,6 +9,30 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.20] — 2026-05-06 (Xcode 26.4 macOS-SDK build hotfix)
+
+One Swift-side build hotfix caught at the v2.0.19 binary cut.
+The fix landed on `main` after the v2.0.19 tag and so is not in
+the v2.0.19 release artefact — v2.0.20 ships it. No engine
+change; `cool-tunnel-core` is recompiled only because the
+xcodeproj `MARKETING_VERSION` and `core/Cargo.toml` advance in
+lock-step (B5 anti-drift) and the bundled binary's
+`--version` string is asserted by `cut_release.sh` step 8.
+
+### Fixed
+- **`textInputAutocapitalization` guarded for macOS.** The
+  subscription-import field's `.textInputAutocapitalization(.never)`
+  is an iOS-only `View` modifier; on the Xcode 26.4 macOS SDK the
+  call trips `error: value of type 'some View' has no member
+  'textInputAutocapitalization'`. The line was added in the
+  v2.0.18 subscription-import UI cycle (#15) but tolerated by the
+  prior SDK. Wrapped in `#if !os(macOS)` / `#endif` — semantically
+  a no-op on the only target this project ships, ready for an
+  eventual iOS target. Caught at the v2.0.19 binary cut, fixed
+  on `main` at 50c511b but post-tag, so released here.
+
+---
+
 ## [2.0.19] — 2026-05-06 (Engine-side validation gap closed)
 
 One engine-layer fix that closes the audit ADR's "engine-side
@@ -40,15 +64,6 @@ scripted test).
   empty-password class — PR #12 fixed it at the UI layer in
   v2.0.17; this closes the same gap at the engine. Wire-format
   bytes unchanged. 132 / 132 tests pass (+2 new). Fixed in #14.
-- **`textInputAutocapitalization` guarded for macOS.** The
-  subscription-import field's `.textInputAutocapitalization(.never)`
-  is an iOS-only `View` modifier; on the Xcode 26.4 macOS SDK the
-  call trips `error: value of type 'some View' has no member
-  'textInputAutocapitalization'`. The line was added in the
-  v2.0.18 subscription-import UI cycle (#15) but tolerated by the
-  prior SDK. Wrapped in `#if !os(macOS)` / `#endif` — semantically
-  a no-op on the only target this project ships, ready for an
-  eventual iOS target. Caught at the v2.0.19 binary cut.
 
 ### Repository discipline (internal)
 - **GitHub Actions versions bumped** by Dependabot, both rebased
