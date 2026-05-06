@@ -9,6 +9,47 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.19] — 2026-05-06 (Engine-side validation gap closed)
+
+One engine-layer fix that closes the audit ADR's "engine-side
+validation gap" (`docs/adr/0001-audit-rules-locked-2026-05-05.md`
+§Open work), plus two routine GitHub Actions version bumps from
+Dependabot. No user-visible behaviour change in the Mac app —
+the fix is engine-internal and matters for any caller that
+bypasses the Swift Start button (CLI fixture, iOS port,
+scripted test).
+
+### Fixed
+- **`validate_profile` returns a structured failure for invalid
+  profiles.** Previously, an invalid `Profile` tripped serde's
+  `try_from` rejection at the outer `Request` deserialiser,
+  surfacing as `Outbound::Error` with `code: "invalid_request"` —
+  the right shape for "you sent me bad data" but the wrong shape
+  for a *probe* asking "is this profile valid?". The
+  `RequestKind::ValidateProfile` variant now carries `RawProfile`
+  (the unvalidated wire shape); the handler runs
+  `Profile::try_from(raw)` explicitly and emits
+  `Outbound::Response` with `ValidationReport { ok, reason }` in
+  both the valid and invalid case. Aligns stdio mode with HTTP
+  server-mode (which already returned 200 + `ok:false`) — the
+  two modes had a stated divergence "by design"; that design is
+  now uniform. The Swift caller at
+  `TunnelOrchestrator.swift:834` already had the
+  `validation.ok == false` branch coded; under the prior design
+  that branch was dead code. Defence in depth for the
+  empty-password class — PR #12 fixed it at the UI layer in
+  v2.0.17; this closes the same gap at the engine. Wire-format
+  bytes unchanged. 132 / 132 tests pass (+2 new). Fixed in #14.
+
+### Repository discipline (internal)
+- **GitHub Actions versions bumped** by Dependabot, both rebased
+  past the swift-format reconciliation (#11 in v2.0.17) and
+  brought current with `main` before merge:
+  - `actions/checkout` v4 → v6 (#2)
+  - `actions/cache` v4 → v5 (#1)
+
+---
+
 ## [2.0.17] — 2026-05-06 (Start-button validation + audit gate locked)
 
 One user-visible bug fix plus a repository-discipline cycle that
