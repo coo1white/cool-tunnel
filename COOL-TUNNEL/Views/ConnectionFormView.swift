@@ -109,7 +109,9 @@ public struct ConnectionFormView: View {
                 )
                 .textContentType(.URL)
                 .autocorrectionDisabled()
+                #if !os(macOS)
                 .textInputAutocapitalization(.never)
+                #endif
 
                 Button {
                     Task { await runImport() }
