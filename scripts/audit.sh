@@ -197,23 +197,25 @@ fi
 #
 #   (b) HTTPS to the Laravel panel's
 #       `/api/v1/subscription/{token}` endpoint. The Swift side
-#       decodes a `SubscriptionManifest`; we keep a fixture under
+#       decodes a `SubscriptionManifestV1` (`Core/Subscription.swift`
+#       since v2.0.21 — previously inlined in `TunnelOrchestrator`);
+#       we keep a fixture under
 #       `tests/fixtures/subscription_manifest_v1.json` and verify
-#       the decoder is wired up by grepping the relevant fields.
-#       A real round-trip test would require running Xcode tests
-#       (covered by step 5); this static probe is a belt-and-
-#       suspenders check that the field names didn't drift in a
-#       hand-edit.
+#       the decoder is wired up by grepping the relevant fields
+#       across `COOL-TUNNEL/Core/*.swift`. A real round-trip test
+#       would require running Xcode tests (covered by step 5);
+#       this static probe is a belt-and-suspenders check that the
+#       field names didn't drift in a hand-edit.
 log "schema sync probe (subscription manifest)"
 SCHEMA_FIXTURE="${REPO_ROOT}/tests/fixtures/subscription_manifest_v1.json"
-ORCH_FILE="${REPO_ROOT}/COOL-TUNNEL/Core/TunnelOrchestrator.swift"
-if [[ -f "${SCHEMA_FIXTURE}" && -f "${ORCH_FILE}" ]]; then
+DECODER_DIR="${REPO_ROOT}/COOL-TUNNEL/Core"
+if [[ -f "${SCHEMA_FIXTURE}" && -d "${DECODER_DIR}" ]]; then
     schema_missing=()
     for field in profiles host username password; do
         if ! grep -q "\"${field}\"" "${SCHEMA_FIXTURE}"; then
             schema_missing+=("fixture missing field: ${field}")
         fi
-        if ! grep -q "let ${field}" "${ORCH_FILE}"; then
+        if ! grep -rq --include='*.swift' "let ${field}" "${DECODER_DIR}"; then
             schema_missing+=("Swift decoder missing field: ${field}")
         fi
     done
@@ -224,9 +226,9 @@ if [[ -f "${SCHEMA_FIXTURE}" && -f "${ORCH_FILE}" ]]; then
         log "schema sync probe ✓"
     fi
 else
-    warn "schema fixture or decoder missing — schema probe skipped"
+    warn "schema fixture or decoder dir missing — schema probe skipped"
     if (( STRICT )); then
-        fail "schema fixture / decoder file not found (--strict)"
+        fail "schema fixture / decoder dir not found (--strict)"
         STATUS=1
     fi
 fi
