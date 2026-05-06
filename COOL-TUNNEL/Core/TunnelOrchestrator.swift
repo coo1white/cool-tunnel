@@ -466,67 +466,98 @@ public final class TunnelOrchestrator {
     /// All three become distinct `SubscriptionImportError` cases below
     /// so the SwiftUI banner copy can match the failure mode.
     public func importFromSubscriptionURL(_ urlString: String) async throws {
+        // Validate the URL shape (https:// + parseable) up-front so
+        // we surface `invalidURL` before paying for a fetch attempt.
+        // `SubscriptionClient.parseURL` enforces the same rules; we
+        // pre-call here so a malformed input throws the right
+        // user-facing error rather than the client's
+        // `malformedURL`/`nonHTTPSURL` distinction the UI would just
+        // collapse anyway.
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard
-            let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)),
-            url.scheme == "https"
+            let url = URL(string: trimmed),
+            url.scheme?.lowercased() == "https"
         else {
             throw SubscriptionImportError.invalidURL
         }
         appendInfo("subscription: fetching \(url.host ?? urlString)…")
-        let data: Data
-        let response: URLResponse
+
+        let manifest: SubscriptionManifestV1
         do {
-            (data, response) = try await URLSession.shared.data(from: url)
-        } catch {
-            throw SubscriptionImportError.networkError(error.localizedDescription)
+            manifest = try await SubscriptionClient().fetch(from: trimmed)
+        } catch let err as SubscriptionClientError {
+            throw Self.translate(err)
         }
-        guard let http = response as? HTTPURLResponse else {
-            throw SubscriptionImportError.networkError("non-HTTP response")
-        }
-        switch http.statusCode {
-        case 200..<300:
-            break  // fall through to JSON decode
-        case 401:
-            throw SubscriptionImportError.subscriptionRevoked
-        case 404, 422:
-            throw SubscriptionImportError.tokenInvalid
-        case 429:
-            throw SubscriptionImportError.rateLimited
-        case 500...599:
-            throw SubscriptionImportError.serverError(status: http.statusCode)
-        default:
-            throw SubscriptionImportError.unexpectedStatus(http.statusCode)
-        }
-        // Cover-site detection: SubscriptionController routes invalid
-        // tokens through FakeSiteController, which serves
-        // `text/html` with status 200. Treat any non-JSON content
-        // type as "token invalid" so the user sees an actionable
-        // banner rather than a "JSON decode failed" stack trace.
-        if let mime = http.mimeType, !mime.contains("json") {
-            throw SubscriptionImportError.tokenInvalid
-        }
-        let manifest: SubscriptionManifest
-        do {
-            manifest = try JSONDecoder().decode(SubscriptionManifest.self, from: data)
-        } catch {
-            // 200 + non-JSON body almost always means we hit the
-            // cover site for a bogus token. Surface the
-            // user-friendly variant rather than the decoder's
-            // raw description.
-            throw SubscriptionImportError.tokenInvalid
-        }
-        guard let first = manifest.profiles.first else {
+
+        // The client's `validate` already rejected an empty profile
+        // list; this guard is defence-in-depth and matches the
+        // existing public error type.
+        guard let primary = manifest.primaryProfile else {
             throw SubscriptionImportError.noProfiles
         }
+
+        // Preserve the user's chosen `localPort` and existing
+        // profile id (if any) — the manifest is the source of
+        // truth for credentials, not for per-machine UI state.
+        // **v2.0.21 (Phase A fix):** previously the `host:port`
+        // field was dropped on import — `Profile.server` got just
+        // `first.host`. Subscriptions for panels on non-default
+        // ports lost the port and silently fell back to the
+        // engine's hardcoded :443. Now we serialize `host:port`
+        // straight from the manifest's `ProfileV1`.
         let imported = Profile(
             id: selectedProfile?.id ?? UUID().uuidString,
-            server: first.host,
-            username: first.username,
-            password: first.password,
+            server: "\(primary.host):\(primary.port)",
+            username: primary.username,
+            password: primary.password,
             localPort: selectedProfile?.localPort ?? "1080"
         )
         selectedProfile = imported
-        appendInfo("subscription: imported \(first.host) (\(first.username))")
+        appendInfo("subscription: imported \(primary.host):\(primary.port) (\(primary.username))")
+    }
+
+    /// Translates a [`SubscriptionClientError`] (transport-shape
+    /// failures) into the UI-facing [`SubscriptionImportError`]
+    /// (failure-mode-shape errors, paired with actionable banner
+    /// copy in `errorDescription`). Status-code routing matches
+    /// the panel's `SubscriptionController` defensive-CDN cases:
+    /// the panel itself answers every error with a 200 cover-site,
+    /// so the explicit 4xx/5xx branches only fire when something
+    /// in front of the panel (CDN, proxy interposition, DNS
+    /// hijack) returns its own status.
+    private static func translate(_ err: SubscriptionClientError) -> SubscriptionImportError {
+        switch err {
+        case .malformedURL, .nonHTTPSURL:
+            return .invalidURL
+        case .transportFailed(let msg):
+            return .networkError(msg)
+        case .httpStatus(let code):
+            switch code {
+            case 401: return .subscriptionRevoked
+            case 404, 422: return .tokenInvalid
+            case 429: return .rateLimited
+            case 500...599: return .serverError(status: code)
+            default: return .unexpectedStatus(code)
+            }
+        case .malformedManifest:
+            // 200 + non-manifest body is the cover-site path the
+            // panel uses for any rejected token — UI surfaces this
+            // as `tokenInvalid` so the user understands the URL
+            // didn't match an account.
+            return .tokenInvalid
+        case .manifestRejected(let validation):
+            switch validation {
+            case .unsupportedVersion(let got, _):
+                return .unsupportedVersion(got: got)
+            case .noProfiles:
+                return .noProfiles
+            case .expired:
+                return .manifestExpired
+            case .stale(let ageSeconds):
+                let days = max(1, Int(ageSeconds / (24 * 60 * 60)))
+                return .manifestStale(daysOld: days)
+            }
+        }
     }
 
     // MARK: - Mode switching
@@ -955,7 +986,8 @@ public final class TunnelOrchestrator {
                 .startProxy(
                     binaryPath: descriptor.url.path,
                     configPath: paths.configFile.path,
-                    port: port
+                    port: port,
+                    monitorIntervalSecs: nil
                 ))
             guard case .started = started else {
                 throw OrchestratorError.unexpectedResponse
@@ -1558,6 +1590,17 @@ public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
     case unexpectedStatus(Int)
     /// JSON decoded but had no usable profile.
     case noProfiles
+    /// Manifest's `version` field is something other than `1`.
+    /// Either a counterfeit panel or a v2 server emitting v2-only
+    /// manifests; the v1-only client refuses to interpret either.
+    case unsupportedVersion(got: UInt32)
+    /// Manifest's `expires_at` is in the past — the panel told
+    /// the client to re-fetch and the client got a stale URL.
+    case manifestExpired
+    /// Manifest's `issued_at` is more than 7 days old. Almost
+    /// always a caching proxy on the user's network; trying again
+    /// over a different network usually resolves it.
+    case manifestStale(daysOld: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -1577,18 +1620,23 @@ public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
             "Unexpected server response (HTTP \(status))."
         case .noProfiles:
             "The subscription manifest contained no usable profiles."
+        case .unsupportedVersion(let got):
+            "This subscription URL uses manifest version \(got); this app understands version 1. Update the app or ask the operator for a v1 URL."
+        case .manifestExpired:
+            "This subscription URL has expired. Ask the administrator for a new one."
+        case .manifestStale(let daysOld):
+            "The subscription manifest is \(daysOld) days old. A network-level cache on your connection may be serving a stale copy — try a different network or DNS resolver."
         }
     }
 }
 
-/// Wire format of the server's subscription manifest (v1).
-/// Only the fields the import path actually needs are decoded.
-private struct SubscriptionManifest: Decodable {
-    let profiles: [ManifestProfile]
-
-    struct ManifestProfile: Decodable {
-        let host: String
-        let username: String
-        let password: String
-    }
-}
+// **v2.0.21 (Phase A):** removed the per-orchestrator
+// `SubscriptionManifest` private struct. Only `host`, `username`,
+// `password` were decoded — the manifest's `port`, `version`,
+// `expires_at`, `issued_at`, and `capabilities` fields were
+// silently dropped. Replaced by `SubscriptionManifestV1` in
+// `Core/Subscription.swift` (the full ct-protocol mirror) and
+// `SubscriptionClient` in `Core/SubscriptionClient.swift` (fetch +
+// validate). The orchestrator's `importFromSubscriptionURL` now
+// calls into those types and translates their structured errors
+// into `SubscriptionImportError` for the UI.

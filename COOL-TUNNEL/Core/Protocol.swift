@@ -11,6 +11,15 @@
 
 import Foundation
 
+/// Wire-format protocol version this Swift build expects from the
+/// engine. Compared against the engine's compiled-in
+/// `cool_tunnel_core::protocol::PROTOCOL_VERSION` during
+/// `CoreClient.start()`. Bump in lock-step with the Rust constant on
+/// any breaking change to the JSON-over-stdio frame shapes — additive
+/// changes (new request variants, new optional fields) do not require
+/// a bump.
+public let coreProtocolVersion: UInt32 = 1
+
 // MARK: - Profile
 
 /// Wire-format profile shared with the engine. Field names match
@@ -189,6 +198,18 @@ public enum CoreResponse: Sendable, Hashable {
     /// is the canonical "is naive alive" flag the orchestrator
     /// routes on; `pid` is for diagnostic logging only.
     case naiveLiveness(running: Bool, pid: UInt32?)
+    /// `hello` reply carrying the engine's compiled-in
+    /// `protocolVersion` and `engineVersion`. The Swift caller
+    /// compares `protocolVersion` against `coreProtocolVersion`
+    /// during `CoreClient.start()` and refuses to proceed on a
+    /// hard mismatch. `engineVersion` is purely informational —
+    /// surfaced in support diagnostics so a bug report ties to
+    /// an exact Rust binary.
+    case helloReply(protocolVersion: UInt32, engineVersion: String)
+    /// `probe_server` reply. Carries a structured reachability
+    /// report rather than a transport error so the UI can render
+    /// timing alongside an unreachable result.
+    case probe(ProbeReport)
 
     private enum Tag: String, Decodable {
         case ack
@@ -200,10 +221,14 @@ public enum CoreResponse: Sendable, Hashable {
         case diagnostic
         case latency
         case naiveLiveness = "naive_liveness"
+        case helloReply = "hello_reply"
+        case probe
     }
 
     private enum FlatKeys: String, CodingKey {
         case type, json, js, pid, running
+        case protocolVersion = "protocol_version"
+        case engineVersion = "engine_version"
     }
 }
 
@@ -233,6 +258,19 @@ extension CoreResponse: Decodable {
                 running: try flat.decode(Bool.self, forKey: .running),
                 pid: try flat.decodeIfPresent(UInt32.self, forKey: .pid)
             )
+        case .helloReply:
+            self = .helloReply(
+                protocolVersion: try flat.decode(UInt32.self, forKey: .protocolVersion),
+                engineVersion: try flat.decode(String.self, forKey: .engineVersion)
+            )
+        case .probe:
+            // The Rust side flattens `Probe(ProbeReport)` into the
+            // outer payload via `#[serde(tag = "type")]`, so the
+            // probe report's fields live alongside `"type"` rather
+            // than nested under a `data` key. Decoding the report
+            // straight from `decoder` (the same container that
+            // already produced the tag) picks them up.
+            self = .probe(try ProbeReport(from: decoder))
         }
     }
 }
@@ -281,6 +319,33 @@ public struct LatencySample: Sendable, Codable, Hashable {
         case connectMs = "connect_ms"
         case tlsMs = "tls_ms"
         case firstByteMs = "first_byte_ms"
+    }
+}
+
+/// Pre-flight reachability probe result. Mirrors
+/// `cool_tunnel_core::protocol::ProbeReport`.
+///
+/// `dnsResolveMs` and `tcpConnectMs` are reported independently so
+/// the UI can distinguish a slow resolver (long DNS, short TCP,
+/// `reachable == true`) from a blocked port (long or zero TCP,
+/// `reachable == false`, `error` describes the failure).
+public struct ProbeReport: Sendable, Codable, Hashable {
+    /// The probed `host:port` after default-port substitution.
+    public let server: String
+    /// `true` when DNS resolved and the TCP connect completed.
+    public let reachable: Bool
+    /// DNS resolution wall-clock in milliseconds.
+    public let dnsResolveMs: Double
+    /// TCP connect wall-clock in milliseconds. Zero when DNS
+    /// failed and the connect step did not run.
+    public let tcpConnectMs: Double
+    /// Free-form failure detail when `reachable` is `false`.
+    public let error: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case server, reachable, error
+        case dnsResolveMs = "dns_resolve_ms"
+        case tcpConnectMs = "tcp_connect_ms"
     }
 }
 
@@ -337,7 +402,15 @@ public enum CoreRequest: Sendable, Hashable {
     case validateProfile(Profile)
     case generateNaiveConfig(Profile)
     case generatePac(directDomains: [String], port: UInt16)
-    case startProxy(binaryPath: String, configPath: String, port: UInt16)
+    /// Spawn the bundled `naive` binary and start streaming its
+    /// output. `monitorIntervalSecs` overrides the engine's
+    /// connection-monitor poll cadence (clamped server-side to
+    /// `[1, 60]`); pass `nil` to keep the historical 5-second
+    /// default.
+    case startProxy(
+        binaryPath: String, configPath: String, port: UInt16,
+        monitorIntervalSecs: UInt64? = nil
+    )
     case stopProxy
     case runDiagnostics
     case runLatencyTest(mode: ProxyTestMode)
@@ -351,6 +424,20 @@ public enum CoreRequest: Sendable, Hashable {
     /// explicit probe the orchestrator would declare success
     /// over a dead engine.
     case probeNaiveLive
+    /// Wire-protocol handshake. Sent by `CoreClient.start()`
+    /// immediately after the subprocess spawns; the engine
+    /// replies with `helloReply(protocolVersion:engineVersion:)`
+    /// so the client can refuse to proceed on a hard version
+    /// mismatch. Older engines that predate this method return
+    /// an `invalid_request` error, which `CoreClient` treats as
+    /// protocol version 0 (legacy) and accepts.
+    case hello
+    /// Pre-flight reachability probe against the upstream server
+    /// described by `profile`. Resolves DNS and opens a TCP
+    /// connection (no TLS or auth). `timeoutSecs` is the
+    /// per-step deadline in seconds, clamped server-side to
+    /// `[1, 30]`; `nil` defaults to 5.
+    case probeServer(profile: Profile, timeoutSecs: UInt64? = nil)
 
     public var method: String {
         switch self {
@@ -363,6 +450,8 @@ public enum CoreRequest: Sendable, Hashable {
         case .runLatencyTest: "run_latency_test"
         case .shutdown: "shutdown"
         case .probeNaiveLive: "probe_naive_live"
+        case .hello: "hello"
+        case .probeServer: "probe_server"
         }
     }
 }
@@ -386,20 +475,30 @@ public struct CoreRequestFrame: Sendable, Encodable {
         try container.encode(id, forKey: .id)
         try container.encode(request.method, forKey: .method)
         switch request {
-        case .stopProxy, .runDiagnostics, .shutdown, .probeNaiveLive:
+        case .stopProxy, .runDiagnostics, .shutdown, .probeNaiveLive, .hello:
             try container.encodeNil(forKey: .params)
         case .validateProfile(let profile),
             .generateNaiveConfig(let profile):
             try container.encode(ProfileEnvelope(profile: profile), forKey: .params)
         case .generatePac(let domains, let port):
             try container.encode(GeneratePacParams(directDomains: domains, port: port), forKey: .params)
-        case .startProxy(let binary, let config, let port):
+        case .startProxy(let binary, let config, let port, let monitorInterval):
             try container.encode(
-                StartProxyParams(binaryPath: binary, configPath: config, port: port),
+                StartProxyParams(
+                    binaryPath: binary,
+                    configPath: config,
+                    port: port,
+                    monitorIntervalSecs: monitorInterval
+                ),
                 forKey: .params
             )
         case .runLatencyTest(let mode):
             try container.encode(LatencyParams(mode: mode), forKey: .params)
+        case .probeServer(let profile, let timeoutSecs):
+            try container.encode(
+                ProbeServerParams(profile: profile, timeoutSecs: timeoutSecs),
+                forKey: .params
+            )
         }
     }
 }
@@ -422,14 +521,46 @@ private struct StartProxyParams: Encodable {
     let binaryPath: String
     let configPath: String
     let port: UInt16
+    let monitorIntervalSecs: UInt64?
 
     enum CodingKeys: String, CodingKey {
         case binaryPath = "binary_path"
         case configPath = "config_path"
         case port
+        case monitorIntervalSecs = "monitor_interval_secs"
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(binaryPath, forKey: .binaryPath)
+        try container.encode(configPath, forKey: .configPath)
+        try container.encode(port, forKey: .port)
+        // Omit `monitor_interval_secs` from the wire when nil so an
+        // older engine that doesn't know the field deserializes the
+        // frame cleanly (it would error on a `null` for an unknown
+        // key only if `deny_unknown_fields` were set; the engine
+        // doesn't set that today, but keeping the wire minimal is
+        // forward-compatible regardless).
+        try container.encodeIfPresent(monitorIntervalSecs, forKey: .monitorIntervalSecs)
     }
 }
 
 private struct LatencyParams: Encodable {
     let mode: ProxyTestMode
+}
+
+private struct ProbeServerParams: Encodable {
+    let profile: Profile
+    let timeoutSecs: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case profile
+        case timeoutSecs = "timeout_secs"
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(profile, forKey: .profile)
+        try container.encodeIfPresent(timeoutSecs, forKey: .timeoutSecs)
+    }
 }

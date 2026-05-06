@@ -34,6 +34,23 @@ public enum CoreClientError: Error, Sendable, Equatable {
     /// real error so the UI can recover instead of waiting on a
     /// silent hang.
     case requestTimeout
+    /// The engine reported a wire-protocol version that this Swift
+    /// build does not understand. Carries the engine's reported
+    /// version so the UI can render a precise diagnostic ("expected
+    /// v1, engine reports v2 — please update the app") rather than
+    /// a generic decoding error. Raised from `start()` after the
+    /// `hello` handshake; `start()` terminates the subprocess
+    /// before throwing so a stale engine never lingers behind a
+    /// failed launch.
+    case protocolVersionMismatch(expected: UInt32, engine: UInt32, engineVersion: String)
+    /// The engine answered the `hello` handshake with an
+    /// unexpected response shape. Either the engine is broken or
+    /// (much more likely) the user pointed `customRustCorePath`
+    /// at a non-`cool-tunnel-core` binary and the JSON decoder
+    /// happened to limp through far enough to land here. Raised
+    /// from `start()`; the subprocess is torn down before the
+    /// throw.
+    case malformedHandshake
 }
 
 /// Long-lived actor that drives the `cool-tunnel-core` subprocess.
@@ -126,6 +143,70 @@ public actor CoreClient {
                 }
             }
         }
+
+        // Wire-protocol handshake. Block the rest of `start()` on
+        // it so a hard version mismatch tears the subprocess down
+        // before any caller sends `validate_profile` or
+        // `start_proxy` against an engine speaking a foreign
+        // dialect — the historical failure mode there was a flurry
+        // of `invalid_request` decode errors that gave the user no
+        // hint about the real cause. An engine older than v2.0.20
+        // (which doesn't implement `hello`) returns
+        // `invalid_request` for the unknown method; we treat that
+        // as legacy compatibility and continue without complaint.
+        try await performHandshake()
+    }
+
+    /// Sends the `hello` handshake and validates the engine's
+    /// reply. On a hard version mismatch (or a malformed reply),
+    /// terminates the subprocess and throws — `start()` then
+    /// surfaces the throw to the caller and the engine never
+    /// outlives a failed launch.
+    private func performHandshake() async throws {
+        let response: CoreResponse
+        do {
+            response = try await sendUnchecked(.hello)
+        } catch let error as ErrorPayload where error.code == "invalid_request"
+            || error.code == "unimplemented_method"
+        {
+            // Engine predates the handshake. The historical
+            // behaviour is what it implements; the Swift caller
+            // routes around the missing version negotiation by
+            // accepting whatever the engine produces. Log so a
+            // support ticket can correlate "user is on a stale
+            // engine" with later weirdness, but do not fail.
+            Self.logger.notice(
+                "engine does not implement hello handshake; treating as legacy (protocol_version=0)"
+            )
+            return
+        } catch {
+            // Anything else — transport timeout, decode failure,
+            // engine crash — is fatal. Tear down before re-throwing
+            // so the subprocess doesn't outlive the failed start.
+            await terminate()
+            throw error
+        }
+
+        guard case .helloReply(let engineVersion, let engineSemver) = response else {
+            // The engine answered `hello` with something other
+            // than `helloReply`. Almost certainly a non-
+            // `cool-tunnel-core` binary at the resolved path.
+            await terminate()
+            throw CoreClientError.malformedHandshake
+        }
+
+        if engineVersion != coreProtocolVersion {
+            await terminate()
+            throw CoreClientError.protocolVersionMismatch(
+                expected: coreProtocolVersion,
+                engine: engineVersion,
+                engineVersion: engineSemver
+            )
+        }
+
+        Self.logger.info(
+            "engine handshake ok: protocol=\(engineVersion, privacy: .public) engine=\(engineSemver, privacy: .public)"
+        )
     }
 
     /// **Subproc-F#11a (v0.1.7.19):** dedicated logger for
@@ -161,6 +242,33 @@ public actor CoreClient {
     public func send(_ request: CoreRequest) async throws -> CoreResponse {
         guard process != nil else { throw CoreClientError.notRunning }
         return try await sendUnchecked(request)
+    }
+
+    /// Pre-flight reachability probe against the upstream server in
+    /// `profile`. Resolves DNS and opens a TCP connection; does not
+    /// run a TLS handshake or auth check (those continue to live in
+    /// `runDiagnostics`, which requires a live proxy).
+    ///
+    /// `timeoutSecs` is the per-step deadline in seconds, clamped
+    /// engine-side to `[1, 30]`. `nil` defaults to 5.
+    ///
+    /// The probe always resolves to a `ProbeReport` — including for
+    /// unreachable servers — so the UI can render timing alongside
+    /// failures rather than catching transport-error exceptions.
+    /// Throws only when the engine itself fails to start the probe
+    /// (a `probe_failed` error frame from the engine, decoded into
+    /// an `ErrorPayload`).
+    public func probe(
+        profile: Profile,
+        timeoutSecs: UInt64? = nil
+    ) async throws -> ProbeReport {
+        let response = try await send(.probeServer(profile: profile, timeoutSecs: timeoutSecs))
+        guard case .probe(let report) = response else {
+            throw CoreClientError.decodingFailed(
+                "expected probe response, got \(response)"
+            )
+        }
+        return report
     }
 
     private func sendUnchecked(_ request: CoreRequest) async throws -> CoreResponse {
