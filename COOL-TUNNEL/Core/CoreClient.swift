@@ -166,7 +166,8 @@ public actor CoreClient {
         let response: CoreResponse
         do {
             response = try await sendUnchecked(.hello)
-        } catch let error as ErrorPayload where error.code == "invalid_request"
+        } catch let error as ErrorPayload
+            where error.code == "invalid_request"
             || error.code == "unimplemented_method"
         {
             // Engine predates the handshake. The historical
