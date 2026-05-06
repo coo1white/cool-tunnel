@@ -43,6 +43,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{Port, Profile, ProxyTestMode, RawProfile};
 
+/// Wire-format protocol version negotiated by [`RequestKind::Hello`] /
+/// [`ResponsePayload::HelloReply`].
+///
+/// Bump on any breaking change to the JSON-over-stdio frame shapes
+/// (renamed/removed variants, changed field types, semantic
+/// reinterpretations). Additive changes — new request variants, new
+/// optional fields — keep the existing version number; the Swift
+/// caller and Rust engine each fall back gracefully on the absence of
+/// new fields they don't understand.
+///
+/// The Swift client compares this against its own constant during
+/// `CoreClient.start()` and refuses to proceed on a hard mismatch
+/// rather than letting the user hit cryptic deserialization errors
+/// later in the session. For the legacy case of an older engine that
+/// doesn't implement `Hello` at all (returns `invalid_request` for the
+/// unknown method), the Swift side treats that as protocol version 0
+/// — accept and continue, since the historical behaviour is what the
+/// engine still implements.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// One request frame from the Swift app.
 ///
 /// `id` is a client-chosen monotonically increasing integer. The engine
@@ -121,6 +141,22 @@ pub enum RequestKind {
         config_path: PathBuf,
         /// The local SOCKS listener port (must match what's in the config).
         port: Port,
+        /// Optional override for the connection-monitor poll
+        /// interval in seconds. The monitor periodically probes
+        /// `lsof` for the supervised PID's listening socket and the
+        /// bound flag (loopback) for the anomaly detector; lowering
+        /// the interval cuts the time-to-detect for naive crashes
+        /// at the cost of more `lsof` invocations per minute.
+        ///
+        /// `None` (or the field absent on the wire) keeps the
+        /// historical 5-second cadence. The handler clamps the
+        /// effective value into `[1, 60]` so a misuse can't burn
+        /// CPU by spinning lsof at sub-second intervals or hide a
+        /// crash for hours by setting an enormous value. Added in
+        /// `PROTOCOL_VERSION` 1 as an optional field — older engines
+        /// that ignore it stay on the constant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor_interval_secs: Option<u64>,
     },
     /// Stop the running `naive` process.
     StopProxy,
@@ -147,6 +183,52 @@ pub enum RequestKind {
     /// orchestrator can route on. Cheap: a single in-process
     /// read of `EngineState.supervisor.is_some()`.
     ProbeNaiveLive,
+    /// Wire-protocol handshake. Sent by the Swift client right
+    /// after spawning the engine subprocess; the engine answers
+    /// with [`ResponsePayload::HelloReply`] carrying the
+    /// [`PROTOCOL_VERSION`] constant compiled into this binary
+    /// plus its `CARGO_PKG_VERSION`. The Swift caller compares
+    /// the protocol version to its own and refuses to proceed
+    /// on hard mismatch.
+    ///
+    /// Older engines that predate this variant return an
+    /// `invalid_request` error. The Swift side treats that as
+    /// protocol version 0 (legacy) and continues — the
+    /// historical behaviour is what the engine still
+    /// implements.
+    Hello,
+    /// Pre-flight reachability probe against the upstream
+    /// server. Resolves the hostname and opens a TCP connection
+    /// to `host:port` (defaulting to `:443` when the profile's
+    /// `ServerAddress` carries no explicit port), measuring
+    /// each step. Surfaced in the Swift UI as a "Test
+    /// Connection" affordance the user can hit before clicking
+    /// Start; catches the most common failure modes — wrong
+    /// hostname, blocked port, server down, SNI proxy not
+    /// responding — without standing up the full naive child.
+    ///
+    /// Intentionally *not* a TLS handshake or auth probe at
+    /// this revision: a real auth probe would require pulling
+    /// in a TLS stack (the crate forbids `unsafe_code`, so
+    /// rolling our own is off the table) and the most common
+    /// reason a connect succeeds today is that the cover-site
+    /// is replying — useful signal on its own. Full TLS+auth
+    /// validation continues to live in `RunDiagnostics`, which
+    /// requires a running proxy.
+    ProbeServer {
+        /// The validated profile to probe. Only the
+        /// [`crate::domain::ServerAddress`] is consulted; the
+        /// rest of the profile is accepted for parity with
+        /// other variants and so a future revision can layer
+        /// in an auth probe without changing the wire shape.
+        profile: Profile,
+        /// Optional per-step deadline in seconds, clamped into
+        /// `[1, 30]`. `None` defaults to 5. Each step (DNS,
+        /// TCP) gets its own deadline so the worst-case wall
+        /// clock is `2 * timeout_secs`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// One frame written by the engine on stdout.
@@ -216,6 +298,18 @@ pub enum ResponsePayload {
         /// PID of the running naive child, when running.
         pid: Option<u32>,
     },
+    /// `hello` reply. Carries the engine's compiled-in
+    /// [`PROTOCOL_VERSION`] and `CARGO_PKG_VERSION` so the
+    /// Swift caller can refuse a hard version mismatch and
+    /// surface the engine version in support diagnostics.
+    HelloReply {
+        /// Wire-format protocol version of this engine build.
+        protocol_version: u32,
+        /// `cool-tunnel-core` semver (`CARGO_PKG_VERSION`).
+        engine_version: String,
+    },
+    /// `probe_server` reply.
+    Probe(ProbeReport),
 }
 
 /// Structured failure detail accompanying an [`Outbound::Error`] frame.
@@ -245,6 +339,40 @@ pub struct ValidationReport {
     pub ok: bool,
     /// When `ok` is `false`, a human-readable reason. `None` when `ok`.
     pub reason: Option<String>,
+}
+
+/// Result of [`RequestKind::ProbeServer`].
+///
+/// Resolution and connect are timed independently so the Swift UI can
+/// distinguish "the DNS server is slow" (long `dns_resolve_ms`, short
+/// `tcp_connect_ms`, `reachable: true`) from "the firewall ate the
+/// SYN" (long or zero `tcp_connect_ms`, `reachable: false`,
+/// `error: Some("…connect refused/timed out…")`).
+///
+/// On any failure the report still resolves with `reachable: false`
+/// and a human-readable `error` rather than producing an
+/// [`Outbound::Error`] frame — the probe completed, the *server* did
+/// not, and the Swift caller wants to render the timing alongside the
+/// failure rather than catch a transport-error exception.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeReport {
+    /// The probed `host:port` after default-port substitution.
+    /// `port` defaults to 443 when the profile's
+    /// [`crate::domain::ServerAddress`] carried no explicit port.
+    pub server: String,
+    /// `true` when DNS resolved and the TCP connect completed.
+    pub reachable: bool,
+    /// DNS resolution wall-clock in milliseconds. `0.0` when the
+    /// resolver step did not run (should not happen — we always
+    /// resolve first).
+    pub dns_resolve_ms: f64,
+    /// TCP connect wall-clock in milliseconds. `0.0` when the
+    /// connect step did not run (DNS failed first).
+    pub tcp_connect_ms: f64,
+    /// Free-form failure detail when `reachable` is `false`. `None`
+    /// when the probe succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Aggregate result of [`RequestKind::RunDiagnostics`].

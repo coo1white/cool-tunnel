@@ -17,9 +17,10 @@ use cool_tunnel_core::config::{generate_pac, NaiveConfig};
 use cool_tunnel_core::diagnostics::{run_diagnostics, run_latency};
 use cool_tunnel_core::domain::Profile;
 use cool_tunnel_core::monitor;
+use cool_tunnel_core::preflight;
 use cool_tunnel_core::protocol::{
     AnomalyReason, ErrorPayload, Event, Outbound, Request, RequestKind, ResponsePayload,
-    ValidationReport,
+    ValidationReport, PROTOCOL_VERSION,
 };
 use cool_tunnel_core::supervisor::ProxySupervisor;
 use tokio::io::{AsyncWriteExt as _, BufReader};
@@ -28,7 +29,23 @@ use tokio::task::JoinHandle;
 
 const OUTBOUND_BUFFER: usize = 256;
 const EVENT_BUFFER: usize = 256;
-const MONITOR_INTERVAL_SECS: u64 = 5;
+/// Default monitor poll interval (seconds) when the Swift caller
+/// passes no explicit `monitor_interval_secs` on the
+/// `start_proxy` request. Historical value, preserved for
+/// pre-handshake clients and unit tests.
+const DEFAULT_MONITOR_INTERVAL_SECS: u64 = 5;
+/// Hard floor on the configurable monitor interval. Below this the
+/// repeated `lsof` invocations dominate CPU time on Intel Macs and
+/// the snapshot results race against each other inside the
+/// `Debouncer`. The clamp lives here rather than at the wire layer
+/// so the engine remains the source of truth even if a future
+/// caller skips the validation in `Protocol.swift`.
+const MIN_MONITOR_INTERVAL_SECS: u64 = 1;
+/// Hard ceiling on the monitor interval. A naive crash invisible
+/// for over a minute defeats the point of the monitor — the user
+/// sees broken connectivity with no engine signal to drive the
+/// reconnect UI.
+const MAX_MONITOR_INTERVAL_SECS: u64 = 60;
 // `ANOMALY_DEBOUNCE` and the previous "Per-anomaly-reason
 // suppression window" doc-comment have been removed: the
 // `Debouncer::default()` impl in `util::debounce` is now the
@@ -280,10 +297,22 @@ async fn handle_request(
     outbound: mpsc::Sender<Outbound>,
     events: mpsc::Sender<Event>,
 ) {
+    use tracing::Instrument as _;
     let id = request.id;
     let was_start = matches!(request.kind, RequestKind::StartProxy { .. });
     let was_stop = matches!(request.kind, RequestKind::StopProxy);
-    let result = dispatch(state, request.kind, outbound.clone(), events).await;
+    // Attach `request_id` to every log line emitted inside this
+    // dispatch. Without this, `tracing::warn!(error = %err, "lsof
+    // probe failed")` from `monitor_loop` and friends has no way
+    // to be tied back to the Swift caller's `Request.id` — making
+    // post-mortems on a stuck request a guess about which log line
+    // belongs to which call. Short, descriptive span name so the
+    // `tracing-subscriber::fmt` pretty-printer renders it
+    // compactly: `dispatch{id=42}: handler-message`.
+    let span = tracing::info_span!("dispatch", request_id = id);
+    let result = dispatch(state, request.kind, outbound.clone(), events)
+        .instrument(span)
+        .await;
     let frame = match result {
         Ok(payload) => Outbound::Response {
             id,
@@ -315,6 +344,14 @@ async fn handle_request(
     }
 }
 
+// `dispatch` is a single match-on-RequestKind. Each arm is a small
+// thin wrapper around either an in-process function (`generate_pac`,
+// `preflight::probe`) or a state-mutating helper (`start_proxy`,
+// stop). Extracting the arms into per-method helpers would replace
+// 114 lines of arm bodies with 11 helper signatures plus 11
+// invocations — a 2x line increase for no readability gain. Suppress
+// the lint at the boundary rather than fragmenting the dispatch.
+#[allow(clippy::too_many_lines)]
 async fn dispatch(
     state: Arc<Mutex<EngineState>>,
     kind: RequestKind,
@@ -369,7 +406,13 @@ async fn dispatch(
             binary_path,
             config_path,
             port,
-        } => start_proxy(state, binary_path, config_path, port, events).await,
+            monitor_interval_secs,
+        } => {
+            let interval = monitor_interval_secs
+                .unwrap_or(DEFAULT_MONITOR_INTERVAL_SECS)
+                .clamp(MIN_MONITOR_INTERVAL_SECS, MAX_MONITOR_INTERVAL_SECS);
+            start_proxy(state, binary_path, config_path, port, interval, events).await
+        }
         RequestKind::StopProxy => {
             // Take supervisor + monitor under the lock AND set
             // `stopping = true` so a concurrent `start_proxy` can't
@@ -443,6 +486,28 @@ async fn dispatch(
                 pid,
             })
         }
+        // Wire-format handshake. Pure read of the compile-time
+        // version constants; no engine state involved. Must remain
+        // cheap and side-effect-free — the Swift caller fires this
+        // immediately after `start()` and blocks the user's first
+        // request behind it.
+        RequestKind::Hello => Ok(ResponsePayload::HelloReply {
+            protocol_version: PROTOCOL_VERSION,
+            engine_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }),
+        // Pre-flight reachability probe. The handler always
+        // resolves to a `Response::Probe(report)` — including for
+        // unreachable servers — so the Swift UI can render timing
+        // alongside the failure mode rather than catching a
+        // transport-level error. Hard runtime errors (cannot
+        // start the probe at all) bubble up as `probe_failed`.
+        RequestKind::ProbeServer {
+            profile,
+            timeout_secs,
+        } => match preflight::probe(&profile, timeout_secs).await {
+            Ok(report) => Ok(ResponsePayload::Probe(report)),
+            Err(err) => Err(ErrorPayload::new("probe_failed", err.to_string())),
+        },
         // The lib crate defines `RequestKind` with
         // `#[non_exhaustive]`; the binary crate (this file is a
         // submodule of `main.rs`) imports it through the public
@@ -476,6 +541,7 @@ async fn start_proxy(
     binary_path: std::path::PathBuf,
     config_path: std::path::PathBuf,
     port: cool_tunnel_core::domain::Port,
+    monitor_interval_secs: u64,
     events: mpsc::Sender<Event>,
 ) -> Result<ResponsePayload, ErrorPayload> {
     // Hold the engine mutex across the entire spawn. The previous
@@ -527,7 +593,13 @@ async fn start_proxy(
     // natural-death emit (because the gate was claimed by the
     // PRIOR session's stop).
     guard.emitted_stopped = false;
-    let monitor_handle = tokio::spawn(monitor_loop(pid, port, events, Arc::clone(&state)));
+    let monitor_handle = tokio::spawn(monitor_loop(
+        pid,
+        port,
+        monitor_interval_secs,
+        events,
+        Arc::clone(&state),
+    ));
     guard.supervisor = Some(supervisor);
     guard.monitor_handle = Some(monitor_handle);
     guard.active_port = Some(port);
@@ -537,10 +609,11 @@ async fn start_proxy(
 async fn monitor_loop(
     pid: u32,
     port: cool_tunnel_core::domain::Port,
+    interval_secs: u64,
     events: mpsc::Sender<Event>,
     state: Arc<Mutex<EngineState>>,
 ) {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await;
 

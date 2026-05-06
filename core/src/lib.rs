@@ -29,6 +29,7 @@ pub mod diagnostics;
 pub mod domain;
 pub mod error;
 pub mod monitor;
+pub mod preflight;
 pub mod protocol;
 pub mod redaction;
 pub mod supervisor;
