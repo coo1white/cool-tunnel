@@ -83,6 +83,16 @@ silently falling back to `:443`. Landed in #17.
   `SubscriptionManifest` struct (only decoded host / username /
   password) is gone; replaced by the full V1 mirror.
 
+### Repository discipline (internal)
+- **Audit schema-sync probe follows the decoder.** PR #17 moved
+  the `SubscriptionManifest` decoder out of `TunnelOrchestrator`
+  into `Core/Subscription.swift`; the audit step's hard-coded
+  `ORCH_FILE` path didn't follow, so the v2.0.21 binary cut
+  failed at `audit.sh` step 7 with four "Swift decoder missing
+  field" reports even though the decoder was in place. The
+  probe now greps `COOL-TUNNEL/Core/*.swift` recursively and
+  is robust to future file moves within `Core/`.
+
 ### Bundled
 - NaiveProxy v148.0.7778.96-2 (unchanged)
 - Cool Tunnel Core v2.0.21
