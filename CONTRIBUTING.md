@@ -65,7 +65,21 @@ scripts/package_release.sh 0.1.7
 
 ## Running the test sweep
 
-Before sending a pull request, run:
+Before sending a pull request, run the one-line equivalent of the CI
+gate:
+
+```sh
+scripts/preflight.sh
+```
+
+That covers `cargo fmt --check`, `cargo clippy -- -D warnings`,
+`cargo test`, `cargo deny check`, `xcrun swift-format lint --strict`,
+and `shellcheck scripts/*.sh` — every check `.github/workflows/ci.yml`
+runs, with the same flags. Exits non-zero on the first batch of
+failures.
+
+If you prefer to run the checks manually (or to debug a single one),
+the underlying commands are:
 
 ```sh
 # Rust
@@ -83,9 +97,11 @@ cargo deny check               # advisories, dup versions, licences
 # regression can't re-ship silently.
 cargo test --test chaos --release
 
-# Swift
+# Swift — invoke via `xcrun` so the toolchain binary is found
+# regardless of $PATH state. Bare `swift-format` exits 127 on the
+# CI runner; F8a in 2026-05-05's audit absorbed the same lesson.
 cd ..
-swift format lint --recursive --strict --configuration .swift-format COOL-TUNNEL
+xcrun swift-format lint --recursive --strict --configuration .swift-format COOL-TUNNEL
 
 # Shell
 shellcheck scripts/*.sh
