@@ -9,6 +9,86 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 release on the Long-Term Servicing Channel line — see
 [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.21] — 2026-05-06 (Connection robustness: handshake, pre-flight probe, subscription validation)
+
+Two-phase hardening of the Swift↔Rust JSON-over-stdio bridge
+and the subscription-import path. No wire-incompatible change —
+old engines that lack the new `Hello` method are accepted as
+legacy — but every fresh launch now performs a structured probe
+before traffic flows, and every subscription manifest is
+validated against the documented v1 schema before the first
+profile is written. One real bug shipped along with the
+robustness work: subscribers on non-default panel ports were
+silently falling back to `:443`. Landed in #17.
+
+### Added
+- **`Hello` / `HelloReply` handshake (`PROTOCOL_VERSION = 1`).**
+  `CoreClient.start()` runs the handshake immediately after
+  spawning the engine subprocess. Engines that lack the method
+  (return `invalid_request`) are accepted as legacy. A hard
+  protocol mismatch surfaces
+  `CoreClientError.protocolVersionMismatch` and tears the
+  subprocess down before `start()` returns, so a stale engine
+  never lingers behind a failed launch.
+- **`ProbeServer { profile, timeout_secs }` request.** New
+  `core/src/preflight.rs` runs DNS lookup + a single TCP
+  connect with per-step deadlines (clamped 1–30 s; default
+  5 s). Always resolves to a structured `ProbeReport` with
+  `dns_resolve_ms` / `tcp_connect_ms` for both reachable and
+  unreachable cases, so the UI can render timing alongside the
+  failure mode rather than catching a transport exception.
+  Surfaced in Swift as
+  `CoreClient.probe(profile:timeoutSecs:)`.
+- **`monitor_interval_secs` is configurable** on `StartProxy`
+  (clamped 1–60 s; default 5 s preserved). Plumbed through
+  `start_proxy` → `monitor_loop`.
+- **Per-request `tracing` span.** Dispatch body wrapped in
+  `tracing::info_span!("dispatch", request_id)` so every log
+  line emitted under a request handler carries the Swift
+  caller's `Request.id` for cross-stack correlation.
+- **`SubscriptionManifestV1` schema mirror in Swift.** New
+  `Core/Subscription.swift` mirrors the full ct-protocol
+  manifest (`version`, `profiles[]`, `capabilities`,
+  `issued_at`, `expires_at`, `note`, `signature`) plus a
+  `validate(now:)` enforcing `version = 1`, non-empty profiles,
+  `expires_at` in the future, and the documented 7-day
+  freshness ceiling.
+- **`SubscriptionClient` actor.** New
+  `Core/SubscriptionClient.swift` fetches with an ephemeral
+  `URLSession` (`reloadIgnoringLocalCacheData`, `urlCache=nil`,
+  10 s timeout) and decodes; throws structured
+  `SubscriptionClientError` cases for transport / HTTP /
+  cover-site / validation failures. HMAC verification
+  deliberately skipped — the panel signs with the server-only
+  `APP_KEY`, so client-side HMAC is impossible. Trust anchor
+  is TLS to the panel domain (Caddy + Let's Encrypt cert);
+  rationale documented at the top of `Subscription.swift`.
+
+### Fixed
+- **Subscription import preserves the panel port.** The
+  previous importer dropped the manifest's `port` field, so
+  subscribers on non-default panels silently fell back to
+  `:443`. Now serialises `host:port` straight from
+  `ProfileV1`.
+
+### Changed
+- **`TunnelOrchestrator.importFromSubscriptionURL`** refactored
+  to use the new `SubscriptionClient` via a private
+  `translate(_:)` helper. Adds three new
+  `SubscriptionImportError` cases —
+  `unsupportedVersion(got:)`, `manifestExpired`,
+  `manifestStale(daysOld:)` — with actionable banner copy in
+  `errorDescription`.
+- **Removed dead code.** The per-orchestrator private
+  `SubscriptionManifest` struct (only decoded host / username /
+  password) is gone; replaced by the full V1 mirror.
+
+### Bundled
+- NaiveProxy v148.0.7778.96-2 (unchanged)
+- Cool Tunnel Core v2.0.21
+
+---
+
 ## [2.0.20] — 2026-05-06 (Xcode 26.4 macOS-SDK build hotfix)
 
 One Swift-side build hotfix caught at the v2.0.19 binary cut.
