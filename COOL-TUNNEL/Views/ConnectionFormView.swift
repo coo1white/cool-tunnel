@@ -31,6 +31,11 @@ public struct ConnectionFormView: View {
     /// `orchestrator.removeSelectedProfile()`.
     @State private var confirmingRemoval = false
 
+    /// Subscription URL field (bound while the user is typing).
+    @State private var subscriptionURL: String = ""
+    @State private var isImporting: Bool = false
+    @State private var importError: String?
+
     public init() {}
 
     public var body: some View {
@@ -93,6 +98,42 @@ public struct ConnectionFormView: View {
                     isPlaceholderProfile(profile)
                 {
                     firstRunFooter
+                }
+            }
+
+            Section {
+                TextField(
+                    "Subscription URL",
+                    text: $subscriptionURL,
+                    prompt: Text("https://…/api/v1/subscription/…")
+                )
+                .textContentType(.URL)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+
+                Button {
+                    Task { await runImport() }
+                } label: {
+                    if isImporting {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .scaleEffect(0.8)
+                    } else {
+                        Text("Import")
+                    }
+                }
+                .disabled(
+                    subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || isImporting)
+            } header: {
+                Text("Import from subscription URL")
+            } footer: {
+                if let err = importError {
+                    Label(err, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                } else {
+                    Text("Paste the subscription URL from your server panel to auto-fill credentials.")
                 }
             }
 
@@ -182,6 +223,21 @@ public struct ConnectionFormView: View {
                 orchestrator.selectedProfile = current
             }
         )
+    }
+
+    // MARK: - Subscription import
+
+    @MainActor
+    private func runImport() async {
+        importError = nil
+        isImporting = true
+        defer { isImporting = false }
+        do {
+            try await orchestrator.importFromSubscriptionURL(subscriptionURL)
+            subscriptionURL = ""
+        } catch {
+            importError = error.localizedDescription
+        }
     }
 
     // MARK: - Display
