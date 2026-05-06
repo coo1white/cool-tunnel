@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Port, Profile, ProxyTestMode};
+use crate::domain::{Port, Profile, ProxyTestMode, RawProfile};
 
 /// One request frame from the Swift app.
 ///
@@ -62,34 +62,44 @@ pub struct Request {
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RequestKind {
-    /// Validate a profile and return whether it is well-formed.
+    /// Validate a profile and return a structured report.
     ///
-    /// The wire variant carries a fully-validated [`Profile`].
-    /// Validation runs at serde deserialization through the
-    /// `try_from = "RawProfile"` attribute on `Profile`, so an
-    /// invalid profile fails the outer
-    /// `serde_json::from_value::<Request>` call upstream and is
-    /// emitted as an `invalid_request` error frame, NOT as a
-    /// successful response carrying `ok:false`. This keeps the
-    /// stdio-mode protocol uniform: any "you sent me bad data"
-    /// outcome is an [`Outbound::Error`] frame, never a
-    /// successful [`Outbound::Response`] with a "no, really, it
-    /// failed" payload buried inside.
+    /// Takes [`RawProfile`] (the wire shape, no validation runs
+    /// at deserialize) so the handler can inspect *which field*
+    /// failed and produce a per-field reason. Returns a
+    /// successful [`Outbound::Response`] in both cases:
     ///
-    /// **Note on divergence from `server_mode`:** the HTTP
-    /// validate endpoint (`POST /naive/validate`) deliberately
-    /// returns 200 with `{"ok":false,"reason":"…"}` on failure
-    /// (SM-3) so HTTP clients see a uniform 200-with-payload
-    /// shape. Stdio callers are the trusted Swift app and want
-    /// the `Outbound::Error` shape used everywhere else for
-    /// invalid input — the two modes differ on this one point
-    /// by design.
+    /// - Valid input → `ValidationReport { ok: true,
+    ///   reason: None }`.
+    /// - Invalid input → `ValidationReport { ok: false,
+    ///   reason: Some("…") }` with the
+    ///   [`crate::domain::ValidationError`] display string
+    ///   explaining which field failed and why.
+    ///
+    /// **2026-05-06 design reversal.** Previously carried
+    /// validated [`Profile`], so the handler was unconditionally
+    /// `ok: true` and invalid profiles were rejected by the
+    /// outer deserializer as `invalid_request` error frames.
+    /// The reversal aligns stdio with server-mode's HTTP
+    /// `/naive/validate` shape (SM-3) and lets `validate_profile`
+    /// work as a probe — Swift callers can ask "is this profile
+    /// valid?" and parse the structured reason without catching
+    /// a transport error. The Swift caller at
+    /// `TunnelOrchestrator.swift:834` already had the
+    /// `validation.ok == false` branch coded; under the prior
+    /// design it was dead code.
+    ///
+    /// Other request variants ([`RequestKind::StartProxy`],
+    /// [`RequestKind::GenerateNaiveConfig`]) continue to carry
+    /// validated [`Profile`] — their handlers rely on the
+    /// type-system invariants, and their callers are committing
+    /// to *use* the profile, so an invalid one there is
+    /// genuinely an error condition (an `invalid_request` frame
+    /// is right for them).
     ValidateProfile {
-        /// The profile to validate. Already-validated by serde
-        /// at deserialization time; an invalid profile would
-        /// have produced an `invalid_request` error frame
-        /// upstream rather than reaching this variant.
-        profile: Profile,
+        /// The raw profile to validate. The handler attempts
+        /// `Profile::try_from(this)` and reports the outcome.
+        profile: RawProfile,
     },
     /// Generate the `naive` `config.json` text for `profile`.
     GenerateNaiveConfig {
@@ -375,7 +385,7 @@ mod tests {
         let req = Request {
             id: 7,
             kind: RequestKind::ValidateProfile {
-                profile: sample_profile(),
+                profile: sample_profile().into(),
             },
         };
         let value = serde_json::to_value(&req).unwrap();
