@@ -154,8 +154,19 @@ async fn frame_exceeding_one_mib_returns_frame_too_large_error() {
     harness.shutdown().await;
 }
 
+/// **2026-05-06 (`validate_profile` design reversal):**
+/// invalid profiles now return a successful `Outbound::Response`
+/// with `ValidationReport { ok: false, reason: ... }`, NOT an
+/// `Outbound::Error` frame. The reason field carries the
+/// `ValidationError::Display` string from the first failing
+/// field — for the multi-field-bad payload below it surfaces
+/// whichever check `try_from = "RawProfile"` runs first
+/// (server → username → password → port). The test does not
+/// pin the exact reason string (the order is an implementation
+/// detail of `Profile::try_from`), only that some non-empty
+/// reason is present.
 #[tokio::test]
-async fn rejects_invalid_profile_during_deserialization() {
+async fn validate_profile_returns_structured_failure_for_invalid_profile() {
     let mut harness = spawn().await;
 
     let request = json!({
@@ -174,9 +185,59 @@ async fn rejects_invalid_profile_during_deserialization() {
     harness.send(&request).await;
     let frame = harness.recv().await;
 
-    assert_eq!(frame["kind"], "error");
+    assert_eq!(frame["kind"], "response");
     assert_eq!(frame["id"], 4);
-    assert_eq!(frame["error"]["code"], "invalid_request");
+    assert_eq!(frame["result"]["type"], "validation");
+    assert_eq!(frame["result"]["ok"], false);
+    let reason = frame["result"]["reason"]
+        .as_str()
+        .expect("reason string present on ok=false");
+    assert!(
+        !reason.is_empty(),
+        "reason must be non-empty when ok=false; got {reason:?}"
+    );
+
+    harness.shutdown().await;
+}
+
+/// **2026-05-06:** the empty-password case (the bug that
+/// surfaced PR #12 at the UI layer) now also produces a
+/// structured failure at the engine layer with a reason
+/// pointing at the password field. Pin the reason here because
+/// the field-iteration order in `Profile::try_from` puts
+/// password after server + username, and a server-only-bad
+/// fixture would mask the empty-password code path.
+#[tokio::test]
+async fn validate_profile_flags_empty_password_with_reason() {
+    let mut harness = spawn().await;
+
+    let request = json!({
+        "id": 5,
+        "method": "validate_profile",
+        "params": {
+            "profile": {
+                "id": "default",
+                "server": "naive.example.com",
+                "username": "alice",
+                "password": "",
+                "localPort": "1080"
+            }
+        }
+    });
+    harness.send(&request).await;
+    let frame = harness.recv().await;
+
+    assert_eq!(frame["kind"], "response");
+    assert_eq!(frame["id"], 5);
+    assert_eq!(frame["result"]["type"], "validation");
+    assert_eq!(frame["result"]["ok"], false);
+    let reason = frame["result"]["reason"]
+        .as_str()
+        .expect("reason string present on ok=false");
+    assert!(
+        reason.to_lowercase().contains("password"),
+        "reason should name the password field; got {reason:?}"
+    );
 
     harness.shutdown().await;
 }
