@@ -445,6 +445,90 @@ public final class TunnelOrchestrator {
         settingsStore.save(settings)
     }
 
+    // MARK: - Subscription import
+
+    /// Fetches a subscription manifest from `urlString` and imports the first
+    /// profile's credentials into the selected profile (or a new profile if
+    /// none is selected). Throws a typed [`SubscriptionImportError`] keyed
+    /// on the failure mode so the UI can surface actionable banners
+    /// (revoked, expired, server-down) instead of a single generic message.
+    ///
+    /// **Status-code mapping (Hardening v2.0.18-pre).** Laravel-side
+    /// failures land on three buckets:
+    /// - `401` — authenticated but the token resolves to a disabled /
+    ///   expired / quota-exceeded account (`isActive() == false`).
+    /// - `404` / `422` — token malformed or unknown. NOTE: the
+    ///   server's `SubscriptionController` deliberately serves the
+    ///   cover-site response for these to defeat enumeration, so the
+    ///   client typically sees a `200 text/html` instead. The
+    ///   manifest-decode-fails branch below handles that case.
+    /// - `5xx` — the panel is down or APP_KEY is misconfigured.
+    /// All three become distinct `SubscriptionImportError` cases below
+    /// so the SwiftUI banner copy can match the failure mode.
+    public func importFromSubscriptionURL(_ urlString: String) async throws {
+        guard
+            let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)),
+            url.scheme == "https"
+        else {
+            throw SubscriptionImportError.invalidURL
+        }
+        appendInfo("subscription: fetching \(url.host ?? urlString)…")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(from: url)
+        } catch {
+            throw SubscriptionImportError.networkError(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw SubscriptionImportError.networkError("non-HTTP response")
+        }
+        switch http.statusCode {
+        case 200..<300:
+            break  // fall through to JSON decode
+        case 401:
+            throw SubscriptionImportError.subscriptionRevoked
+        case 404, 422:
+            throw SubscriptionImportError.tokenInvalid
+        case 429:
+            throw SubscriptionImportError.rateLimited
+        case 500...599:
+            throw SubscriptionImportError.serverError(status: http.statusCode)
+        default:
+            throw SubscriptionImportError.unexpectedStatus(http.statusCode)
+        }
+        // Cover-site detection: SubscriptionController routes invalid
+        // tokens through FakeSiteController, which serves
+        // `text/html` with status 200. Treat any non-JSON content
+        // type as "token invalid" so the user sees an actionable
+        // banner rather than a "JSON decode failed" stack trace.
+        if let mime = http.mimeType, !mime.contains("json") {
+            throw SubscriptionImportError.tokenInvalid
+        }
+        let manifest: SubscriptionManifest
+        do {
+            manifest = try JSONDecoder().decode(SubscriptionManifest.self, from: data)
+        } catch {
+            // 200 + non-JSON body almost always means we hit the
+            // cover site for a bogus token. Surface the
+            // user-friendly variant rather than the decoder's
+            // raw description.
+            throw SubscriptionImportError.tokenInvalid
+        }
+        guard let first = manifest.profiles.first else {
+            throw SubscriptionImportError.noProfiles
+        }
+        let imported = Profile(
+            id: selectedProfile?.id ?? UUID().uuidString,
+            server: first.host,
+            username: first.username,
+            password: first.password,
+            localPort: selectedProfile?.localPort ?? "1080"
+        )
+        selectedProfile = imported
+        appendInfo("subscription: imported \(first.host) (\(first.username))")
+    }
+
     // MARK: - Mode switching
 
     /// Atomically switches the *active* proxy mode. Three cases:
@@ -1440,5 +1524,71 @@ public enum OrchestratorError: Error, Sendable, Equatable {
         case .naiveBinaryUnusable(let err):
             "naive binary cannot be used: \(err.localizedDescription)"
         }
+    }
+}
+
+/// Errors raised during subscription URL import.
+///
+/// Keyed on the user-facing failure mode rather than transport
+/// shape, so banner copy can be both accurate and actionable.
+/// Roughly mapped to Laravel response codes — see
+/// [`TunnelOrchestrator.importFromSubscriptionURL`] for the
+/// status-code → variant table.
+public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
+    /// URL didn't parse, or wasn't `https://…`.
+    case invalidURL
+    /// Transport failure — host unreachable, TLS rejection, etc.
+    case networkError(String)
+    /// HTTP 401 — token resolved to an inactive account
+    /// (disabled, expired, quota exceeded). The user has to ask
+    /// the operator to re-enable the account or generate a new
+    /// password.
+    case subscriptionRevoked
+    /// HTTP 404 / 422, or a 200-with-HTML cover-site response.
+    /// The token is malformed or doesn't match any account on
+    /// this panel.
+    case tokenInvalid
+    /// HTTP 429 — too many fetches from this IP. The panel
+    /// rate-limits at 60/min; the user should wait a minute.
+    case rateLimited
+    /// HTTP 5xx — panel is down, APP_KEY is unset, or some
+    /// other server-side problem.
+    case serverError(status: Int)
+    /// Anything else outside 2xx / the explicit cases above.
+    case unexpectedStatus(Int)
+    /// JSON decoded but had no usable profile.
+    case noProfiles
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            "The subscription URL is not valid. It must start with https://."
+        case .networkError(let msg):
+            "Network error: \(msg). Check your internet connection and try again."
+        case .subscriptionRevoked:
+            "This account is no longer active. Ask your administrator to re-enable it or issue a new subscription URL."
+        case .tokenInvalid:
+            "This subscription URL doesn't match any account on the server. Double-check the URL or ask for a new one."
+        case .rateLimited:
+            "Too many import attempts. Wait a minute and try again."
+        case .serverError(let status):
+            "The server returned a \(status) error. The panel may be down or misconfigured (e.g. APP_KEY unset). Try again later."
+        case .unexpectedStatus(let status):
+            "Unexpected server response (HTTP \(status))."
+        case .noProfiles:
+            "The subscription manifest contained no usable profiles."
+        }
+    }
+}
+
+/// Wire format of the server's subscription manifest (v1).
+/// Only the fields the import path actually needs are decoded.
+private struct SubscriptionManifest: Decodable {
+    let profiles: [ManifestProfile]
+
+    struct ManifestProfile: Decodable {
+        let host: String
+        let username: String
+        let password: String
     }
 }

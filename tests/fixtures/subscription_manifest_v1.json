@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "server": "proxy.example.com",
+  "profiles": [
+    {
+      "host": "proxy.example.com",
+      "port": 443,
+      "username": "alice",
+      "password": "redacted-cleartext",
+      "label": "proxy.example.com (alice)"
+    }
+  ],
+  "capabilities": {
+    "anti_tracking": ["hide_ip", "hide_via", "probe_resistance", "doh_resolver"],
+    "http3": false,
+    "fake_site_slug": "default"
+  },
+  "issued_at": 0,
+  "expires_at": 0,
+  "note": null,
+  "signature": "0000000000000000000000000000000000000000000000000000000000000000"
+}
