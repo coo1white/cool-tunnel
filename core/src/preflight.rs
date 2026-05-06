@@ -68,7 +68,10 @@ const DEFAULT_TCP_PORT: u16 = 443;
 /// etc.). Reachability failures — `getaddrinfo` errors, connect
 /// refused, connect timeout — are surfaced inside the
 /// [`ProbeReport`] with `reachable: false`.
-pub async fn probe(profile: &Profile, timeout_override: Option<u64>) -> std::io::Result<ProbeReport> {
+pub async fn probe(
+    profile: &Profile,
+    timeout_override: Option<u64>,
+) -> std::io::Result<ProbeReport> {
     let timeout_secs = timeout_override
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
         .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS);
@@ -204,10 +207,7 @@ mod tests {
         Profile::new(
             ProfileId::new("test"),
             ServerAddress::parse(server).unwrap(),
-            Credentials::new(
-                Username::parse("u").unwrap(),
-                Password::parse("p").unwrap(),
-            ),
+            Credentials::new(Username::parse("u").unwrap(), Password::parse("p").unwrap()),
             Port::new(1080).unwrap(),
         )
     }
