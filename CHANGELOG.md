@@ -9,6 +9,183 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.22] — 2026-05-07 (v2.0.21 review-fallout: 4 rounds of code review, ~30 fixes)
+
+Four full rounds of code review against the v2.0.21 cycle, each
+spawning multiple parallel reviewers with different lenses
+(correctness, security, concurrency, perf, UX, supply-chain,
+docs). About 30 distinct fixes ship here — no new features, no
+wire-protocol change. Backward-compatible drop-in for v2.0.21.
+
+The biggest single-finding payoff was a hidden UX disaster: every
+client-side error type except one defined `var localizedDescription`
+as a plain stored property without conforming to `LocalizedError`,
+so the `(error as? LocalizedError)?.errorDescription` cast at
+user-facing catch sites silently fell through and users saw
+Swift's default `"…CoolTunnel.CoreClientError error N."` instead
+of the carefully-written enum strings. Round 3 fixed it.
+
+### Security / hardening
+
+- **`SubscriptionClient` body-size cap is now load-bearing**
+  (1 MB, enforced **during** the read via streaming
+  `bytes(for:)` accumulation). The post-hoc `data(for:)` cap
+  introduced mid-cycle was reverted in round 4 — `data(for:)`
+  buffers the full body before the cap can fire, so on a fast
+  network (gigabit) a hostile or hijacked panel can land
+  ~1.25 GB in memory inside the 10 s `timeoutIntervalForResource`
+  window before the size check trips. Streaming bounds peak
+  memory at exactly `maxBytes` regardless of upstream
+  throughput.
+- **No-redirect delegate** on `SubscriptionClient` fetches.
+  Default `URLSession` follows up to ~16 redirects to any host;
+  a panel takeover responding `302 Location: https://attacker
+  .example/manifest.json` would silently move the documented
+  "TLS to the panel domain" trust anchor. `NoRedirectGuard`
+  refuses every redirect.
+- **`Content-Type` sniff** before JSON decode. Documented in
+  the file preamble pre-cycle but never implemented — the
+  cover-site path went straight to `JSONDecoder` on multi-MB
+  HTML. Multi-value `Content-Type` headers (RFC violation but
+  observed in the wild from misconfigured reverse proxies) are
+  parsed by splitting on `,` first then `;`.
+- **`Subscription.validate(now:)` now enforces 9 rules** (was
+  4): `version == 1`, non-empty `profiles[]`, `profiles.count ≤
+  16`, `host` not loopback / private / link-local / `localhost`
+  / `*.local` (closed-loop SSRF defense), `capabilities.http3 ==
+  false`, `issued_at != 0`, `issued_at <= now + 60 s` (forward
+  skew tolerance), `expires_at >= issued_at`, `expires_at -
+  issued_at <= 1 year`, `expires_at > now`, `now - issued_at
+  <= 7 days`. Each adds defense against a counterfeit panel
+  trying to bypass the freshness or staleness gates.
+- **`AntiTrackingFeature` decode is forward-compatible.** Was
+  auto-derived `String`-rawValue Codable that threw on any
+  unknown variant — adding any new flag server-side would brick
+  every v1 client with a misleading `tokenInvalid` UI. Now
+  manual Codable with an `unknown(String)` sink.
+- **CI actions pinned to commit SHAs** (`actions/checkout@v6`,
+  `actions/cache@v5`, `taiki-e/install-action@v2`). Tag-takeover
+  defense.
+- **`security_check.sh` now runs from `cut_release.sh`** as
+  step 8b. Was opt-in / documentation-only; release operators
+  who skipped it shipped without secret scan, embedded-Mach-O
+  code-sign verification, NaiveProxy SHA cross-check,
+  Info.plist version assertion, or LICENSE/NOTICE presence
+  check.
+- **`cargo deny check` runs from `audit.sh`** (step 3b).
+  Aligns the local synthetic CI gate with what `.github/
+  workflows/ci.yml` was already enforcing.
+- **`isExcludedFromBackupKey`** set on
+  `~/Library/Application Support/COOL-TUNNEL/`. `config.json`
+  carries the cleartext `https://user:pass@host` proxy URL and
+  `credentials.json` carries base64-encoded passwords; both are
+  0600 user-only on disk but Time Machine snapshots are
+  accessible to the next admin restoring the user's home.
+- **IPv6 host parsing.** `ServerAddress::parse` previously used
+  `rfind(':')` and silently mis-parsed bare `2001:db8::1` as
+  host=`2001:db8:` port=`1`. Now accepts bracketed form
+  `[2001:db8::1]:443`, rejects bare multi-colon strings as
+  `AmbiguousIPv6` with a pointer at the bracket fix.
+- **`RawProfile` redacted Debug.** Pre-empts a future
+  `tracing::warn!(?raw, "deserialize failed")` from dumping
+  cleartext credentials to the engine stderr stream.
+- **`engineStderrLogger` flipped to `privacy: .private`.**
+  Defense-in-depth — the engine's `tracing` is already clamped
+  to info, but the Swift forwarder was at `.public`.
+- **`url.lastPathComponent` instead of `url.path`** in
+  resolver error strings. `url.path` includes
+  `/Users/<name>/...` (macOS-username leak in user-visible
+  banners and support logs).
+- **`Text(verbatim:)` for panel-supplied `displayName`** in
+  `ConnectionFormView`. String-literal interpolation on
+  `Button(_: LocalizedStringKey)` and `Text(_: LocalizedStringKey)`
+  auto-renders markdown — a hostile panel returning
+  `host: "**evil**.com"` would render bolded.
+
+### Correctness
+
+- **`CoreClient` stderr-drain `Task` is now cancelled on
+  `terminate()`.** The previous `Task.detached` was never
+  stored, so rapid start/stop churn under handshake failure
+  parked one worker thread per attempt on the synchronous
+  `availableData` call until the kernel delivered EOF. Switched
+  the read primitive to `read(upToCount:)` (throws on closed
+  handle, returns nil on EOF) so close-then-cancel works
+  cleanly.
+- **`CoreClient.start()` TOCTOU closed.** The
+  `process == nil` guard ran *before* `await
+  CodeSignVerifier.verifyValid(...)`; two concurrent callers
+  could both pass and both reach `process.run()`. New
+  `starting: Bool` flag set before the first `await`.
+- **`StopProxy` Err-path now emits `StateChanged{false}`.**
+  When `supervisor.stop()` returned `Err(stop_failed)` the
+  user-emit was gated on `response_succeeded == true` and never
+  fired; combined with `monitor_loop`'s pre-claim of
+  `emitted_stopped = true`, the orchestrator never learned the
+  engine was stopped and the UI stuck on "running" indefinitely.
+  Distinguishes "transition committed" (Response | Error.code
+  ==`stop_failed`) from "no transition" (Error.code ==
+  `not_running`).
+- **Saturating arithmetic in `Subscription.validate(now:)`.**
+  `nowSecs &+ UInt64(maxForwardSkew)` was wrapping; on the
+  `nowSecs > UInt64.max - 60` edge a wrap would produce
+  `skewCeiling ≈ 0` and *every* legitimate `issuedAt` would
+  flag. Swapped to `addingReportingOverflow` saturating to
+  `UInt64.max`.
+
+### Performance
+
+- **`SubscriptionClient` Content-Type sniff** rejects cover-site
+  HTML before allocating bytes for a JSON decode pass on
+  multi-MB HTML.
+
+### UX
+
+- **All client error types now conform to `LocalizedError`** —
+  `CoreClientError`, `OrchestratorError`, `NaiveResolverError`,
+  `RustCoreResolverError`, `CodeSignError`, `KeychainError`,
+  `FileCredentialError`, `SubscriptionClientError`,
+  `SubscriptionValidationError`. Each renamed `var
+  localizedDescription` to `var errorDescription: String?`.
+  Three of them had no description at all — added per-case
+  English copy. The `(error as? LocalizedError)?.errorDescription`
+  cast now hits every type instead of falling through to
+  Swift's `"…error N."` default.
+
+### Tests
+
+- **`Hello`/`HelloReply`, `ProbeServer`/`ProbeReport`** wire
+  round-trip tests on the Rust side — none of the new variants
+  had pinning.
+- **`monitor_interval_secs` clamp helper** extracted from the
+  inline dispatch arm + 4 unit tests pinning `None`, in-range,
+  `Some(0)`, above-ceiling behaviour.
+- **`ServerAddress::parse` IPv6 cases** — 7 tests covering
+  bracketed-with-port, bracketed-without-port, bare-rejected,
+  unclosed-bracket, empty-host, invalid-port, junk-after-bracket,
+  empty-port-suffix.
+
+### Repository discipline (internal)
+
+- **`ProxyMode::title()` / `ProxyTestMode::title()` removed.**
+  Orphan UI helpers in a wire-only Serialize/Deserialize enum;
+  the Swift mirror at `Core/Protocol.swift` carries its own
+  strings and no Rust caller ever read them.
+- **Doc drift.** `Subscription.swift` file-header listed 4 of
+  the now-9 client checks; `core/src/lib.rs` Modules list was
+  missing 6 of 10 modules; `CHANGELOG`/`SUPPORT`/`README`/
+  `CONTRIBUTING` referenced the historical v0.1.7 LTSC line —
+  all updated to point at the v2.0.x line.
+- **`CoreClient.terminate()` comment** still said "EOF to the
+  drain loop's `availableData` call" after the round-2 switch
+  to `read(upToCount:)` — corrected.
+
+### Bundled
+- NaiveProxy v148.0.7778.96-2 (unchanged)
+- Cool Tunnel Core v2.0.22
+
+---
+
 ## [2.0.21] — 2026-05-06 (Connection robustness: handshake, pre-flight probe, subscription validation)
 
 Two-phase hardening of the Swift↔Rust JSON-over-stdio bridge
