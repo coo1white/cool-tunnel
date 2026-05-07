@@ -31,18 +31,14 @@ impl ProxyMode {
     pub const fn requires_listener(self) -> bool {
         !matches!(self, Self::Stopped)
     }
-
-    /// Returns the human-readable title shown in the UI.
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Stopped => "Stopped",
-            Self::Smart => "Smart Mode",
-            Self::Global => "Global Proxy",
-            Self::LocalOnly => "Local Only",
-        }
-    }
 }
+
+// `ProxyMode::title()` and `ProxyTestMode::title()` were removed
+// in v2.0.22 — both were orphan UI helpers in a wire-only
+// `Deserialize`/`Serialize` enum; the Swift mirror at
+// `COOL-TUNNEL/Core/Protocol.swift` carries its own UI strings,
+// and no Rust caller ever read them. Reintroduce only if a
+// CLI/server-mode UI surface lands here.
 
 /// Mode for diagnostic latency tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,17 +49,6 @@ pub enum ProxyTestMode {
     Smart,
     /// Test as if all traffic is routed through SOCKS.
     Global,
-}
-
-impl ProxyTestMode {
-    /// Returns the human-readable title shown in the UI.
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Smart => "Smart",
-            Self::Global => "Global",
-        }
-    }
 }
 
 #[cfg(test)]

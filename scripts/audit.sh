@@ -16,12 +16,15 @@
 #   1. cargo fmt --check                — formatter drift (~1 s)
 #   2. cargo clippy -D warnings         — lint cleanliness (~30 s)
 #   3. cargo test --all-features        — unit + integration tests (~60 s)
+#   3b. cargo deny check                — license/ban/duplicate policy
+#                                          (`core/deny.toml`); requires
+#                                          `cargo install cargo-deny`
+#                                          (~5 s)
 #   4. swift format lint --strict       — Swift formatter drift (~2 s)
-#   5. swift-format-equivalent ✓        — Apple's swift-format must
-#                                          succeed on every .swift file
-#                                          under COOL-TUNNEL/
-#   6. xcodebuild test (unit scheme)    — Swift XCTest suites (~90 s)
-#   7. naive arch guard                 — bundled binary is universal
+#   5. xcodebuild test (unit scheme)    — Swift XCTest suites (~90 s,
+#                                          currently skipped — no XCTest
+#                                          target on this scheme)
+#   6. naive arch guard                 — bundled binary is universal
 #                                          (arm64 + x86_64 slices)
 #   8. schema sync probe                — engine + Swift Codable
 #                                          shapes still match a known
@@ -101,6 +104,24 @@ if (cd "${REPO_ROOT}/core" && cargo test --all-features --quiet); then
 else
     fail "cargo test failed"
     STATUS=1
+fi
+
+# --- 3b. cargo deny check --------------------------------------------------
+# `cargo deny` enforces the project's allow-listed licenses, banned
+# crates, and duplicate-version policy from `core/deny.toml`. CI
+# (`.github/workflows/ci.yml`) runs it on every push; this gate
+# exists so `cut_release.sh` (which runs `audit.sh --strict`)
+# enforces the same policy locally before binaries leave the
+# working tree. Tool prerequisite documented in
+# `CONTRIBUTING.md` (`cargo install cargo-deny`).
+if require_or_skip cargo-deny "cargo-deny"; then
+    log "cargo deny check"
+    if (cd "${REPO_ROOT}/core" && cargo deny check --hide-inclusion-graph 2>&1); then
+        :
+    else
+        fail "cargo deny check failed — license/ban/duplicate policy violation in core/Cargo.lock"
+        STATUS=1
+    fi
 fi
 
 # --- 4. swift format lint --------------------------------------------------

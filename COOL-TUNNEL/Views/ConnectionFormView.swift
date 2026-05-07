@@ -85,19 +85,20 @@ public struct ConnectionFormView: View {
                         // and `Text(_: LocalizedStringKey)` auto-resolves
                         // markdown/format specifiers — a hostile panel
                         // returning `host: "**evil**.com"` would render
-                        // bolded in the dialog. Build the title /
-                        // message strings up front and pass via the
-                        // `verbatim:` overloads so the user-controlled
-                        // segment is treated as plain text.
+                        // bolded in the dialog. Build the title up
+                        // front (passing a `String` variable selects
+                        // the `Button(_: StringProtocol, …)` overload,
+                        // which treats the panel-controlled segment
+                        // as plain text).
                         let title = "Remove “\(displayName(for: profile))”"
-                        let message =
-                            "“\(displayName(for: profile))” and its saved password "
-                            + "will be removed permanently. This can't be undone."
                         Button(title, role: .destructive) {
                             orchestrator.removeSelectedProfile()
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: { profile in
+                        // Same hardening as the actions closure
+                        // above — `Text(verbatim:)` skips the
+                        // `LocalizedStringKey` markdown interpolation.
                         let message =
                             "“\(displayName(for: profile))” and its saved password "
                             + "will be removed permanently. This can't be undone."
