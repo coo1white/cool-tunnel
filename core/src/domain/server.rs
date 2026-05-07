@@ -334,4 +334,22 @@ mod tests {
             Err(InvalidServer::InvalidPort)
         ));
     }
+
+    #[test]
+    fn rejects_bracketed_with_junk_after_close_bracket() {
+        // `]port` (no `:` separator) is malformed.
+        assert!(matches!(
+            ServerAddress::parse("[::1]443"),
+            Err(InvalidServer::InvalidPort)
+        ));
+    }
+
+    #[test]
+    fn rejects_bracketed_with_empty_port_suffix() {
+        // `]:` with no digits after is malformed.
+        assert!(matches!(
+            ServerAddress::parse("[::1]:"),
+            Err(InvalidServer::InvalidPort)
+        ));
+    }
 }

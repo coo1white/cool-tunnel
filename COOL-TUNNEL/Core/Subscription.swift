@@ -21,6 +21,11 @@
 // What the client validates (in `validate(now:)`):
 //   - `version == 1`.
 //   - `profiles` is non-empty AND ≤ 16 entries (defensive cap).
+//   - No profile's `host` points at loopback / link-local /
+//     private / unspecified address space, or `localhost` /
+//     `*.local` mDNS names (defense against a counterfeit
+//     panel using these to turn the user's machine into a
+//     closed-loop SSRF source).
 //   - `capabilities.http3 == false` (a `true` value is a strong
 //     counterfeit signal — see schema commentary).
 //   - `issued_at != 0` (the schema sentinel; only stub or
@@ -206,6 +211,68 @@ extension SubscriptionManifestV1 {
     /// of profiles into the 1 MB body cap to chew memory.
     public static let maxProfiles: Int = 16
 
+    /// Returns `true` for any host string that points at the
+    /// user's own machine, link-local, or private/non-routable
+    /// address space — values a counterfeit panel could use to
+    /// turn the user's machine into a closed-loop SSRF source.
+    /// Recognises:
+    ///
+    /// - `localhost`, `*.local` (mDNS) by name.
+    /// - Bracketed IPv6 literals (`[::1]`, `[fe80::...]`,
+    ///   `[fc00::...]`).
+    /// - IPv4 dotted-quads in the loopback (`127.0.0.0/8`),
+    ///   link-local (`169.254.0.0/16`), private (`10.0.0.0/8`,
+    ///   `172.16.0.0/12`, `192.168.0.0/16`), and unspecified
+    ///   (`0.0.0.0`) ranges.
+    ///
+    /// Public so a future caller (e.g. a CLI subscription
+    /// importer) can apply the same rule.
+    public static func isBlockedHost(_ host: String) -> Bool {
+        let normalised = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if normalised.isEmpty { return true }
+        // Hostname forms.
+        if normalised == "localhost" { return true }
+        if normalised.hasSuffix(".local") || normalised == "local" { return true }
+        // Bracketed IPv6 literal: strip the brackets and check
+        // canonical loopback / link-local / ULA prefixes. The
+        // engine's `ServerAddress::parse` requires brackets for
+        // IPv6 (round-3 fix), so this is the only IPv6 shape we
+        // can see here.
+        if normalised.hasPrefix("[") {
+            let stripped = normalised.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            if stripped == "::1" || stripped == "::" { return true }
+            if stripped.hasPrefix("fe80:") || stripped.hasPrefix("fc")
+                || stripped.hasPrefix("fd")
+            {
+                return true
+            }
+            return false
+        }
+        // IPv4 dotted-quad. Use Foundation's `inet_pton`-style
+        // parser via `IPv4Address` from the Network framework
+        // (available since macOS 10.14). Failed parse means it's
+        // a hostname — fall through to the allow-list at the
+        // end.
+        let parts = normalised.split(separator: ".")
+        if parts.count == 4, let a = UInt8(parts[0]), let b = UInt8(parts[1]),
+            let c = UInt8(parts[2]), UInt8(parts[3]) != nil
+        {
+            // 0.0.0.0 — unspecified.
+            if a == 0 && b == 0 && c == 0 { return true }
+            // 10.0.0.0/8 — private.
+            if a == 10 { return true }
+            // 127.0.0.0/8 — loopback.
+            if a == 127 { return true }
+            // 169.254.0.0/16 — link-local.
+            if a == 169 && b == 254 { return true }
+            // 172.16.0.0/12 — private.
+            if a == 172 && (16...31).contains(b) { return true }
+            // 192.168.0.0/16 — private.
+            if a == 192 && b == 168 { return true }
+        }
+        return false
+    }
+
     /// Returns the first profile, or `nil` when the manifest
     /// shipped with an empty profile list (which the panel won't
     /// produce, but a hijacked or stub server might).
@@ -232,6 +299,23 @@ extension SubscriptionManifestV1 {
             throw SubscriptionValidationError.tooManyProfiles(
                 got: profiles.count, max: Self.maxProfiles
             )
+        }
+        // Reject any profile whose `host` points at the user's own
+        // machine, link-local, or private/non-routable address
+        // space. A counterfeit panel returning
+        // `host: "127.0.0.1:8080"` would otherwise direct naive at
+        // whatever local service was listening — turning the user's
+        // machine into a closed-loop SSRF source against their own
+        // localhost, and (depending on what's listening there)
+        // potentially defeating same-origin assumptions for any
+        // request the user makes through the proxy. Matches by host
+        // string: bracketed IPv6 literals (`[::1]:443`) are
+        // recognised; hostname-string `localhost` and `*.local`
+        // (mDNS) are also blocked.
+        for profile in profiles {
+            if Self.isBlockedHost(profile.host) {
+                throw SubscriptionValidationError.blockedHost(profile.host)
+            }
         }
         // `capabilities.http3 == true` is documented in the schema
         // as "always false from a real cool-tunnel-server
@@ -351,6 +435,13 @@ public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
     /// the user's network serving a stale copy. Re-fetch over a
     /// different network typically resolves it.
     case stale(ageSeconds: TimeInterval)
+    /// A profile's `host` points at the user's own machine,
+    /// link-local, or private/non-routable address space. A
+    /// counterfeit panel using such a value would point naive at
+    /// whatever local service was listening, turning the user's
+    /// machine into a closed-loop SSRF source. Carries the
+    /// rejected host string for support diagnostic.
+    case blockedHost(String)
 
     public var errorDescription: String? {
         switch self {
@@ -375,6 +466,8 @@ public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
         case .stale(let ageSeconds):
             let days = max(1, Int(ageSeconds / (24 * 60 * 60)))
             return "Subscription manifest is \(days) days old."
+        case .blockedHost(let host):
+            return "Subscription manifest points at a blocked host (\(host))."
         }
     }
 }
