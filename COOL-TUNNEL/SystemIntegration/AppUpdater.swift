@@ -1408,110 +1408,35 @@ final class AppUpdater {
             )
         }
 
-        // **v2.0.9 (admin-elevated install path):** when the
-        // bundle was .pkg-installed and is therefore root-owned,
-        // route the spawn through `osascript ... with
-        // administrator privileges` so the user enters their
-        // password once and the helper runs as root. We can't
-        // synchronously wait for the *real* helper (it sleeps
-        // 30 s for the parent PID to die — including ours), so
-        // the privileged shell runs a tiny **wrapper** that
-        // backgrounds the real helper via nohup/disown and
-        // exits immediately. osascript returns to us as soon as
-        // the wrapper exits, so we know within a couple of
-        // seconds whether the user authorised; if they did, we
-        // proceed to .relaunching/terminate; if they cancelled,
-        // we throw a normal error and stay running.
+        // **v2.0.23 (Tahoe / Sequoia incompatibility fix):**
+        // when the bundle is .pkg-installed and root-owned, we
+        // used to spawn the entire relaunch helper via
+        // `osascript with administrator privileges` and a
+        // `nohup ... &; disown` wrapper, so the helper would
+        // continue running as root after osascript exited.
+        // That stopped working on macOS 15+ / 26 (Tahoe): the
+        // privileged-shell sandbox kills children of the
+        // authorization-elevated shell on exit regardless of
+        // `nohup`/`disown`. The wrapper still exits status 0,
+        // osascript reports success, AppUpdater proceeds to
+        // `.relaunching` + terminate — but the real helper
+        // never runs, the swap never happens, and on next
+        // launch the user is back on the old version with no
+        // signal anything went wrong.
+        //
+        // New approach: use `osascript ... with administrator
+        // privileges` for ONLY a `chown` (fast, atomic, doesn't
+        // need to background), then fall through to the regular
+        // user-owned path. After chown, the bundle is owned by
+        // the current user, so future updates take the
+        // no-prompt path and never hit the broken privileged-
+        // shell flow again.
         if needsAdminElevation {
-            let wrapperURL =
-                tempRootToClean
-                .appendingPathComponent("cool-tunnel-relaunch-wrapper.sh", isDirectory: false)
-            // The wrapper runs AS ROOT. Its only job is to
-            // detach the real helper into a background process
-            // group so osascript can return to the parent
-            // promptly. nohup ignores SIGHUP, `< /dev/null`
-            // closes stdin (osascript's stdin would otherwise
-            // block reads), `> /dev/null 2>&1` discards stdout/
-            // stderr (the real helper redirects its own stderr
-            // to $LOG with `exec 2>>"$LOG"` once it starts).
-            // `disown` removes the job from the wrapper's job
-            // table so the wrapper's exit doesn't SIGHUP it
-            // anyway. The combo is the standard Unix recipe
-            // for "fire-and-forget detach."
-            let wrapper = """
-                #!/bin/bash
-                set -e
-                # Running as root via osascript admin privileges.
-                # Detach the real relaunch helper into the
-                # background and exit fast so osascript returns
-                # to the parent (Cool Tunnel) without blocking
-                # on the helper's 30-s parent-PID wait.
-                nohup /bin/bash \(shellQuote(scriptURL.path)) > /dev/null 2>&1 < /dev/null &
-                disown
-                exit 0
-                """
-            guard let wrapperData = wrapper.data(using: .utf8) else {
-                throw UpdaterError.message(
-                    "Internal error: privileged wrapper not encodable as UTF-8."
-                )
-            }
-            do {
-                try RestrictedFile.write(wrapperData, to: wrapperURL, mode: 0o700)
-            } catch {
-                throw UpdaterError.message(
-                    "Couldn't create the privileged wrapper script: \(error.localizedDescription)"
-                )
-            }
-            // Build the AppleScript. `do shell script ... with
-            // administrator privileges` shows the standard
-            // macOS authorisation dialog (Touch ID / password
-            // / Apple Watch) and runs the command as root.
-            // `with prompt` customises the dialog text so the
-            // user sees Cool Tunnel-specific copy and not just
-            // the generic "osascript wants to make changes."
-            let appleScript =
-                "do shell script \"/bin/bash \" & quoted form of \(appleScriptStringLiteral(wrapperURL.path)) with prompt \"Cool Tunnel needs to update its application bundle. (It was originally installed via the .pkg installer, so the bundle is owned by root.)\" with administrator privileges"
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            task.arguments = ["-e", appleScript]
-            task.standardInput = nil
-            task.standardOutput = Pipe()
-            let stderrPipe = Pipe()
-            task.standardError = stderrPipe
-            do {
-                try task.run()
-            } catch {
-                throw UpdaterError.message(
-                    "Couldn't launch the admin-privileges prompt: \(error.localizedDescription)"
-                )
-            }
-            task.waitUntilExit()
-            if task.terminationStatus != 0 {
-                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let errText = String(data: errData, encoding: .utf8) ?? ""
-                appUpdaterLogger.warning(
-                    "osascript admin privileges failed (status \(task.terminationStatus, privacy: .public)): \(errText, privacy: .public)"
-                )
-                // osascript exits with status 1 and stderr
-                // "User canceled. (-128)" when the user dismisses
-                // the auth dialog. Surface a friendly message
-                // for that specific case; everything else is a
-                // generic "couldn't run."
-                if errText.contains("-128") || errText.contains("User canceled")
-                    || errText.contains("User cancelled")
-                {
-                    throw UpdaterError.message(
-                        "Update cancelled — admin password not entered. Click Update to try again."
-                    )
-                }
-                throw UpdaterError.message(
-                    "Couldn't run the privileged installer. Try again, or reinstall from the .dmg."
-                )
-            }
-            // osascript returned successfully → wrapper ran →
-            // real helper is now detached and waiting on our
-            // PID. Caller proceeds to .relaunching/terminate.
-            return
+            try chownBundleToCurrentUser(at: oldAppURL)
+            // Fall through to the regular spawn below. The
+            // chown succeeded, so the bundle is now user-owned;
+            // a regular `Process()` spawn of the helper has the
+            // permissions to ditto-and-mv it.
         }
 
         // Regular (user-owned bundle) path: spawn detached.
@@ -1527,6 +1452,91 @@ final class AppUpdater {
         } catch {
             throw UpdaterError.message(
                 "Couldn't launch the relaunch helper: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Asks the user for admin privileges via the standard
+    /// macOS authorization dialog and `chown -R`s the bundle
+    /// at `oldAppURL` to the current user (UID + `staff`
+    /// group). Surfaces user-cancel and authorization-failure
+    /// as clear `UpdaterError.message`s.
+    ///
+    /// **Why this exists (v2.0.23):** the previous admin-
+    /// elevated install path ran the entire relaunch helper
+    /// inside the privileged shell via a `nohup ... &; disown`
+    /// wrapper. macOS 15+ / 26 (Tahoe) kills children of the
+    /// authorization-elevated shell on exit regardless of
+    /// `nohup`/`disown`, so the helper never actually ran —
+    /// the wrapper exited 0, osascript reported success,
+    /// AppUpdater terminated the parent app, and the bundle
+    /// swap silently never happened. We now use osascript only
+    /// for the chown (a fast atomic operation that doesn't
+    /// background) and let the regular user-owned spawn path
+    /// take it from there. After the chown the bundle is
+    /// user-owned, so future updates skip this prompt
+    /// entirely.
+    nonisolated private static func chownBundleToCurrentUser(at oldAppURL: URL) throws {
+        let myUID = Int(geteuid())
+        let appleScript =
+            "do shell script \"/usr/sbin/chown -R \(myUID):staff \" "
+            + "& quoted form of \(appleScriptStringLiteral(oldAppURL.path)) "
+            + "with prompt \"Cool Tunnel needs to take ownership of its application bundle. "
+            + "(It was originally installed via the .pkg installer, so the bundle is owned by root. "
+            + "After this one-time step, future updates won't ask for your password.)\" "
+            + "with administrator privileges"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", appleScript]
+        task.standardInput = nil
+        task.standardOutput = Pipe()
+        let stderrPipe = Pipe()
+        task.standardError = stderrPipe
+        do {
+            try task.run()
+        } catch {
+            throw UpdaterError.message(
+                "Couldn't launch the admin-privileges prompt: \(error.localizedDescription)"
+            )
+        }
+        task.waitUntilExit()
+        if task.terminationStatus != 0 {
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            appUpdaterLogger.warning(
+                "chown osascript failed (status \(task.terminationStatus, privacy: .public)): \(errText, privacy: .public)"
+            )
+            // osascript exits with status 1 and stderr "User
+            // canceled. (-128)" when the user dismisses the
+            // auth dialog. Surface a friendly message for that
+            // specific case; everything else is a generic
+            // "couldn't run."
+            if errText.contains("-128") || errText.contains("User canceled")
+                || errText.contains("User cancelled")
+            {
+                throw UpdaterError.message(
+                    "Update cancelled — admin password not entered. Click Update to try again."
+                )
+            }
+            throw UpdaterError.message(
+                "Couldn't take ownership of Cool Tunnel's bundle. "
+                    + "Try again, or reinstall from the .dmg."
+            )
+        }
+        // Verify the chown actually took effect — defensive,
+        // since osascript reporting success but the chown
+        // failing silently would leave us with the same
+        // root-owned bundle and a bogus "fall through to
+        // user-owned spawn" path that fails at the `mv`.
+        var st = stat()
+        if oldAppURL.path.withCString({ lstat($0, &st) }) == 0,
+            st.st_uid != geteuid()
+        {
+            appUpdaterLogger.warning(
+                "chown osascript reported success but bundle is still owned by uid \(st.st_uid, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "Bundle ownership change didn't take effect; please reinstall from the .dmg."
             )
         }
     }
