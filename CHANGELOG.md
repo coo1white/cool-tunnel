@@ -5,9 +5,9 @@ roughly-semver: bumps in the third digit are features; bumps in
 the fourth digit are pre-release polish on the same line.
 
 The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
-**v0.1.6** is the first stable release; **v0.1.7** is the first
-release on the Long-Term Servicing Channel line — see
-[SUPPORT.md](./SUPPORT.md) for the support contract.
+**v0.1.6** was the first stable release on the original line.
+The **v2.0.x** series is the current Long-Term Servicing Channel
+line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
 ## [2.0.21] — 2026-05-06 (Connection robustness: handshake, pre-flight probe, subscription validation)
 

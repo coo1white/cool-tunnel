@@ -18,13 +18,28 @@
 // status code alone. Reading the response `Content-Type` and
 // attempting JSON decode is the only honest signal.
 //
-// What the client validates:
-//   - HTTPS-only URL.
-//   - Response decodes as `SubscriptionManifestV1`.
+// What the client validates (in `validate(now:)`):
 //   - `version == 1`.
-//   - `expires_at` is in the future.
+//   - `profiles` is non-empty AND ≤ 16 entries (defensive cap).
+//   - `capabilities.http3 == false` (a `true` value is a strong
+//     counterfeit signal — see schema commentary).
+//   - `issued_at != 0` (the schema sentinel; only stub or
+//     counterfeit servers emit zero).
+//   - `issued_at <= now + 60 s` (forward clock-skew tolerance;
+//     larger drifts would let a counterfeit pair `issued_at =
+//     far_future` with `expires_at = farther_future` to bypass
+//     the staleness gate).
+//   - `expires_at >= issued_at` (rejects malformed manifests
+//     where expiry precedes issuance).
+//   - `expires_at - issued_at <= 1 year` (caps the validity
+//     window so an attacker can't pair `issued_at = now()` with
+//     `expires_at = u64::MAX`).
+//   - `expires_at > now` (manifest hasn't expired).
 //   - `now - issued_at <= 7 days` (freshness guard, matches the
 //     server-side comment in `ct-protocol::subscription`).
+//
+// HTTPS-only URL enforcement and the 1 MB body cap live in
+// `SubscriptionClient`, not here.
 
 import Foundation
 
@@ -198,10 +213,14 @@ extension SubscriptionManifestV1 {
         profiles.first
     }
 
-    /// Validates the manifest against the freshness, expiry, and
-    /// schema-version rules. Throws [`SubscriptionValidationError`]
-    /// describing the first violated rule. `now` is injected so
-    /// tests don't depend on wall-clock time.
+    /// Validates the manifest against the schema-version,
+    /// profile-cardinality, capability-counterfeit,
+    /// issued-at-sentinel, forward-skew, expiry-ordering,
+    /// validity-window, expiry, and freshness rules — in that
+    /// order. Throws [`SubscriptionValidationError`] describing
+    /// the first violated rule. `now` is injected so tests don't
+    /// depend on wall-clock time. See the file-header comment for
+    /// the full list and rationale per rule.
     public func validate(now: Date = Date()) throws {
         if version != 1 {
             throw SubscriptionValidationError.unsupportedVersion(got: version, expected: 1)
@@ -286,7 +305,11 @@ extension SubscriptionManifestV1 {
 }
 
 /// Reasons a manifest fetched from the panel is unusable.
-public enum SubscriptionValidationError: Error, Sendable, Equatable {
+///
+/// Routed through `TunnelOrchestrator.translate(_:)` into
+/// `SubscriptionImportError` for the UI, but conforms to
+/// `LocalizedError` so any direct render path also reads cleanly.
+public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
     /// Manifest's `version` field is not `1`. The client only
     /// understands V1 today; a future server might emit V2 alongside
     /// V1 during a migration, but the URL is supposed to negotiate
@@ -328,6 +351,32 @@ public enum SubscriptionValidationError: Error, Sendable, Equatable {
     /// the user's network serving a stale copy. Re-fetch over a
     /// different network typically resolves it.
     case stale(ageSeconds: TimeInterval)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedVersion(let got, let expected):
+            return "Subscription manifest version is \(got); this app understands \(expected)."
+        case .noProfiles:
+            return "Subscription manifest contained no profiles."
+        case .tooManyProfiles(let got, let max):
+            return "Subscription manifest has \(got) profiles; the cap is \(max)."
+        case .counterfeitCapabilities:
+            return
+                "Subscription manifest advertises a capability inconsistent with a real Cool Tunnel server."
+        case .invalidIssuedAt:
+            return "Subscription manifest's issue timestamp is invalid."
+        case .malformedExpiry:
+            return "Subscription manifest's expiry precedes its issue time."
+        case .validityTooLong(_, let maxSeconds):
+            return
+                "Subscription manifest claims a validity longer than the \(maxSeconds / (24 * 60 * 60)) day maximum."
+        case .expired:
+            return "Subscription manifest has expired."
+        case .stale(let ageSeconds):
+            let days = max(1, Int(ageSeconds / (24 * 60 * 60)))
+            return "Subscription manifest is \(days) days old."
+        }
+    }
 }
 
 // MARK: - Conversion to local Profile

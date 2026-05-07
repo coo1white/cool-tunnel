@@ -57,7 +57,15 @@ public struct NaiveBinaryDescriptor: Sendable, Equatable {
 
 /// Errors the resolver can surface back to the orchestrator. Each one
 /// maps to a specific user-facing message in the UI.
-public enum NaiveResolverError: Error, Sendable, Equatable {
+///
+/// **Conforms to `LocalizedError`**, and uses `url.lastPathComponent`
+/// (the filename) in user-visible strings rather than `url.path`
+/// (the absolute path, which leaks the macOS username when the
+/// binary lives under `/Users/<name>/Library/...`). Support
+/// diagnosis still has the full path via the wrapped `URL` value
+/// — callers that want it can inspect the associated value
+/// directly.
+public enum NaiveResolverError: LocalizedError, Sendable, Equatable {
     /// The candidate path does not exist or is not a regular file.
     case fileNotFound(URL)
     /// `lipo` failed to read the file as a Mach-O.
@@ -69,17 +77,18 @@ public enum NaiveResolverError: Error, Sendable, Equatable {
     /// [`CodeSignVerifier`].
     case codeSignatureInvalid(URL, CodeSignError)
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
         case .fileNotFound(let url):
-            "naive binary not found at \(url.path)"
+            "naive binary '\(url.lastPathComponent)' not found."
         case .notAMachO(let url):
-            "\(url.path) is not a Mach-O executable"
+            "'\(url.lastPathComponent)' is not a Mach-O executable."
         case .missingHostSlice(let url, let host, let found):
-            "\(url.path) does not contain a \(host.machOArchName) slice "
-                + "(found: \(found.sorted().joined(separator: ", ")))"
+            "'\(url.lastPathComponent)' does not contain a \(host.machOArchName) slice "
+                + "(found: \(found.sorted().joined(separator: ", "))). "
+                + "Replace with a universal or \(host.machOArchName) build."
         case .codeSignatureInvalid(_, let err):
-            "code signature check failed: \(err.localizedDescription)"
+            "Code signature check failed: \(err.errorDescription ?? "unknown error")"
         }
     }
 }
