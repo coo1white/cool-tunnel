@@ -9,6 +9,69 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.23] — 2026-05-07 (Auto-updater fix: macOS 15+/26 incompatibility)
+
+One real shipping bug. v2.0.22 (and every release before it) shipped
+an in-app updater path that silently fails on macOS 15 / 26 (Sequoia
+/ Tahoe) when the bundle is `.pkg`-installed (root-owned in
+`/Applications`). User clicks Update → admin password prompt
+appears → user enters it → osascript reports success → app
+terminates expecting helper to swap and relaunch → **helper
+never actually runs** → on manual restart the user is back on the
+old version with no signal anything went wrong.
+
+### Fixed
+
+- **AppUpdater silent failure on root-owned bundles in macOS 15+/26.**
+  Previously, AppUpdater ran the entire relaunch helper inside a
+  privileged shell:
+  ```
+  osascript -e 'do shell script "/bin/bash wrapper.sh"
+                with administrator privileges'
+  ```
+  where `wrapper.sh` was supposed to detach the real helper via
+  `nohup ... &; disown` so osascript could return promptly while
+  the helper kept running as root long enough to wait for the
+  parent PID, do the bundle swap, and relaunch. macOS 15+ / 26
+  (Tahoe) **kills children of the authorization-elevated shell on
+  exit regardless of `nohup`/`disown`** — `nohup ... &; disown`
+  worked for decades but Apple changed the rules. The wrapper
+  exited 0, osascript reported success, AppUpdater proceeded to
+  `state = .relaunching` and terminated, but the real helper was
+  killed before its first non-trivial line (`exec 2>>"$LOG"`)
+  ever executed — the relaunch log file mtime didn't even update.
+
+  New flow: use `osascript ... with administrator privileges` for
+  ONLY a `chown` (a fast atomic operation that doesn't need to
+  background), then fall through to the regular user-owned spawn
+  path. After the chown the bundle is owned by the current user,
+  the relaunch helper spawned via `Process()` inherits the user's
+  normal session (no sandbox issue), and future updates skip the
+  password prompt entirely. Defence in depth: `lstat()` after the
+  osascript call to verify the chown actually took effect.
+
+  Diagnosed via `log show` against a failed v2.0.21→v2.0.22
+  attempt: `authd` reported `Succeeded authorizing right
+  'system.privilege.admin' by client '/usr/bin/osascript'` at
+  21:15:14.385, the wrapper script ran as root and exited 0, the
+  parent app exited cleanly at 21:15:24 — and yet the helper
+  script's first `echo` to its log never appeared.
+
+  User-visible behaviour:
+
+  | Scenario | Before | After |
+  | --- | --- | --- |
+  | First update on a `.pkg`-installed bundle | Silent failure | One admin-password prompt for the chown, update completes |
+  | Subsequent updates | Re-prompted on every update (when working at all) | Zero password prompts — bundle is now user-owned |
+  | User cancels password prompt | "Update cancelled — admin password not entered." | Same |
+  | `.dmg`-installed (user-owned) bundles | Worked | Unchanged |
+
+### Bundled
+- NaiveProxy v148.0.7778.96-2 (unchanged)
+- Cool Tunnel Core v2.0.23
+
+---
+
 ## [2.0.22] — 2026-05-07 (v2.0.21 review-fallout: 4 rounds of code review, ~30 fixes)
 
 Four full rounds of code review against the v2.0.21 cycle, each
