@@ -96,7 +96,20 @@ impl Profile {
 ///
 /// Each field is a `String`, so the structure can be deserialized even when
 /// values are invalid; validation is run during the conversion to [`Profile`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is **manually implemented** to redact `username` and
+/// `password`. The auto-derived `Debug` would print cleartext —
+/// no current call site formats a `RawProfile`, but the
+/// type *is* the wire shape, and a future
+/// `tracing::warn!(?raw, "deserialize failed")` site (the
+/// natural place to log a deserialize error) would silently
+/// dump cleartext credentials at info level into the engine's
+/// stderr stream → forwarded to `os_log` by the Swift
+/// `engineStderrLogger` → support bundle. Eliminate the
+/// foot-gun pre-emptively. Mirrors the redaction discipline
+/// already on `Username`, `Password`, and `EncodedCredentials`
+/// in `core/src/domain/credentials.rs`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawProfile {
     /// Stable identifier.
     pub id: String,
@@ -109,6 +122,18 @@ pub struct RawProfile {
     /// Local SOCKS listener port (decimal string).
     #[serde(rename = "localPort")]
     pub local_port: String,
+}
+
+impl std::fmt::Debug for RawProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawProfile")
+            .field("id", &self.id)
+            .field("server", &self.server)
+            .field("username", &"***")
+            .field("password", &"***")
+            .field("local_port", &self.local_port)
+            .finish()
+    }
 }
 
 impl TryFrom<RawProfile> for Profile {
