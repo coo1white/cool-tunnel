@@ -14,7 +14,13 @@ import os
 
 /// Errors raised by `CoreClient` itself, distinct from errors received
 /// over the wire (which surface as `ErrorPayload`).
-public enum CoreClientError: Error, Sendable, Equatable {
+///
+/// **Conforms to `LocalizedError`** so the
+/// `(error as? LocalizedError)?.errorDescription` cast at user-
+/// facing catch sites surfaces the strings below rather than
+/// Swift's default `"…CoolTunnel.CoreClientError error N."`
+/// placeholder. Per-type round-3 review fix.
+public enum CoreClientError: LocalizedError, Sendable, Equatable {
     /// `start()` was called while the engine was already running.
     case alreadyRunning
     /// A request method was invoked while the engine was stopped.
@@ -51,6 +57,33 @@ public enum CoreClientError: Error, Sendable, Equatable {
     /// from `start()`; the subprocess is torn down before the
     /// throw.
     case malformedHandshake
+
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyRunning:
+            "The Cool Tunnel engine is already running."
+        case .notRunning:
+            "The Cool Tunnel engine is not running."
+        case .executableUnavailable(let url):
+            "Cool Tunnel could not find the engine binary '\(url.lastPathComponent)'."
+        case .executableTampered(let url, let err):
+            "The engine binary '\(url.lastPathComponent)' failed code-signature "
+                + "verification. \(err.errorDescription ?? "Reinstall Cool Tunnel.")"
+        case .decodingFailed:
+            "The engine sent an unexpected response. Try restarting Cool Tunnel."
+        case .engineExited:
+            "The Cool Tunnel engine exited unexpectedly. Try Start again."
+        case .requestTimeout:
+            "The engine did not respond within the request deadline."
+        case .protocolVersionMismatch(let expected, let engine, _):
+            "Cool Tunnel speaks engine protocol v\(expected) but the bundled "
+                + "engine reports v\(engine). Update the app."
+        case .malformedHandshake:
+            "The engine binary did not recognise the Cool Tunnel handshake. "
+                + "If you set a custom engine path, verify it points at "
+                + "`cool-tunnel-core`."
+        }
+    }
 }
 
 /// Long-lived actor that drives the `cool-tunnel-core` subprocess.
@@ -458,11 +491,12 @@ public actor CoreClient {
         }
         try? stdinHandle?.close()
         stdinHandle = nil
-        // Closing the stderr handle delivers EOF to the drain
-        // loop's `availableData` call, so the Task will exit
-        // naturally even if cancellation hasn't been observed
-        // yet. Closing first, then cancelling, mirrors how
-        // `readerTask` is wound down via stdout EOF + cancel.
+        // Closing the stderr handle causes the drain loop's
+        // pending `read(upToCount:)` to throw a Swift error (or
+        // return nil at EOF), so the loop exits cleanly even if
+        // cancellation hasn't been observed yet. Closing first,
+        // then cancelling, mirrors how `readerTask` is wound down
+        // via stdout EOF + cancel.
         try? stderrHandle?.close()
         stderrHandle = nil
         process = nil

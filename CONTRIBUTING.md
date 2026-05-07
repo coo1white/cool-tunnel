@@ -56,11 +56,12 @@ xcodebuild -scheme COOL-TUNNEL -configuration Release \
     DEVELOPMENT_TEAM="" \
     clean build
 
-# Run the pre-package security audit
-EXPECTED_VERSION=0.1.7 scripts/security_check.sh
+# Run the pre-package security audit (substitute the version
+# you're cutting; e.g. the current latest is 2.0.21).
+EXPECTED_VERSION=2.0.21 scripts/security_check.sh
 
 # Package .dmg + .pkg + .zip + standalone cool-tunnel-core
-scripts/package_release.sh 0.1.7
+scripts/package_release.sh 2.0.21
 ```
 
 ## Running the test sweep

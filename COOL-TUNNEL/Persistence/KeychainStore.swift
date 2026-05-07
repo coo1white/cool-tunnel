@@ -14,7 +14,11 @@ import Foundation
 import Security
 
 /// Errors raised by [`KeychainStore`].
-public enum KeychainError: Error, Sendable, Equatable {
+///
+/// Conforms to `LocalizedError` so a user-facing catch site
+/// surfaces the strings below rather than Swift's default
+/// `"…CoolTunnel.KeychainError error N."` placeholder.
+public enum KeychainError: LocalizedError, Sendable, Equatable {
     /// `SecItemAdd` / `SecItemUpdate` failed.
     case write(OSStatus)
     /// `SecItemCopyMatching` failed with an unexpected status (other than
@@ -25,12 +29,12 @@ public enum KeychainError: Error, Sendable, Equatable {
     /// The stored item did not decode as UTF-8.
     case malformedItem
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
-        case .write(let s): "keychain write failed (OSStatus \(s))"
-        case .read(let s): "keychain read failed (OSStatus \(s))"
-        case .delete(let s): "keychain delete failed (OSStatus \(s))"
-        case .malformedItem: "keychain item is not valid UTF-8"
+        case .write(let s): "Keychain write failed (OSStatus \(s))."
+        case .read(let s): "Keychain read failed (OSStatus \(s))."
+        case .delete(let s): "Keychain delete failed (OSStatus \(s))."
+        case .malformedItem: "Keychain item is not valid UTF-8."
         }
     }
 }

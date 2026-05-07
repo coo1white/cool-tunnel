@@ -13,7 +13,14 @@ import Foundation
 import Security
 
 /// Errors produced by [`CodeSignVerifier`].
-public enum CodeSignError: Error, Sendable, Equatable {
+///
+/// **Conforms to `LocalizedError`** so the `(error as? LocalizedError)
+/// ?.errorDescription` cast at user-facing catch sites surfaces the
+/// strings below rather than Swift's default
+/// `"…CoolTunnel.CodeSignError error N."` placeholder. The OSStatus
+/// numbers are kept for support diagnosis but the user-facing
+/// half of each message reads as plain English.
+public enum CodeSignError: LocalizedError, Sendable, Equatable {
     /// `SecStaticCodeCreateWithPath` could not create a static code handle.
     /// The path may not exist, may not be a Mach-O, or may not be readable.
     case cannotCreateStaticCode(OSStatus)
@@ -21,12 +28,12 @@ public enum CodeSignError: Error, Sendable, Equatable {
     /// binary's bytes — i.e. the file has been tampered with.
     case invalidSignature(OSStatus)
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
         case .cannotCreateStaticCode(let status):
-            "could not read code signature (OSStatus \(status))"
+            "Cool Tunnel could not read the binary's code signature (OSStatus \(status))."
         case .invalidSignature(let status):
-            "code signature is invalid or missing (OSStatus \(status))"
+            "The binary's code signature is invalid or missing (OSStatus \(status))."
         }
     }
 }

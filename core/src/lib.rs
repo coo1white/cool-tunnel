@@ -17,6 +17,18 @@
 //!   and the smart-routing PAC file from a [`domain::Profile`].
 //! - [`protocol`] — request/response/event types that travel over stdin/stdout.
 //! - [`error`] — the crate-wide [`error::CoreError`] enum.
+//! - [`diagnostics`] — connectivity probes (TLS upstream, SOCKS handshake,
+//!   latency) issued through a running proxy.
+//! - [`monitor`] — `lsof`-based monitor that watches the supervised
+//!   `naive` PID for listen-port loss and anomaly conditions.
+//! - [`preflight`] — DNS + TCP reachability probe used by the Swift
+//!   UI's "Test Connection" button before a full launch.
+//! - [`redaction`] — regex pipeline that scrubs URL userinfo,
+//!   `Authorization`/`Cookie` headers, and JSON-KV credential
+//!   fields from naive subprocess log lines.
+//! - [`supervisor`] — `naive` child-process lifecycle manager
+//!   (spawn, log drain, graceful stop, natural-death detection).
+//! - [`util`] — shared helpers (debouncer for anomaly emit dedup).
 //!
 //! # Safety
 //!
