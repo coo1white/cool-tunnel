@@ -562,8 +562,9 @@ public final class TunnelOrchestrator {
             case .noProfiles:
                 return .noProfiles
             case .tooManyProfiles, .counterfeitCapabilities,
-                .invalidIssuedAt, .malformedExpiry, .validityTooLong:
-                // All five signal a stub or counterfeit manifest.
+                .invalidIssuedAt, .malformedExpiry, .validityTooLong,
+                .blockedHost:
+                // All six signal a stub or counterfeit manifest.
                 // The user action is identical: do not connect,
                 // contact the operator. Lumping into one UI case
                 // keeps the banner copy clear; support can pivot

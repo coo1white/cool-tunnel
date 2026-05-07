@@ -54,7 +54,17 @@ jobs:
       # so the GITHUB_TOKEN doesn't sit in `.git/config` after
       # checkout. A compromised dependency or test fixture
       # executed in a later step could otherwise read it.
-      - uses: actions/checkout@v6
+      # **v2.0.22 (round-4 review):** action pinned to commit SHA
+      # rather than the `v6` major-version tag. Tags are mutable —
+      # a takeover or compromised retag of `actions/checkout@v6`
+      # would silently substitute attacker code into every CI run
+      # despite the `permissions: contents: read` + `persist-
+      # credentials: false` controls. SHA pin is the supply-chain
+      # discipline GitHub recommends; Dependabot's `package-
+      # ecosystem: github-actions` updates the SHA on a real
+      # release while preserving the version comment. Pinned SHAs
+      # are the v6 / v5 / v2 release tags as of 2026-05-07.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
       # rust-toolchain.toml is honoured automatically by rustup —
@@ -64,7 +74,7 @@ jobs:
           rustup show
           rustup component add rustfmt clippy
       - name: Cache cargo registry + build
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: |
             ~/.cargo/registry
@@ -85,7 +95,11 @@ jobs:
       # `deny.toml` existed but no CI step ran it. Caching the
       # cargo-deny binary keeps the install fast.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        # Third-party action: SHA pin is especially important here
+        # since `taiki-e/install-action` runs `cargo install` on the
+        # macos-14 runner with the GITHUB_TOKEN still in scope (until
+        # the workflow's `permissions: contents: read` strips writes).
+        uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2
         with:
           tool: cargo-deny
       - name: cargo deny check
@@ -106,7 +120,7 @@ jobs:
     name: Swift (format lint)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
       - name: swift-format --lint
@@ -133,7 +147,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
       - name: Install shellcheck
