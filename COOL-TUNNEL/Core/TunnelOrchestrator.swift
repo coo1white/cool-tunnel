@@ -1557,7 +1557,14 @@ public final class TunnelOrchestrator {
 
 /// Errors raised by the orchestrator (separate from engine and OS errors,
 /// which surface as their own types).
-public enum OrchestratorError: Error, Sendable, Equatable {
+///
+/// **Conforms to `LocalizedError`, not just `Error`.** Without
+/// `LocalizedError`, the `(error as? LocalizedError)?.errorDescription`
+/// cast at the catch sites in `startCore` etc. silently misses
+/// these cases and the user sees Swift's default
+/// `"The operation couldn't be completed. (CoolTunnel.OrchestratorError error N.)"`
+/// instead of the strings below. Per-type round-3 review fix.
+public enum OrchestratorError: LocalizedError, Sendable, Equatable {
     case noProfile
     case invalidProfile(reason: String)
     case unexpectedResponse
@@ -1567,13 +1574,13 @@ public enum OrchestratorError: Error, Sendable, Equatable {
     /// which one — and what to do about it.
     case naiveBinaryUnusable(NaiveResolverError)
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
         case .noProfile: "No profile is selected."
         case .invalidProfile(let reason): "Invalid profile: \(reason)"
         case .unexpectedResponse: "Engine returned an unexpected response."
         case .naiveBinaryUnusable(let err):
-            "naive binary cannot be used: \(err.localizedDescription)"
+            "naive binary cannot be used: \(err.errorDescription ?? "unknown error")"
         }
     }
 }
@@ -1659,7 +1666,7 @@ public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
         case .manifestCounterfeit:
             "The subscription manifest looks fake or tampered with. Do not connect — verify the panel URL with the administrator."
         case .manifestTooLarge(let cap):
-            "The subscription response is suspiciously large (>\(cap / 1024) KB). Verify the panel URL with the administrator before retrying."
+            "The subscription response is suspiciously large (over \(cap / (1024 * 1024)) MB). Verify the panel URL with the administrator before retrying."
         }
     }
 }

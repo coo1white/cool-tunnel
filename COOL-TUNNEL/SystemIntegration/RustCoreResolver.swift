@@ -66,23 +66,29 @@ public struct RustCoreDescriptor: Sendable, Equatable {
 /// Errors the resolver surfaces. Distinct from `NaiveResolverError`
 /// so the UI can show a precise message ("Rust core" vs "naive
 /// binary") without runtime introspection.
-public enum RustCoreResolverError: Error, Sendable, Equatable {
+///
+/// **Conforms to `LocalizedError`** and uses
+/// `url.lastPathComponent` (filename) instead of `url.path`
+/// (absolute path with macOS username) — same discipline as
+/// `NaiveResolverError`.
+public enum RustCoreResolverError: LocalizedError, Sendable, Equatable {
     case fileNotFound(URL)
     case notAMachO(URL)
     case missingHostSlice(URL, host: HostArchitecture, found: Set<String>)
     case codeSignatureInvalid(URL, CodeSignError)
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
         case .fileNotFound(let url):
-            "cool-tunnel-core binary not found at \(url.path)"
+            "cool-tunnel-core binary '\(url.lastPathComponent)' not found."
         case .notAMachO(let url):
-            "\(url.path) is not a Mach-O executable"
+            "'\(url.lastPathComponent)' is not a Mach-O executable."
         case .missingHostSlice(let url, let host, let found):
-            "\(url.path) does not contain a \(host.machOArchName) slice "
-                + "(found: \(found.sorted().joined(separator: ", ")))"
+            "'\(url.lastPathComponent)' does not contain a \(host.machOArchName) slice "
+                + "(found: \(found.sorted().joined(separator: ", "))). "
+                + "Replace with a universal or \(host.machOArchName) build."
         case .codeSignatureInvalid(_, let err):
-            "code signature check failed: \(err.localizedDescription)"
+            "Code signature check failed: \(err.errorDescription ?? "unknown error")"
         }
     }
 }

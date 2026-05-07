@@ -37,6 +37,12 @@ impl ServerAddress {
 
     /// Parses and validates a server address.
     ///
+    /// Accepts hostnames, IPv4 literals, and bracketed IPv6 literals
+    /// (`[2001:db8::1]:443`). Bare IPv6 literals (e.g. `2001:db8::1`)
+    /// are rejected because `rfind(':')` would split them at the
+    /// last colon and treat `1` as a port — silently misleading the
+    /// downstream resolver. Brackets are the unambiguous form.
+    ///
     /// # Errors
     ///
     /// Returns [`InvalidServer`] describing the first rule violated.
@@ -59,6 +65,35 @@ impl ServerAddress {
             if trimmed.contains(forbidden) {
                 return Err(InvalidServer::ContainsForbidden(forbidden));
             }
+        }
+        // Bracketed IPv6 form: `[host]:port` or `[host]`. The `]` is
+        // the structural separator between host and the optional
+        // port suffix; we extract the inner host between the
+        // brackets and validate the port (if any) separately.
+        if let Some(rest) = trimmed.strip_prefix('[') {
+            let Some(end) = rest.find(']') else {
+                return Err(InvalidServer::UnclosedBracket);
+            };
+            let host = &rest[..end];
+            if host.is_empty() {
+                return Err(InvalidServer::EmptyHost);
+            }
+            let after = &rest[end + 1..];
+            if !after.is_empty() {
+                let Some(port_str) = after.strip_prefix(':') else {
+                    return Err(InvalidServer::InvalidPort);
+                };
+                Port::from_str(port_str).map_err(|_| InvalidServer::InvalidPort)?;
+            }
+            return Ok(Self(trimmed.to_owned()));
+        }
+        // Bare strings with multiple colons are almost certainly
+        // unbracketed IPv6 literals; `rfind(':')` would split them
+        // at the wrong place and silently produce a host with an
+        // embedded `:` plus a "port" that's actually the last v6
+        // group. Refuse and tell the caller to bracket.
+        if trimmed.matches(':').count() > 1 {
+            return Err(InvalidServer::AmbiguousIPv6);
         }
         if let Some(idx) = trimmed.rfind(':') {
             let host = &trimmed[..idx];
@@ -129,6 +164,15 @@ pub enum InvalidServer {
     /// The port suffix did not parse as a valid [`Port`].
     #[error("server address has invalid port")]
     InvalidPort,
+    /// A `[` opened but no matching `]` was found.
+    #[error("server address has unclosed '[' for IPv6 literal")]
+    UnclosedBracket,
+    /// A bare (unbracketed) string contained more than one `:` —
+    /// almost certainly an unbracketed IPv6 literal that would be
+    /// mis-parsed by `rfind(':')`. Bracket the address as
+    /// `[2001:db8::1]:443` to disambiguate.
+    #[error("server address looks like an unbracketed IPv6 literal; use brackets, e.g. [2001:db8::1]:443")]
+    AmbiguousIPv6,
 }
 
 #[cfg(test)]
@@ -239,5 +283,55 @@ mod tests {
     #[test]
     fn serde_rejects_invalid() {
         assert!(serde_json::from_str::<ServerAddress>("\"https://x\"").is_err());
+    }
+
+    #[test]
+    fn accepts_bracketed_ipv6_with_port() {
+        let addr = ServerAddress::parse("[2001:db8::1]:443").unwrap();
+        assert_eq!(addr.as_str(), "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn accepts_bracketed_ipv6_without_port() {
+        let addr = ServerAddress::parse("[2001:db8::1]").unwrap();
+        assert_eq!(addr.as_str(), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn accepts_bracketed_ipv6_loopback() {
+        let addr = ServerAddress::parse("[::1]:443").unwrap();
+        assert_eq!(addr.as_str(), "[::1]:443");
+    }
+
+    #[test]
+    fn rejects_bare_ipv6_as_ambiguous() {
+        assert!(matches!(
+            ServerAddress::parse("2001:db8::1"),
+            Err(InvalidServer::AmbiguousIPv6)
+        ));
+    }
+
+    #[test]
+    fn rejects_unclosed_bracket() {
+        assert!(matches!(
+            ServerAddress::parse("[2001:db8::1"),
+            Err(InvalidServer::UnclosedBracket)
+        ));
+    }
+
+    #[test]
+    fn rejects_bracketed_with_empty_host() {
+        assert!(matches!(
+            ServerAddress::parse("[]:443"),
+            Err(InvalidServer::EmptyHost)
+        ));
+    }
+
+    #[test]
+    fn rejects_bracketed_with_invalid_port() {
+        assert!(matches!(
+            ServerAddress::parse("[::1]:99999"),
+            Err(InvalidServer::InvalidPort)
+        ));
     }
 }

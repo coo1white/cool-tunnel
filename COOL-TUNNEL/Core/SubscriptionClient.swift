@@ -17,10 +17,12 @@
 //   purely by JSON-decoding the body; a `Content-Type: application/json`
 //   pre-check rules out the easy cover-site case before we waste a
 //   parse on multi-megabyte HTML.
-// * Hard 1 MB body cap. A real manifest is ~1 KB; the cap is purely
-//   defense-in-depth against a hijacked panel or MITM streaming
-//   gigabytes inside the 10-second window. Mirrors the
-//   `GitHubRedirectGuard.download` cap on the updater path.
+// * Hard 1 MB body cap, enforced after `data(for:)` returns. A real
+//   manifest is ~1 KB; the cap is defense-in-depth against a
+//   hijacked panel or MITM streaming a large body inside the 10 s
+//   timeout window (which itself bounds the worst-case bytes that
+//   can land in memory). Mirrors the `GitHubRedirectGuard.download`
+//   cap on the updater path.
 // * Redirects forbidden. The trust anchor is "TLS to the panel
 //   domain"; following a redirect to any other host silently moves
 //   the anchor. A `URLSessionTaskDelegate` cancels the redirect
@@ -37,7 +39,12 @@ import Foundation
 import os
 
 /// Errors raised by [`SubscriptionClient`].
-public enum SubscriptionClientError: Error, Sendable, Equatable {
+///
+/// Mostly translated by `TunnelOrchestrator.translate(_:)` into
+/// `SubscriptionImportError` for UI surface; this `errorDescription`
+/// exists for the rare case where a `SubscriptionClientError`
+/// reaches a generic `error.localizedDescription` site.
+public enum SubscriptionClientError: LocalizedError, Sendable, Equatable {
     /// The URL string couldn't be parsed.
     case malformedURL(String)
     /// The URL scheme wasn't `https`. We refuse plaintext
@@ -74,6 +81,27 @@ public enum SubscriptionClientError: Error, Sendable, Equatable {
     /// The manifest decoded but failed validation
     /// (version/expiry/freshness). Surfaces the underlying reason.
     case manifestRejected(SubscriptionValidationError)
+
+    public var errorDescription: String? {
+        switch self {
+        case .malformedURL:
+            "The subscription URL could not be parsed."
+        case .nonHTTPSURL:
+            "The subscription URL must start with https://."
+        case .transportFailed(let msg):
+            "Could not reach the subscription server: \(msg)."
+        case .httpStatus(let code):
+            "The subscription server returned HTTP \(code)."
+        case .oversizeBody(let cap):
+            "The subscription response exceeded the \(cap / (1024 * 1024)) MB cap."
+        case .unexpectedContentType(let media):
+            "The subscription server returned content of type '\(media)' instead of JSON."
+        case .malformedManifest:
+            "The subscription response was not a valid manifest."
+        case .manifestRejected(let validation):
+            validation.errorDescription
+        }
+    }
 }
 
 /// Fetches and decodes [`SubscriptionManifestV1`] from a panel URL.
@@ -144,10 +172,24 @@ public actor SubscriptionClient {
         // No Accept header — the panel doesn't content-negotiate
         // and a custom Accept is one more fingerprint surface.
 
-        let bytes: URLSession.AsyncBytes
+        let data: Data
         let response: URLResponse
         do {
-            (bytes, response) = try await session.bytes(
+            // `data(for:delegate:)` reads the whole body into memory
+            // in one async hop. Two reasons we use it instead of the
+            // earlier streaming `bytes(for:)` path:
+            //
+            // 1. `URLSession.AsyncBytes` yields one byte per
+            //    iteration on Darwin, so the streaming variant
+            //    spent ~1024 await-suspensions on a 1 KB manifest
+            //    plus one `Data.append` per byte. Real cliff.
+            // 2. The 1 MB body cap is enforced *after* the read
+            //    finishes — `URLSessionConfiguration.timeoutInterval
+            //    ForResource = 10 s` already bounds the worst case
+            //    a hostile panel can stream into memory inside the
+            //    fetch window. A 1 MB body at 10 s = 100 KB/s, well
+            //    inside the 1 MB cap.
+            (data, response) = try await session.data(
                 for: request, delegate: NoRedirectGuard.shared
             )
         } catch {
@@ -160,6 +202,15 @@ public actor SubscriptionClient {
                 "subscription fetch transport error: \(error.localizedDescription, privacy: .public)"
             )
             throw SubscriptionClientError.transportFailed(error.localizedDescription)
+        }
+
+        // Post-hoc body-size guard. The transport timeout above is
+        // the primary defence against hostile streaming; this is
+        // the explicit upper bound — a real manifest is ~1 KB so
+        // anything close to a megabyte is suspicious regardless of
+        // how fast it arrived.
+        if data.count > Self.maxBytes {
+            throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
         }
 
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -213,30 +264,6 @@ public actor SubscriptionClient {
         // Absent Content-Type header is unusual but not
         // disqualifying — a stripped-down origin might omit it.
         // The decoder will reject non-JSON bytes anyway.
-
-        // Stream into a byte buffer so we can short-circuit a
-        // hostile multi-GB body inside the 10 s timeout window.
-        // `bytes(for:)` returns one byte per element on Darwin
-        // — the inner accumulation cost is negligible for a
-        // <1 MB manifest, and the iterator's natural cancellation
-        // closes the stream on the throw.
-        var data = Data()
-        data.reserveCapacity(8 * 1024)
-        do {
-            for try await byte in bytes {
-                if data.count >= Self.maxBytes {
-                    throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
-                }
-                data.append(byte)
-            }
-        } catch let error as SubscriptionClientError {
-            throw error
-        } catch {
-            Self.logger.error(
-                "subscription body read error: \(error.localizedDescription, privacy: .public)"
-            )
-            throw SubscriptionClientError.transportFailed(error.localizedDescription)
-        }
 
         let manifest: SubscriptionManifestV1
         do {

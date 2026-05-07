@@ -37,6 +37,21 @@ public struct AppSupportPaths: Sendable {
             [.posixPermissions: 0o700],
             ofItemAtPath: support.path
         )
+        // Exclude the entire support tree from Time Machine.
+        // `config.json` carries the cleartext `https://user:pass@host`
+        // proxy URL, and `credentials.json` (written by
+        // `FileCredentialStore`) carries base64-encoded passwords;
+        // both are 0600 user-only on disk but Time Machine snapshots
+        // are accessible to the next administrator who restores the
+        // user's home folder. Setting `isExcludedFromBackupKey`
+        // on the directory covers every file inside it now and in
+        // the future. The call is idempotent — re-running on every
+        // launch corrects a backup state that drifted (e.g. user
+        // restored from a pre-flag backup).
+        var supportMutable = support
+        var resources = URLResourceValues()
+        resources.isExcludedFromBackup = true
+        try? supportMutable.setResourceValues(resources)
         self.supportDirectory = support
         self.configFile = support.appendingPathComponent("config.json", isDirectory: false)
         self.pacFile = support.appendingPathComponent("smart-proxy.pac", isDirectory: false)
