@@ -338,6 +338,24 @@ async fn handle_request(
         Err(error) => Outbound::Error { id, error },
     };
     let response_succeeded = matches!(&frame, Outbound::Response { .. });
+    // **Round-2 review fix:** the StopProxy handler can return
+    // `Err("stop_failed")` *after* it has already taken the
+    // supervisor out of `EngineState`, aborted the monitor, and
+    // pre-claimed `emitted_stopped = true` — i.e. the transition
+    // is fully committed engine-side, but `supervisor.stop()`'s
+    // own `Result` came back unhappy (naive didn't exit cleanly
+    // in the 2 s window). Without an emit on this path, the
+    // orchestrator never sees `state_changed:false` and the UI
+    // sticks on "running". Distinguish it from `not_running`
+    // (where the supervisor was already absent and no transition
+    // occurred) by inspecting the error code before we move
+    // `frame` into the send.
+    let stop_transition_committed = was_stop
+        && match &frame {
+            Outbound::Response { .. } => true,
+            Outbound::Error { error, .. } => error.code == "stop_failed",
+            Outbound::Event(_) => false,
+        };
     let _ = outbound.send(frame).await;
     // Ru#C4 fix: emit `state_changed` AFTER the response on the
     // same outbound channel so FIFO ordering guarantees the wire
@@ -348,16 +366,14 @@ async fn handle_request(
     // the response. The supervisor now emits *only* the
     // natural-death event (naive crashes on its own); user-
     // initiated start/stop transitions are emitted here.
-    if response_succeeded {
-        if was_start {
-            let _ = outbound
-                .send(Outbound::Event(Event::StateChanged { running: true }))
-                .await;
-        } else if was_stop {
-            let _ = outbound
-                .send(Outbound::Event(Event::StateChanged { running: false }))
-                .await;
-        }
+    if was_start && response_succeeded {
+        let _ = outbound
+            .send(Outbound::Event(Event::StateChanged { running: true }))
+            .await;
+    } else if stop_transition_committed {
+        let _ = outbound
+            .send(Outbound::Event(Event::StateChanged { running: false }))
+            .await;
     }
 }
 
@@ -799,8 +815,14 @@ mod tests {
 
     #[test]
     fn clamp_monitor_interval_passes_through_in_range() {
+        // Boundaries plus a strictly-interior value. Without the
+        // interior point a refactor to `if x < MIN { MIN } else
+        // { MAX }` (no in-range pass-through) would still pass —
+        // both `Some(1) → 1` and `Some(60) → 60` coincide with
+        // the corresponding clamp output.
         assert_eq!(clamp_monitor_interval(Some(1)), 1);
         assert_eq!(clamp_monitor_interval(Some(5)), 5);
+        assert_eq!(clamp_monitor_interval(Some(30)), 30);
         assert_eq!(clamp_monitor_interval(Some(60)), 60);
     }
 

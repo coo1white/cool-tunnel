@@ -181,14 +181,31 @@ public actor SubscriptionClient {
         if let http = response as? HTTPURLResponse,
             let raw = http.value(forHTTPHeaderField: "Content-Type")
         {
+            // `value(forHTTPHeaderField:)` collapses multi-value
+            // headers into one comma-joined string. A misbehaving
+            // reverse proxy emitting `Content-Type: application/json,
+            // text/html` would otherwise round-trip both values
+            // through our split-on-`;` and land in the
+            // `unexpectedContentType` branch — surfacing a
+            // misleading "URL doesn't match an account" UI banner
+            // for what is in fact a panel-side header bug. Take
+            // the first comma-separated token, then strip
+            // parameters (`; charset=utf-8`).
+            let firstValue =
+                raw.split(separator: ",").first.map(String.init) ?? raw
             let media =
-                raw.split(separator: ";").first
+                firstValue.split(separator: ";").first
                 .map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }
-                ?? raw.lowercased()
+                ?? firstValue.lowercased()
             // `application/json` is the canonical answer; some
             // panels behind a reverse proxy emit `application/json;`
-            // bare or `application/manifest+json`. Accept both.
-            let isJSON = media == "application/json" || media.hasSuffix("+json")
+            // bare or `application/manifest+json`. The `+json`
+            // suffix check requires a `/` somewhere before the
+            // suffix so a pathological value like `+json` or
+            // `evil+json` doesn't slip through.
+            let isJSON =
+                media == "application/json"
+                || (media.contains("/") && media.hasSuffix("+json"))
             if !isJSON {
                 throw SubscriptionClientError.unexpectedContentType(media)
             }
