@@ -1,8 +1,9 @@
 # Support policy
 
-Cool Tunnel **v0.1.7** is the first release on the **Long-Term
-Servicing Channel (LTSC)** line. The LTSC posture is a deliberate
-trade-off:
+Cool Tunnel runs on a **Long-Term Servicing Channel (LTSC)**
+release model. The current LTSC line is **v2.0.x** (started
+2026-05; the historical v0.1.7 line is superseded). The LTSC
+posture is a deliberate trade-off:
 
 - **Stable.** Public surface — UI flows, CLI flags on
   `cool-tunnel-core`, JSON-over-stdio engine protocol, file paths
@@ -14,8 +15,13 @@ trade-off:
   `core/Cargo.toml`.
 - **Long-supported.** Security fixes and upstream NaiveProxy
   updates land on the active LTSC line for **at least 18 months
-  from initial release** (i.e. v0.1.7 is supported through at
-  least 2027-11).
+  from initial release** of that line.
+
+> **Note (round-3 review fix):** This file's version-specific
+> dates and example commands below still reference the historical
+> `v0.1.7` line for example purposes. The substance of the policy
+> applies identically to the current v2.0.x LTSC line; full
+> rewrite of dates and example versions is tracked separately.
 
 This document is the contract.
 

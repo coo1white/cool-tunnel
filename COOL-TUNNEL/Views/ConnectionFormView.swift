@@ -79,14 +79,29 @@ public struct ConnectionFormView: View {
                         titleVisibility: .visible,
                         presenting: orchestrator.selectedProfile
                     ) { profile in
-                        Button("Remove “\(displayName(for: profile))”", role: .destructive) {
+                        // `displayName` can come from a subscription
+                        // manifest (panel-controlled). String-literal
+                        // interpolation on `Button(_: LocalizedStringKey)`
+                        // and `Text(_: LocalizedStringKey)` auto-resolves
+                        // markdown/format specifiers — a hostile panel
+                        // returning `host: "**evil**.com"` would render
+                        // bolded in the dialog. Build the title /
+                        // message strings up front and pass via the
+                        // `verbatim:` overloads so the user-controlled
+                        // segment is treated as plain text.
+                        let title = "Remove “\(displayName(for: profile))”"
+                        let message =
+                            "“\(displayName(for: profile))” and its saved password "
+                            + "will be removed permanently. This can't be undone."
+                        Button(title, role: .destructive) {
                             orchestrator.removeSelectedProfile()
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: { profile in
-                        Text(
-                            "“\(displayName(for: profile))” and its saved password will be removed permanently. This can't be undone."
-                        )
+                        let message =
+                            "“\(displayName(for: profile))” and its saved password "
+                            + "will be removed permanently. This can't be undone."
+                        Text(verbatim: message)
                     }
 
                     Spacer()
