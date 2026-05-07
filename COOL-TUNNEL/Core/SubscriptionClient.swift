@@ -14,9 +14,17 @@
 // * Anti-fingerprint cover-site means error paths return HTTP 200
 //   with `text/html`, identical to a vanilla unknown-path probe. We
 //   distinguish "subscription endpoint exists" from "cover-site"
-//   purely by JSON-decoding the body; a `Content-Type` check rules
-//   out the easy cover-site case before we waste a parse on
-//   multi-megabyte HTML.
+//   purely by JSON-decoding the body; a `Content-Type: application/json`
+//   pre-check rules out the easy cover-site case before we waste a
+//   parse on multi-megabyte HTML.
+// * Hard 1 MB body cap. A real manifest is ~1 KB; the cap is purely
+//   defense-in-depth against a hijacked panel or MITM streaming
+//   gigabytes inside the 10-second window. Mirrors the
+//   `GitHubRedirectGuard.download` cap on the updater path.
+// * Redirects forbidden. The trust anchor is "TLS to the panel
+//   domain"; following a redirect to any other host silently moves
+//   the anchor. A `URLSessionTaskDelegate` cancels the redirect
+//   instead of letting URLSession's default-follow behaviour run.
 // * No caching. The panel sets `Cache-Control: no-store`; we mirror
 //   the intent by giving every request a fresh `URLSession`
 //   configuration with `requestCachePolicy = .reloadIgnoringLocalCacheData`.
@@ -46,6 +54,18 @@ public enum SubscriptionClientError: Error, Sendable, Equatable {
     /// the status code so the UI can surface the panel's intent
     /// (4xx = bad token, 5xx = panel is sick).
     case httpStatus(Int)
+    /// The response body exceeded [`SubscriptionClient.maxBytes`].
+    /// A real manifest is ~1 KB; this fires only on a hijacked
+    /// panel or MITM streaming gigabytes. Carries the cap so the
+    /// UI can render a precise diagnostic.
+    case oversizeBody(cap: Int)
+    /// The response `Content-Type` wasn't an `application/json`
+    /// family. Almost always the cover-site path — the panel
+    /// returned the same `text/html` decoy it serves for any
+    /// unknown URL. Distinct from `malformedManifest` so the UI
+    /// can render "the panel didn't recognise this token" without
+    /// wasting a JSON-decode round trip on multi-megabyte HTML.
+    case unexpectedContentType(String)
     /// The body wasn't valid JSON or didn't match the
     /// [`SubscriptionManifestV1`] schema. Almost always means the
     /// panel served the cover site (HTTP 200, `text/html`) because
@@ -70,6 +90,15 @@ public actor SubscriptionClient {
     /// user comparing the two probes against the same panel sees
     /// consistent timing.
     public static let defaultTimeout: TimeInterval = 10
+
+    /// Hard cap on response body size. A real manifest is ~1 KB;
+    /// the cap is defense-in-depth against a hijacked panel or
+    /// MITM streaming a body large enough to OOM the app inside
+    /// the 10 s timeout window. Mirrors the
+    /// `GitHubRedirectGuard.download` discipline on the updater
+    /// path — the only other Swift code that fetches arbitrary
+    /// HTTPS bytes.
+    public static let maxBytes: Int = 1024 * 1024
 
     private let session: URLSession
     private let decoder: JSONDecoder
@@ -115,10 +144,12 @@ public actor SubscriptionClient {
         // No Accept header — the panel doesn't content-negotiate
         // and a custom Accept is one more fingerprint surface.
 
-        let data: Data
+        let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (bytes, response) = try await session.bytes(
+                for: request, delegate: NoRedirectGuard.shared
+            )
         } catch {
             // `URLError` doesn't conform to `Equatable`, so collapse
             // to its `localizedDescription` for our error type's
@@ -138,6 +169,56 @@ public actor SubscriptionClient {
             // or DNS misdirection. Surface the status straight to
             // the UI so the user can debug.
             throw SubscriptionClientError.httpStatus(http.statusCode)
+        }
+
+        // Cover-site short-circuit. The panel returns
+        // `application/json` for the real subscription endpoint
+        // and `text/html` for every error path (bad token,
+        // expired, rate-limited, missing APP_KEY). Sniffing the
+        // header is the cheapest way to skip the multi-megabyte
+        // HTML decode we'd otherwise grind through. Tolerant of
+        // charset suffixes (`application/json; charset=utf-8`).
+        if let http = response as? HTTPURLResponse,
+            let raw = http.value(forHTTPHeaderField: "Content-Type")
+        {
+            let media =
+                raw.split(separator: ";").first
+                .map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }
+                ?? raw.lowercased()
+            // `application/json` is the canonical answer; some
+            // panels behind a reverse proxy emit `application/json;`
+            // bare or `application/manifest+json`. Accept both.
+            let isJSON = media == "application/json" || media.hasSuffix("+json")
+            if !isJSON {
+                throw SubscriptionClientError.unexpectedContentType(media)
+            }
+        }
+        // Absent Content-Type header is unusual but not
+        // disqualifying — a stripped-down origin might omit it.
+        // The decoder will reject non-JSON bytes anyway.
+
+        // Stream into a byte buffer so we can short-circuit a
+        // hostile multi-GB body inside the 10 s timeout window.
+        // `bytes(for:)` returns one byte per element on Darwin
+        // — the inner accumulation cost is negligible for a
+        // <1 MB manifest, and the iterator's natural cancellation
+        // closes the stream on the throw.
+        var data = Data()
+        data.reserveCapacity(8 * 1024)
+        do {
+            for try await byte in bytes {
+                if data.count >= Self.maxBytes {
+                    throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
+                }
+                data.append(byte)
+            }
+        } catch let error as SubscriptionClientError {
+            throw error
+        } catch {
+            Self.logger.error(
+                "subscription body read error: \(error.localizedDescription, privacy: .public)"
+            )
+            throw SubscriptionClientError.transportFailed(error.localizedDescription)
         }
 
         let manifest: SubscriptionManifestV1
@@ -186,4 +267,45 @@ public actor SubscriptionClient {
     }
 
     private static let logger = Logger.cooltunnel("SubscriptionClient")
+}
+
+/// `URLSessionTaskDelegate` that refuses every HTTP redirect.
+///
+/// The subscription trust anchor is "TLS to the panel domain the
+/// user pasted". `URLSession`'s default behaviour follows up to
+/// ~16 redirects to any host, which silently moves the anchor —
+/// a compromised or hijacked panel could 302 the manifest fetch
+/// to an attacker-controlled host while the user-visible URL
+/// stays the same, defeating the documented trust model.
+///
+/// Single-host pinning would be slightly more flexible, but
+/// subscription endpoints are served by the same Laravel app
+/// as the panel itself; legitimate redirect targets do not
+/// exist. Refusing every redirect outright is the simplest
+/// rule that holds the trust boundary.
+///
+/// Class is `final` and stateless; one shared singleton is
+/// enough for every fetch.
+final class NoRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    /// Shared singleton. The `@unchecked` is required by
+    /// `NSObject` ancestor (which is not itself `Sendable`); it
+    /// is safe here because there is no mutable state.
+    static let shared = NoRedirectGuard()
+
+    override private init() {
+        super.init()
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        Logger.cooltunnel("SubscriptionClient").info(
+            "subscription redirect refused: \(request.url?.absoluteString ?? "<nil>", privacy: .public)"
+        )
+        completionHandler(nil)
+    }
 }

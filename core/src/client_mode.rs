@@ -46,6 +46,23 @@ const MIN_MONITOR_INTERVAL_SECS: u64 = 1;
 /// sees broken connectivity with no engine signal to drive the
 /// reconnect UI.
 const MAX_MONITOR_INTERVAL_SECS: u64 = 60;
+
+/// Resolves the wire-level optional `monitor_interval_secs` into
+/// the engine's effective poll cadence. `None` (or absent on the
+/// wire) keeps the historical `DEFAULT_MONITOR_INTERVAL_SECS`;
+/// any concrete value is clamped into
+/// `[MIN_MONITOR_INTERVAL_SECS, MAX_MONITOR_INTERVAL_SECS]` so a
+/// hostile client cannot force a `Duration::from_secs(0)` panic
+/// in `tokio::time::interval` (post-#17 review).
+///
+/// Lives here rather than inline in the dispatch arm so a future
+/// internal caller (test fixture, embedded mode) inherits the
+/// same clamp without copy-pasting the literal range.
+fn clamp_monitor_interval(input: Option<u64>) -> u64 {
+    input
+        .unwrap_or(DEFAULT_MONITOR_INTERVAL_SECS)
+        .clamp(MIN_MONITOR_INTERVAL_SECS, MAX_MONITOR_INTERVAL_SECS)
+}
 // `ANOMALY_DEBOUNCE` and the previous "Per-anomaly-reason
 // suppression window" doc-comment have been removed: the
 // `Debouncer::default()` impl in `util::debounce` is now the
@@ -408,9 +425,7 @@ async fn dispatch(
             port,
             monitor_interval_secs,
         } => {
-            let interval = monitor_interval_secs
-                .unwrap_or(DEFAULT_MONITOR_INTERVAL_SECS)
-                .clamp(MIN_MONITOR_INTERVAL_SECS, MAX_MONITOR_INTERVAL_SECS);
+            let interval = clamp_monitor_interval(monitor_interval_secs);
             start_proxy(state, binary_path, config_path, port, interval, events).await
         }
         RequestKind::StopProxy => {
@@ -770,5 +785,39 @@ async fn drain(state: Arc<Mutex<EngineState>>) {
     }
     if let Some(supervisor) = supervisor {
         let _ = supervisor.stop().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_monitor_interval_none_uses_default() {
+        assert_eq!(clamp_monitor_interval(None), DEFAULT_MONITOR_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn clamp_monitor_interval_passes_through_in_range() {
+        assert_eq!(clamp_monitor_interval(Some(1)), 1);
+        assert_eq!(clamp_monitor_interval(Some(5)), 5);
+        assert_eq!(clamp_monitor_interval(Some(60)), 60);
+    }
+
+    #[test]
+    fn clamp_monitor_interval_clamps_zero_to_min() {
+        // A `0` would panic `tokio::time::interval`; the clamp is
+        // the only thing standing between a hostile client and
+        // that panic.
+        assert_eq!(clamp_monitor_interval(Some(0)), MIN_MONITOR_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn clamp_monitor_interval_clamps_above_ceiling() {
+        assert_eq!(clamp_monitor_interval(Some(120)), MAX_MONITOR_INTERVAL_SECS);
+        assert_eq!(
+            clamp_monitor_interval(Some(u64::MAX)),
+            MAX_MONITOR_INTERVAL_SECS
+        );
     }
 }

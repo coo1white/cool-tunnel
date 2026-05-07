@@ -601,4 +601,163 @@ mod tests {
         let bad = json!({"id": 1, "method": "bogus", "params": {}});
         assert!(serde_json::from_value::<Request>(bad).is_err());
     }
+
+    #[test]
+    fn hello_request_serializes_with_null_params() {
+        // `RequestKind::Hello` is a serde unit variant under
+        // `tag = "method", content = "params"`, so it serializes
+        // with `params: null`. Pin the wire shape so a future
+        // serde upgrade or refactor can't silently drift.
+        let req = Request {
+            id: 99,
+            kind: RequestKind::Hello,
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["id"], 99);
+        assert_eq!(value["method"], "hello");
+        assert_eq!(value["params"], serde_json::Value::Null);
+        let back: Request = serde_json::from_value(value).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn hello_reply_round_trips_with_protocol_version() {
+        let out = Outbound::Response {
+            id: 99,
+            result: ResponsePayload::HelloReply {
+                protocol_version: PROTOCOL_VERSION,
+                engine_version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(value["kind"], "response");
+        assert_eq!(value["result"]["type"], "hello_reply");
+        assert_eq!(value["result"]["protocol_version"], PROTOCOL_VERSION);
+        let back: Outbound = serde_json::from_str(&s).unwrap();
+        assert_eq!(out, back);
+    }
+
+    #[test]
+    fn probe_server_request_round_trips() {
+        let req = Request {
+            id: 17,
+            kind: RequestKind::ProbeServer {
+                profile: sample_profile(),
+                timeout_secs: Some(7),
+            },
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["method"], "probe_server");
+        assert_eq!(value["params"]["timeout_secs"], 7);
+        assert_eq!(value["params"]["profile"]["server"], "naive.example.com");
+        let back: Request = serde_json::from_value(value).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn probe_server_request_omits_timeout_when_none() {
+        let req = Request {
+            id: 18,
+            kind: RequestKind::ProbeServer {
+                profile: sample_profile(),
+                timeout_secs: None,
+            },
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        // `skip_serializing_if = "Option::is_none"` — the field
+        // must NOT appear on the wire when the caller passed
+        // `None`. The Swift side relies on this to mean
+        // "use the engine's default" with no ambiguity between
+        // "absent" and "explicit null".
+        assert!(value["params"].get("timeout_secs").is_none());
+    }
+
+    #[test]
+    fn probe_report_response_has_flat_shape_with_type_tag() {
+        let out = Outbound::Response {
+            id: 19,
+            result: ResponsePayload::Probe(ProbeReport {
+                server: "naive.example.com:443".to_owned(),
+                reachable: true,
+                dns_resolve_ms: 12.5,
+                tcp_connect_ms: 33.0,
+                error: None,
+            }),
+        };
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["kind"], "response");
+        // `Probe(ProbeReport)` is a newtype tuple variant under
+        // `serde(tag = "type")` — fields hoist alongside the tag
+        // rather than nesting under a `probe` key. Swift decodes
+        // off the same outer container; pin the shape.
+        assert_eq!(value["result"]["type"], "probe");
+        assert_eq!(value["result"]["server"], "naive.example.com:443");
+        assert_eq!(value["result"]["reachable"], true);
+        assert_eq!(value["result"]["dns_resolve_ms"], 12.5);
+        assert_eq!(value["result"]["tcp_connect_ms"], 33.0);
+        // `error` is `None` and `skip_serializing_if = Option::is_none`,
+        // so it must not appear on the wire. Mismatched optional
+        // semantics here would round-trip wrong against Swift
+        // (which decodes a missing key as `nil`).
+        assert!(value["result"].get("error").is_none());
+        let back: Outbound = serde_json::from_value(value).unwrap();
+        assert_eq!(out, back);
+    }
+
+    #[test]
+    fn probe_report_response_round_trips_with_error() {
+        let out = Outbound::Response {
+            id: 20,
+            result: ResponsePayload::Probe(ProbeReport {
+                server: "naive.example.com:443".to_owned(),
+                reachable: false,
+                dns_resolve_ms: 0.0,
+                tcp_connect_ms: 0.0,
+                error: Some("DNS resolve failed: nodename nor servname provided".to_owned()),
+            }),
+        };
+        let s = serde_json::to_string(&out).unwrap();
+        let back: Outbound = serde_json::from_str(&s).unwrap();
+        assert_eq!(out, back);
+    }
+
+    #[test]
+    fn start_proxy_omits_monitor_interval_when_none() {
+        let req = Request {
+            id: 21,
+            kind: RequestKind::StartProxy {
+                binary_path: "/usr/local/bin/naive".into(),
+                config_path: "/tmp/config.json".into(),
+                port: Port::new(1080).unwrap(),
+                monitor_interval_secs: None,
+            },
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        // Swift omits the field with `encodeIfPresent` when nil;
+        // the Rust side sets `default + skip_serializing_if` so
+        // a round trip preserves "absent" exactly. A drift here
+        // would silently force the engine to a hard-coded value
+        // and lose the legacy-engine fallback.
+        assert!(
+            value["params"].get("monitor_interval_secs").is_none(),
+            "monitor_interval_secs must be absent on the wire when None: {value}"
+        );
+    }
+
+    #[test]
+    fn start_proxy_round_trips_with_explicit_monitor_interval() {
+        let req = Request {
+            id: 22,
+            kind: RequestKind::StartProxy {
+                binary_path: "/usr/local/bin/naive".into(),
+                config_path: "/tmp/config.json".into(),
+                port: Port::new(1080).unwrap(),
+                monitor_interval_secs: Some(10),
+            },
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert_eq!(req, back);
+    }
 }
