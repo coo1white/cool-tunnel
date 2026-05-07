@@ -31,6 +31,13 @@
 #   8.  Smoke check: bundled cool-tunnel-core --version and bundled
 #                naive sha256 match expectations.
 #
+#   PRE-PACKAGE
+#   ───────────
+#   8b. Run scripts/security_check.sh against the built .app —
+#       secret-pattern scan, code-sign on every embedded Mach-O,
+#       NaiveProxy SHA pin cross-check, Info.plist version
+#       assertion, LICENSE/NOTICE presence, entitlements review.
+#
 #   PACKAGE
 #   ───────
 #   9.  Hand the .app to scripts/package_release.sh which emits
@@ -47,6 +54,7 @@
 #   4  Release build / smoke check failed (build 7, 8)
 #   5  package_release failed (package 9)
 #   6  audit suite failed (pre-flight 4)  ← new in v2.0.18-pre
+#   7  security_check failed (pre-package 8b)  ← new in v2.0.22
 
 set -Eeuo pipefail
 
@@ -167,6 +175,25 @@ if [[ -n "${EXPECTED_NAIVE_SHA}" && "${ACTUAL_NAIVE_SHA}" != "${EXPECTED_NAIVE_S
     die "bundled naive sha256 (${ACTUAL_NAIVE_SHA}) does not match naive.upstream.json (${EXPECTED_NAIVE_SHA})" 4
 fi
 log "Bundled naive verified against upstream pin ✓"
+
+# ---------------------------------------------------------------------------
+# PRE-PACKAGE SECURITY AUDIT
+# ---------------------------------------------------------------------------
+# `security_check.sh` runs the secret-pattern scan, code-signature
+# verification on every embedded Mach-O, NaiveProxy SHA pin
+# cross-check, Info.plist version assertion, LICENSE/NOTICE/
+# Disclaimer presence check, and entitlements review. Documented
+# at the top of `security_check.sh` as "Run this *after* the
+# Release archive completes and *before* packaging the DMG/PKG/
+# ZIP" — but until now, no script enforced that ordering. A
+# release operator who forgot to run it shipped without those
+# checks. Wire it in here so `cut_release.sh` is the single
+# source of truth for "everything that must pass before bytes
+# leave the working tree".
+log "Running scripts/security_check.sh on the freshly-built .app…"
+if ! EXPECTED_VERSION="${VERSION}" bash "${REPO_ROOT}/scripts/security_check.sh" "${APP}"; then
+    die "security_check.sh failed — see output above; aborting before packaging" 7
+fi
 
 # ---------------------------------------------------------------------------
 # PACKAGE 9
