@@ -513,7 +513,14 @@ public final class TunnelOrchestrator {
             localPort: selectedProfile?.localPort ?? "1080"
         )
         selectedProfile = imported
-        appendInfo("subscription: imported \(primary.host):\(primary.port) (\(primary.username))")
+        // Username deliberately omitted — the in-memory log buffer
+        // backs the LogConsole's copy-to-pasteboard / share path,
+        // and the engine treats usernames as account identifiers
+        // worth redacting (`core/src/domain/credentials.rs`
+        // `Username::Display` returns `"***"`). Matching that
+        // discipline on the Mac side avoids leaking the username
+        // into a support log the user pastes into a ticket.
+        appendInfo("subscription: imported \(primary.host):\(primary.port)")
     }
 
     /// Translates a [`SubscriptionClientError`] (transport-shape
@@ -554,11 +561,14 @@ public final class TunnelOrchestrator {
                 return .unsupportedVersion(got: got)
             case .noProfiles:
                 return .noProfiles
-            case .invalidIssuedAt, .malformedExpiry:
-                // Both signal a stub or counterfeit manifest.
+            case .tooManyProfiles, .counterfeitCapabilities,
+                .invalidIssuedAt, .malformedExpiry, .validityTooLong:
+                // All five signal a stub or counterfeit manifest.
                 // The user action is identical: do not connect,
                 // contact the operator. Lumping into one UI case
-                // keeps the banner copy clear.
+                // keeps the banner copy clear; support can pivot
+                // on the os_log entry that includes the structured
+                // reason if a real distinction matters.
                 return .manifestCounterfeit
             case .expired:
                 return .manifestExpired

@@ -104,12 +104,50 @@ public struct ServerCapabilitiesV1: Sendable, Codable, Hashable {
 
 /// One anti-tracking feature flag. Mirrors
 /// `cool_tunnel_server::ct-protocol::subscription::AntiTrackingFeature`.
-public enum AntiTrackingFeature: String, Sendable, Codable, Hashable {
-    case hideIp = "hide_ip"
-    case hideVia = "hide_via"
-    case probeResistance = "probe_resistance"
-    case dohResolver = "doh_resolver"
+///
+/// Custom `Decodable` (instead of the auto-derived `String` raw-value
+/// init) so a manifest carrying a future flag this v1 client doesn't
+/// know about decodes into [`AntiTrackingFeature.unknown`] rather
+/// than failing the entire `[AntiTrackingFeature]` array decode.
+/// Without that, a server-side rollout adding `case x = "future_flag"`
+/// would brick every v1 client with a misleading
+/// `malformedManifest → tokenInvalid` UI banner.
+public enum AntiTrackingFeature: Sendable, Codable, Hashable {
+    case hideIp
+    case hideVia
+    case probeResistance
+    case dohResolver
     case http3
+    /// Forward-compat sink for any flag the server adds in a
+    /// future revision. Carrying the raw string lets the UI
+    /// surface "unknown protection: <name>" rather than silently
+    /// drop it.
+    case unknown(String)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        switch raw {
+        case "hide_ip": self = .hideIp
+        case "hide_via": self = .hideVia
+        case "probe_resistance": self = .probeResistance
+        case "doh_resolver": self = .dohResolver
+        case "http3": self = .http3
+        default: self = .unknown(raw)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .hideIp: try container.encode("hide_ip")
+        case .hideVia: try container.encode("hide_via")
+        case .probeResistance: try container.encode("probe_resistance")
+        case .dohResolver: try container.encode("doh_resolver")
+        case .http3: try container.encode("http3")
+        case .unknown(let raw): try container.encode(raw)
+        }
+    }
 }
 
 // MARK: - Validation
@@ -131,7 +169,27 @@ extension SubscriptionManifestV1 {
     /// (a counterfeit panel could pair `issued_at = far_future`
     /// with `expires_at = farther_future` to produce an
     /// indefinitely-valid manifest).
-    public static let maxForwardSkew: TimeInterval = 60
+    ///
+    /// Typed `UInt64` (not `TimeInterval`) so the arithmetic at
+    /// `validate(now:)` runs without a `Double → UInt64`
+    /// conversion that would trap on a future negative or NaN
+    /// value — defensive code shouldn't itself be a crash
+    /// vector.
+    public static let maxForwardSkew: UInt64 = 60
+
+    /// Maximum manifest validity window (`expires_at - issued_at`).
+    /// One year — well beyond any legitimate LTSC subscription
+    /// renewal cadence. Without this gate, a counterfeit panel
+    /// could pair `issued_at = now()` with `expires_at = u64::MAX`
+    /// and the manifest would pass every other check, valid until
+    /// year 5.84×10¹¹ AD.
+    public static let maxValidity: UInt64 = 365 * 24 * 60 * 60
+
+    /// Maximum number of profile entries inside a single manifest.
+    /// Real subscriptions emit one or a small handful; the cap is
+    /// defense-in-depth against a hostile panel packing thousands
+    /// of profiles into the 1 MB body cap to chew memory.
+    public static let maxProfiles: Int = 16
 
     /// Returns the first profile, or `nil` when the manifest
     /// shipped with an empty profile list (which the panel won't
@@ -151,6 +209,19 @@ extension SubscriptionManifestV1 {
         if profiles.isEmpty {
             throw SubscriptionValidationError.noProfiles
         }
+        if profiles.count > Self.maxProfiles {
+            throw SubscriptionValidationError.tooManyProfiles(
+                got: profiles.count, max: Self.maxProfiles
+            )
+        }
+        // `capabilities.http3 == true` is documented in the schema
+        // as "always false from a real cool-tunnel-server
+        // deployment" — naive is HTTP/2-only, advertising HTTP/3
+        // would produce a recognisable QUIC fallback pattern. A
+        // `true` value here is a strong counterfeit signal.
+        if capabilities.http3 {
+            throw SubscriptionValidationError.counterfeitCapabilities
+        }
         // `issued_at` must be a real Unix timestamp. A real panel
         // stamps `now()` at emission; the only source of `0` is a
         // schema fixture or a counterfeit/stub server. Refuse
@@ -167,7 +238,16 @@ extension SubscriptionManifestV1 {
         // — every staleness check would trip the `now > issuedAt`
         // gate and silently skip the age comparison. The 60 s
         // window matches the panel's documented NTP discipline.
-        let skewCeiling = nowSecs &+ UInt64(Self.maxForwardSkew)
+        //
+        // Saturating add (not `&+`): wrapping defensive arithmetic
+        // is the wrong shape — on the `nowSecs > UInt64.max - 60`
+        // edge, a wrap would produce `skewCeiling ≈ 0` and
+        // *every* legitimate `issuedAt` would be flagged. The
+        // saturating form pins to `UInt64.max` instead, which
+        // correctly accepts any plausible `issuedAt` near the
+        // edge. (Year 5.84×10¹¹ AD problem: not ours.)
+        let (sum, overflow) = nowSecs.addingReportingOverflow(Self.maxForwardSkew)
+        let skewCeiling = overflow ? UInt64.max : sum
         if issuedAt > skewCeiling {
             throw SubscriptionValidationError.invalidIssuedAt
         }
@@ -176,6 +256,18 @@ extension SubscriptionManifestV1 {
         // so this can only be a stub or transcription error.
         if expiresAt < issuedAt {
             throw SubscriptionValidationError.malformedExpiry
+        }
+        // Bound the validity window so an attacker can't pair a
+        // legitimate-looking `issued_at` with `expires_at =
+        // u64::MAX` and produce an indefinitely-valid manifest.
+        // Same saturating-add discipline as the skew ceiling
+        // above.
+        let (validityCap, validityOverflow) = issuedAt.addingReportingOverflow(Self.maxValidity)
+        let maxExpires = validityOverflow ? UInt64.max : validityCap
+        if expiresAt > maxExpires {
+            throw SubscriptionValidationError.validityTooLong(
+                gotSeconds: expiresAt &- issuedAt, maxSeconds: Self.maxValidity
+            )
         }
         if expiresAt <= nowSecs {
             throw SubscriptionValidationError.expired(at: expiresAt)
@@ -204,6 +296,17 @@ public enum SubscriptionValidationError: Error, Sendable, Equatable {
     /// emits at least one entry; an empty list is a sign of a stub
     /// or counterfeit server.
     case noProfiles
+    /// Manifest carried more than [`SubscriptionManifestV1.maxProfiles`]
+    /// entries. A hostile panel packing thousands of profiles into
+    /// the 1 MB body cap is the only way to reach this — a real
+    /// subscription emits a small handful at most.
+    case tooManyProfiles(got: Int, max: Int)
+    /// `capabilities.http3 == true`. The schema documents this
+    /// flag as "always false from a real cool-tunnel-server
+    /// deployment" — `naive` is HTTP/2-only, so a `true` value
+    /// is a strong counterfeit signal that should refuse import
+    /// outright rather than warn.
+    case counterfeitCapabilities
     /// `issued_at` is `0` or future-dated beyond clock-skew
     /// tolerance. Either is a counterfeit / stub signal — a real
     /// panel stamps the manifest with `now()` at emission, never
@@ -213,6 +316,11 @@ public enum SubscriptionValidationError: Error, Sendable, Equatable {
     /// emit `expires_at = issued_at + ttl`; this can only happen
     /// from a stub server or transcription error.
     case malformedExpiry
+    /// `expires_at - issued_at > 1 year`. A counterfeit panel
+    /// pairing a legitimate-looking `issued_at` with `expires_at =
+    /// u64::MAX` would otherwise pass every other check. Real
+    /// subscriptions renew well inside a year.
+    case validityTooLong(gotSeconds: UInt64, maxSeconds: UInt64)
     /// `expires_at` is in the past — server tells the client to
     /// re-fetch. The user pasted an old cached URL.
     case expired(at: UInt64)
