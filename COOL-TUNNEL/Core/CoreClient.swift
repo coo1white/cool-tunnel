@@ -147,24 +147,46 @@ public actor CoreClient {
         // protocol, not stderr), but it prevents the deadlock and
         // forwards content to tracing for support diagnosis.
         //
-        // **v2.0.22 (post-#17 review):** the Task is now stored
-        // in actor state so `terminate()` can cancel it; the loop
-        // bails on cancellation rather than only on EOF. The
-        // previous `Task.detached` was unreachable from terminate
-        // and could outlive its parent across a rapid-restart
-        // sequence, parking a worker thread on `availableData`
-        // until the kernel delivered EOF.
-        let drainHandle = stderr.fileHandleForReading
-        stderrTask = Task.detached(priority: .utility) {
+        // **v2.0.22 (post-#17 round-1 review):** Task stored in
+        // actor state so `terminate()` can wind it down. The
+        // previous `Task.detached` was unreachable and could
+        // outlive its parent across a rapid-restart sequence.
+        //
+        // **v2.0.22 (post-#17 round-2 review):** switched the read
+        // primitive from `availableData` to `read(upToCount:)`.
+        // `Pipe.fileHandleForReading` is a stored property — both
+        // `self.stderrHandle` and the previously-locally-bound
+        // `drainHandle` referenced the *same* `FileHandle`, so the
+        // close-handle-then-cancel plan in `terminate()` would
+        // close the FD out from under a parked `availableData`
+        // call and the loop body's next iteration would invoke
+        // `availableData` on a closed FD, raising an Objective-C
+        // `NSFileHandleOperationException` that Swift `try` cannot
+        // catch and that would unwind the worker thread. Throwing
+        // `read(upToCount:)` returns `nil` on EOF, throws a Swift
+        // error on a closed handle, and lets us bail cleanly via
+        // the `do/catch` below. (`read(upToCount:)` is macOS
+        // 10.15.4+; project minimum is 14.0.)
+        stderrTask = Task.detached(priority: .utility) { [stderrHandle = self.stderrHandle] in
             while !Task.isCancelled {
-                let chunk = drainHandle.availableData
-                if chunk.isEmpty { break }  // EOF on child exit
-                if let line = String(data: chunk, encoding: .utf8),
-                    !line.isEmpty
-                {
-                    Self.engineStderrLogger.warning(
-                        "engine stderr: \(line, privacy: .public)"
-                    )
+                do {
+                    guard let chunk = try stderrHandle?.read(upToCount: 4096),
+                        !chunk.isEmpty
+                    else {
+                        break  // EOF or handle gone
+                    }
+                    if let line = String(data: chunk, encoding: .utf8),
+                        !line.isEmpty
+                    {
+                        Self.engineStderrLogger.warning(
+                            "engine stderr: \(line, privacy: .private)"
+                        )
+                    }
+                } catch {
+                    // Closed handle (terminate raced us) or other
+                    // I/O error. Either way the engine is going
+                    // away; drop out of the loop quietly.
+                    break
                 }
             }
         }
