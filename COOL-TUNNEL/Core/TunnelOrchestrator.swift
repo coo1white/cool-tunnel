@@ -539,18 +539,27 @@ public final class TunnelOrchestrator {
             case 500...599: return .serverError(status: code)
             default: return .unexpectedStatus(code)
             }
-        case .malformedManifest:
-            // 200 + non-manifest body is the cover-site path the
-            // panel uses for any rejected token — UI surfaces this
-            // as `tokenInvalid` so the user understands the URL
-            // didn't match an account.
+        case .malformedManifest, .unexpectedContentType:
+            // 200 + non-manifest body (or non-JSON Content-Type)
+            // is the cover-site path the panel uses for any
+            // rejected token — UI surfaces this as `tokenInvalid`
+            // so the user understands the URL didn't match an
+            // account.
             return .tokenInvalid
+        case .oversizeBody(let cap):
+            return .manifestTooLarge(cap: cap)
         case .manifestRejected(let validation):
             switch validation {
             case .unsupportedVersion(let got, _):
                 return .unsupportedVersion(got: got)
             case .noProfiles:
                 return .noProfiles
+            case .invalidIssuedAt, .malformedExpiry:
+                // Both signal a stub or counterfeit manifest.
+                // The user action is identical: do not connect,
+                // contact the operator. Lumping into one UI case
+                // keeps the banner copy clear.
+                return .manifestCounterfeit
             case .expired:
                 return .manifestExpired
             case .stale(let ageSeconds):
@@ -1601,6 +1610,17 @@ public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
     /// always a caching proxy on the user's network; trying again
     /// over a different network usually resolves it.
     case manifestStale(daysOld: Int)
+    /// Manifest passed JSON decode but failed structural sanity
+    /// (`issued_at == 0`, `issued_at` far in the future, or
+    /// `expires_at < issued_at`). A real panel never emits any
+    /// of these — the manifest is from a stub server, a
+    /// transcription error, or a counterfeit panel trying to
+    /// produce an indefinitely-valid manifest.
+    case manifestCounterfeit
+    /// Response body exceeded the [`SubscriptionClient.maxBytes`]
+    /// cap (1 MB). A real manifest is ~1 KB; this fires only on
+    /// a hijacked panel or MITM streaming oversized content.
+    case manifestTooLarge(cap: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -1626,6 +1646,10 @@ public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
             "This subscription URL has expired. Ask the administrator for a new one."
         case .manifestStale(let daysOld):
             "The subscription manifest is \(daysOld) days old. A network-level cache on your connection may be serving a stale copy — try a different network or DNS resolver."
+        case .manifestCounterfeit:
+            "The subscription manifest looks fake or tampered with. Do not connect — verify the panel URL with the administrator."
+        case .manifestTooLarge(let cap):
+            "The subscription response is suspiciously large (>\(cap / 1024) KB). Verify the panel URL with the administrator before retrying."
         }
     }
 }

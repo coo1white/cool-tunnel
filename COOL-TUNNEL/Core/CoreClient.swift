@@ -64,7 +64,16 @@ public actor CoreClient {
 
     private var process: Process?
     private var stdinHandle: FileHandle?
+    private var stderrHandle: FileHandle?
     private var readerTask: Task<Void, Never>?
+    private var stderrTask: Task<Void, Never>?
+    /// Set true at the entry of `start()` and reset on failure or
+    /// successful handshake. Without this, two concurrent callers
+    /// could both pass the `process == nil` guard before the
+    /// first one's `await CodeSignVerifier.verifyValid(...)`
+    /// returns, and both would reach `process.run()`. Actor
+    /// reentrancy across `await` defeats the simple null-check.
+    private var starting: Bool = false
     private var nextID: UInt64 = 1
     private var pending: [UInt64: CheckedContinuation<CoreResponse, any Error>] = [:]
     private var eventContinuations: [UUID: AsyncStream<CoreEvent>.Continuation] = [:]
@@ -89,6 +98,16 @@ public actor CoreClient {
     ///    rather than launching attacker-supplied code with our entitlements.
     public func start() async throws {
         guard process == nil else { throw CoreClientError.alreadyRunning }
+        // Mark the actor as mid-start *before* the first `await`
+        // so a concurrent caller landing on the actor while
+        // `verifyValid` is in flight sees `starting == true` and
+        // bails with `alreadyRunning`. Without this, both callers
+        // would pass `process == nil`, both would await
+        // verification, and both would reach `process.run()`.
+        guard !starting else { throw CoreClientError.alreadyRunning }
+        starting = true
+        defer { starting = false }
+
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw CoreClientError.executableUnavailable(executableURL)
         }
@@ -112,6 +131,7 @@ public actor CoreClient {
 
         self.process = process
         self.stdinHandle = stdin.fileHandleForWriting
+        self.stderrHandle = stderr.fileHandleForReading
 
         let reader = stdout.fileHandleForReading
         readerTask = Task { [weak self] in
@@ -119,20 +139,25 @@ public actor CoreClient {
         }
 
         // **Subproc-F#11a (v0.1.7.19):** drain stderr on its own
-        // detached task. Without this, a chatty engine writing
-        // >64 KiB to stderr fills the kernel pipe buffer, blocks
-        // on its next stderr write, and the engine deadlocks
-        // mid-request. The drain doesn't structure the bytes
-        // (engine errors that need user surface go through the
-        // JSON-over-stdout protocol, not stderr), but it
-        // prevents the deadlock and forwards content to
-        // tracing for support diagnosis. Mirrors the
-        // concurrent-pipe-drain pattern `Subprocess.run` uses
-        // for short-lived children.
-        let stderrHandle = stderr.fileHandleForReading
-        Task.detached(priority: .utility) {
-            while true {
-                let chunk = stderrHandle.availableData
+        // task. Without this, a chatty engine writing >64 KiB to
+        // stderr fills the kernel pipe buffer, blocks on its next
+        // stderr write, and the engine deadlocks mid-request. The
+        // drain doesn't structure the bytes (engine errors that
+        // need user surface go through the JSON-over-stdout
+        // protocol, not stderr), but it prevents the deadlock and
+        // forwards content to tracing for support diagnosis.
+        //
+        // **v2.0.22 (post-#17 review):** the Task is now stored
+        // in actor state so `terminate()` can cancel it; the loop
+        // bails on cancellation rather than only on EOF. The
+        // previous `Task.detached` was unreachable from terminate
+        // and could outlive its parent across a rapid-restart
+        // sequence, parking a worker thread on `availableData`
+        // until the kernel delivered EOF.
+        let drainHandle = stderr.fileHandleForReading
+        stderrTask = Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                let chunk = drainHandle.availableData
                 if chunk.isEmpty { break }  // EOF on child exit
                 if let line = String(data: chunk, encoding: .utf8),
                     !line.isEmpty
@@ -411,9 +436,18 @@ public actor CoreClient {
         }
         try? stdinHandle?.close()
         stdinHandle = nil
+        // Closing the stderr handle delivers EOF to the drain
+        // loop's `availableData` call, so the Task will exit
+        // naturally even if cancellation hasn't been observed
+        // yet. Closing first, then cancelling, mirrors how
+        // `readerTask` is wound down via stdout EOF + cancel.
+        try? stderrHandle?.close()
+        stderrHandle = nil
         process = nil
         readerTask?.cancel()
         readerTask = nil
+        stderrTask?.cancel()
+        stderrTask = nil
         await onEngineExit()
     }
 }

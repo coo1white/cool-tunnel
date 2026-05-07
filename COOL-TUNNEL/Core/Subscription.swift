@@ -124,6 +124,15 @@ extension SubscriptionManifestV1 {
     /// capability flags.
     public static let maxAge: TimeInterval = 7 * 24 * 60 * 60
 
+    /// Acceptable forward clock-skew on `issued_at` (60 seconds).
+    /// A manifest stamped at most this far ahead of the client
+    /// clock is accepted as freshly-issued; anything beyond is
+    /// refused because future-dating bypasses the staleness gate
+    /// (a counterfeit panel could pair `issued_at = far_future`
+    /// with `expires_at = farther_future` to produce an
+    /// indefinitely-valid manifest).
+    public static let maxForwardSkew: TimeInterval = 60
+
     /// Returns the first profile, or `nil` when the manifest
     /// shipped with an empty profile list (which the panel won't
     /// produce, but a hijacked or stub server might).
@@ -142,14 +151,40 @@ extension SubscriptionManifestV1 {
         if profiles.isEmpty {
             throw SubscriptionValidationError.noProfiles
         }
+        // `issued_at` must be a real Unix timestamp. A real panel
+        // stamps `now()` at emission; the only source of `0` is a
+        // schema fixture or a counterfeit/stub server. Refuse
+        // outright so a stub manifest can't bypass the freshness
+        // check by sentinel.
+        if issuedAt == 0 {
+            throw SubscriptionValidationError.invalidIssuedAt
+        }
         let nowSecs = UInt64(max(0, now.timeIntervalSince1970))
+        // Future-dated `issued_at` beyond clock-skew tolerance is
+        // refused. Without this guard, a counterfeit panel could
+        // pair `issued_at = now + 365 days` with a far-future
+        // `expires_at` and produce an indefinitely-valid manifest
+        // — every staleness check would trip the `now > issuedAt`
+        // gate and silently skip the age comparison. The 60 s
+        // window matches the panel's documented NTP discipline.
+        let skewCeiling = nowSecs &+ UInt64(Self.maxForwardSkew)
+        if issuedAt > skewCeiling {
+            throw SubscriptionValidationError.invalidIssuedAt
+        }
+        // Malformed manifest where expiry precedes issuance. A
+        // real panel always emits `expires_at = issued_at + ttl`,
+        // so this can only be a stub or transcription error.
+        if expiresAt < issuedAt {
+            throw SubscriptionValidationError.malformedExpiry
+        }
         if expiresAt <= nowSecs {
             throw SubscriptionValidationError.expired(at: expiresAt)
         }
-        // `issuedAt` should never be in the future; clamp the
-        // comparison to non-negative so a small clock skew on the
-        // client doesn't flip the freshness check upside-down.
-        if issuedAt > 0 && nowSecs > issuedAt {
+        // Freshness gate. Only meaningful when the client clock
+        // is at or after `issuedAt`; the future-skew guard above
+        // already rejected larger drifts, so this branch fires
+        // only on legitimate forward time.
+        if nowSecs > issuedAt {
             let age = TimeInterval(nowSecs - issuedAt)
             if age > Self.maxAge {
                 throw SubscriptionValidationError.stale(ageSeconds: age)
@@ -169,6 +204,15 @@ public enum SubscriptionValidationError: Error, Sendable, Equatable {
     /// emits at least one entry; an empty list is a sign of a stub
     /// or counterfeit server.
     case noProfiles
+    /// `issued_at` is `0` or future-dated beyond clock-skew
+    /// tolerance. Either is a counterfeit / stub signal — a real
+    /// panel stamps the manifest with `now()` at emission, never
+    /// with `0` and never far in the future.
+    case invalidIssuedAt
+    /// `expires_at < issued_at` — malformed manifest. Real panels
+    /// emit `expires_at = issued_at + ttl`; this can only happen
+    /// from a stub server or transcription error.
+    case malformedExpiry
     /// `expires_at` is in the past — server tells the client to
     /// re-fetch. The user pasted an old cached URL.
     case expired(at: UInt64)
