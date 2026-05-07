@@ -138,12 +138,26 @@ log "Refreshing Cargo.lock for cool-tunnel-core ${VERSION}…"
 # ---------------------------------------------------------------------------
 # BUILD 7: Xcode Release (run-script phase rebuilds Rust core)
 # ---------------------------------------------------------------------------
-log "Building Cool Tunnel ${VERSION} (Release)…"
+log "Building Cool Tunnel ${VERSION} (Release, universal arm64+x86_64)…"
+# **v2.0.22 (round-4 fallout):** explicit `ARCHS` +
+# `ONLY_ACTIVE_ARCH=NO` so the .app's main Mach-O is universal,
+# matching the bundled engine (`cool-tunnel-core`) and `naive`
+# binaries which are already universal via `lipo`. Without these
+# flags Xcode defaults to `ARCHS=$(ARCHS_STANDARD)` = host-arch
+# only on Apple Silicon (arm64), which `security_check.sh` step
+# 3 ("naive and cool-tunnel-core are both *universal*") was
+# silently extending to the Swift binary on first-run after the
+# round-4 wiring. Every release before v2.0.22 shipped an
+# arm64-only .app; Intel users would have hit "Bad CPU type
+# in executable" at launch. The shipped engine + naive were
+# already universal, so this is the last piece.
 if ! xcodebuild \
         -project "${REPO_ROOT}/COOL-TUNNEL.xcodeproj" \
         -scheme COOL-TUNNEL \
         -configuration Release \
         -destination 'platform=macOS' \
+        ARCHS="arm64 x86_64" \
+        ONLY_ACTIVE_ARCH=NO \
         build > "${REPO_ROOT}/dist/build-${VERSION}.log" 2>&1; then
     tail -50 "${REPO_ROOT}/dist/build-${VERSION}.log" >&2
     die "xcodebuild failed — see ${REPO_ROOT}/dist/build-${VERSION}.log" 4
