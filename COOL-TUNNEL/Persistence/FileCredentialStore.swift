@@ -30,7 +30,14 @@ import Foundation
 /// Errors raised by [`FileCredentialStore`]. Distinct from
 /// `KeychainError` so the wire-level surface tells you which backend
 /// failed.
-public enum FileCredentialError: Error, Sendable, Equatable {
+///
+/// Conforms to `LocalizedError` so the user-facing catch site
+/// surfaces the strings below rather than Swift's default
+/// `"…CoolTunnel.FileCredentialError error N."` placeholder. The
+/// "credentials file" wording is kept (rather than "password
+/// file") since this is also reachable from credential-import
+/// flows that don't involve a password yet.
+public enum FileCredentialError: LocalizedError, Sendable, Equatable {
     /// Reading or writing the JSON file failed at the OS level.
     case io(String)
     /// The JSON file exists but does not parse as `{ String: String }`.
@@ -38,11 +45,11 @@ public enum FileCredentialError: Error, Sendable, Equatable {
     /// A stored value did not decode as UTF-8 after base64 unwrap.
     case malformedItem
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
-        case .io(let message): "credentials file I/O failed: \(message)"
-        case .malformed: "credentials file is malformed JSON"
-        case .malformedItem: "credentials entry is not valid UTF-8"
+        case .io(let message): "Cool Tunnel could not save your credentials (\(message))."
+        case .malformed: "The credentials file is corrupted."
+        case .malformedItem: "A stored credential is corrupted."
         }
     }
 }
