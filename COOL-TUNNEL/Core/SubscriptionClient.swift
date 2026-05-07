@@ -17,11 +17,19 @@
 //   purely by JSON-decoding the body; a `Content-Type: application/json`
 //   pre-check rules out the easy cover-site case before we waste a
 //   parse on multi-megabyte HTML.
-// * Hard 1 MB body cap, enforced after `data(for:)` returns. A real
-//   manifest is ~1 KB; the cap is defense-in-depth against a
-//   hijacked panel or MITM streaming a large body inside the 10 s
-//   timeout window (which itself bounds the worst-case bytes that
-//   can land in memory). Mirrors the `GitHubRedirectGuard.download`
+// * Hard 1 MB body cap, enforced **during** the read via streaming
+//   `bytes(for:)` accumulation (NOT via post-hoc `data(for:)` size
+//   check). Round-4 review caught the regression: `data(for:)`
+//   buffers the full body before the cap can fire, so on a fast
+//   network the timeout (10 s) bounds elapsed wall-clock but a
+//   hostile gigabit stream lands ≈1.25 GB in memory before the
+//   `data.count > maxBytes` check runs. Streaming with a
+//   per-byte cap-check yields a true 1 MB peak. Per-byte iteration
+//   on Darwin's `AsyncBytes` is microsecond-grade — slower than
+//   one-shot but still well inside the 10 s budget for the
+//   ≤1 MB body the cap permits, and the cap discipline is what
+//   matters for the threat model (memory exhaustion under MITM
+//   / hijacked panel). Mirrors the `GitHubRedirectGuard.download`
 //   cap on the updater path.
 // * Redirects forbidden. The trust anchor is "TLS to the panel
 //   domain"; following a redirect to any other host silently moves
@@ -86,8 +94,8 @@ public enum SubscriptionClientError: LocalizedError, Sendable, Equatable {
         switch self {
         case .malformedURL:
             "The subscription URL could not be parsed."
-        case .nonHTTPSURL:
-            "The subscription URL must start with https://."
+        case .nonHTTPSURL(let scheme):
+            "The subscription URL must start with https:// (got '\(scheme)')."
         case .transportFailed(let msg):
             "Could not reach the subscription server: \(msg)."
         case .httpStatus(let code):
@@ -172,24 +180,20 @@ public actor SubscriptionClient {
         // No Accept header — the panel doesn't content-negotiate
         // and a custom Accept is one more fingerprint surface.
 
-        let data: Data
+        let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
-            // `data(for:delegate:)` reads the whole body into memory
-            // in one async hop. Two reasons we use it instead of the
-            // earlier streaming `bytes(for:)` path:
-            //
-            // 1. `URLSession.AsyncBytes` yields one byte per
-            //    iteration on Darwin, so the streaming variant
-            //    spent ~1024 await-suspensions on a 1 KB manifest
-            //    plus one `Data.append` per byte. Real cliff.
-            // 2. The 1 MB body cap is enforced *after* the read
-            //    finishes — `URLSessionConfiguration.timeoutInterval
-            //    ForResource = 10 s` already bounds the worst case
-            //    a hostile panel can stream into memory inside the
-            //    fetch window. A 1 MB body at 10 s = 100 KB/s, well
-            //    inside the 1 MB cap.
-            (data, response) = try await session.data(
+            // Streaming read (NOT `data(for:)`) so the 1 MB cap is
+            // enforced **during** the body fetch, not after.
+            // Round-4 review caught the regression in PR #22's
+            // switch to `data(for:)`: a hostile gigabit stream can
+            // land ~1.25 GB in memory inside the 10 s timeout
+            // window before the post-hoc size check fires.
+            // `bytes(for:delegate:)` lets us cap-check per byte
+            // and bail at exactly `maxBytes`. Per-byte iteration
+            // is microsecond-grade on Darwin — measurable but
+            // well within the budget for a ≤1 MB body.
+            (bytes, response) = try await session.bytes(
                 for: request, delegate: NoRedirectGuard.shared
             )
         } catch {
@@ -202,15 +206,6 @@ public actor SubscriptionClient {
                 "subscription fetch transport error: \(error.localizedDescription, privacy: .public)"
             )
             throw SubscriptionClientError.transportFailed(error.localizedDescription)
-        }
-
-        // Post-hoc body-size guard. The transport timeout above is
-        // the primary defence against hostile streaming; this is
-        // the explicit upper bound — a real manifest is ~1 KB so
-        // anything close to a megabyte is suspicious regardless of
-        // how fast it arrived.
-        if data.count > Self.maxBytes {
-            throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
         }
 
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -264,6 +259,32 @@ public actor SubscriptionClient {
         // Absent Content-Type header is unusual but not
         // disqualifying — a stripped-down origin might omit it.
         // The decoder will reject non-JSON bytes anyway.
+
+        // Stream the body into a `Data` buffer with a strict per-byte
+        // cap. The cap fires inside the for-await loop *before* the
+        // append, so peak memory tops out at exactly `maxBytes`
+        // regardless of how fast the upstream is pushing bytes —
+        // critical for hostile-MITM threat model where the panel
+        // could serve gigabit. `URLError(.cancelled)` from the
+        // delegate (no-redirect refusal) lands in this catch path
+        // as a `transportFailed`.
+        var data = Data()
+        data.reserveCapacity(8 * 1024)
+        do {
+            for try await byte in bytes {
+                if data.count >= Self.maxBytes {
+                    throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
+                }
+                data.append(byte)
+            }
+        } catch let error as SubscriptionClientError {
+            throw error
+        } catch {
+            Self.logger.error(
+                "subscription body read error: \(error.localizedDescription, privacy: .public)"
+            )
+            throw SubscriptionClientError.transportFailed(error.localizedDescription)
+        }
 
         let manifest: SubscriptionManifestV1
         do {
