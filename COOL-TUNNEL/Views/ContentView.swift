@@ -164,6 +164,7 @@ public struct ContentView: View {
                 // view and contributes zero height.
                 HeaderView(
                     lastError: orchestrator.lastError,
+                    lastErrorLayer: orchestrator.lastErrorLayer,
                     onDismissError: { orchestrator.dismissLastError() }
                 )
                 .padding(.horizontal, 20)

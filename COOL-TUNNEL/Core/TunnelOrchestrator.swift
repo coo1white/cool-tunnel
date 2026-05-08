@@ -10,6 +10,7 @@
 
 import Darwin
 import Foundation
+import Network
 import Observation
 import os
 
@@ -61,6 +62,16 @@ public final class TunnelOrchestrator {
     public private(set) var lastDiagnosticReport: DiagnosticReport?
     public private(set) var lastLatencyReport: LatencyReport?
     public private(set) var lastError: String?
+
+    /// **v2.0.29 (Deterministic Error Reporting):** layer attribution
+    /// for the most recent connection failure. Set whenever `recordError`
+    /// is called from a connection-failure path; cleared on successful
+    /// `start()` / `switchMode()`. Renders as a chip on the
+    /// `HeaderView` error banner — `[Local]` / `[Upstream]` / `[VPS]`.
+    /// `nil` means "no layer attributed" (operational error, or
+    /// classification was inconclusive); the banner falls back to the
+    /// pre-2.0.29 plain-text rendering.
+    public private(set) var lastErrorLayer: ErrorLayer?
 
     // MARK: - Dependencies (injected; defaultable)
 
@@ -245,7 +256,12 @@ public final class TunnelOrchestrator {
             // short-circuiting on the previous failure.
             didBootstrap = true
         } catch {
-            recordError("engine failed to start: \(error)")
+            // **v2.0.29:** engine spawn failure is local-by-construction
+            // — the Rust core couldn't be exec'd, the JSON-over-stdio
+            // pipe never opened, or the orchestrator's own bootstrap
+            // path threw. Hardcoded `.local`; running the classifier
+            // would only confirm what we already know.
+            recordError("engine failed to start: \(error)", layer: .local)
         }
     }
 
@@ -276,10 +292,14 @@ public final class TunnelOrchestrator {
             do {
                 self.activeNaiveDescriptor = try await self.naiveResolver.resolve(settings: self.settings)
             } catch let error as NaiveResolverError {
-                self.recordError("naive binary unusable: \(error.localizedDescription)")
+                // **v2.0.29:** naive binary failure is local-by-construction.
+                self.recordError("naive binary unusable: \(error.localizedDescription)", layer: .local)
                 self.activeNaiveDescriptor = nil
             } catch {
-                self.recordError("naive binary inspection failed: \(error.localizedDescription)")
+                // **v2.0.29:** naive binary inspection failure is local-by-construction.
+                self.recordError(
+                    "naive binary inspection failed: \(error.localizedDescription)",
+                    layer: .local)
                 self.activeNaiveDescriptor = nil
             }
         }
@@ -802,6 +822,7 @@ public final class TunnelOrchestrator {
         // also clears `lastError` at its own top — so either path
         // ends with a coherent banner state.
         lastError = nil
+        lastErrorLayer = nil
 
         guard let profile = selectedProfile else {
             throw OrchestratorError.noProfile
@@ -980,6 +1001,7 @@ public final class TunnelOrchestrator {
         // with a clean banner, while a failing start will repopulate
         // `lastError` from the catch arm below.
         lastError = nil
+        lastErrorLayer = nil
 
         do {
             guard var profile = selectedProfile else {
@@ -1099,7 +1121,13 @@ public final class TunnelOrchestrator {
             let detail =
                 (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
-            recordError("Couldn't start \(mode.title): \(detail)")
+            // **v2.0.29 (Deterministic Error Reporting):** classify
+            // the connection failure into Local / Upstream / VPS so
+            // the banner chip pinpoints the broken node. Pre-2.0.29
+            // the operator saw a generic "Couldn't start <mode>" with
+            // no signal whether to check their wifi, their server, or
+            // their app — they had to run `Diag` manually to find out.
+            await recordClassifiedError("Couldn't start \(mode.title): \(detail)")
             throw error
         }
     }
@@ -1351,8 +1379,20 @@ public final class TunnelOrchestrator {
             } catch {
                 sleepWakeState = .idle
                 modeBeforeSleep = nil
-                recordError(
-                    "auto-recovery after sleep failed — click a mode to restart manually: \(error.localizedDescription)"
+                // **v2.0.29 (Deterministic Error Reporting):** the
+                // wake-recovery failure is exactly the path where
+                // layer attribution helps most — a wake into a
+                // dead Wi-Fi association reads as `.upstream`, a
+                // wake while travelling to a network that blocks
+                // the operator's VPS reads as `.vps`, and a wake
+                // where naive crashed during sleep reads as
+                // `.local`. The chip on the banner gives the
+                // operator the right next click — open Wi-Fi
+                // settings, open the server's status page, or
+                // click a mode to respawn naive — without having
+                // to run `Diag` manually.
+                await recordClassifiedError(
+                    "auto-recovery after sleep failed: \(error.localizedDescription)"
                 )
             }
             return
@@ -1574,7 +1614,10 @@ public final class TunnelOrchestrator {
             // implementation auto-stopped on; we restore that behaviour
             // here. The other anomalies (count thresholds) stay advisory.
             if reason == .listeningOutsideLoopback {
-                recordError("Critical: \(detail). Auto-stopping.")
+                // **v2.0.29:** anomaly auto-stop is local-by-construction
+                // (e.g. naive bound outside loopback, too many established
+                // connections). Hardcoded `.local`.
+                recordError("Critical: \(detail). Auto-stopping.", layer: .local)
                 // Single-flight the auto-stop. Multiple anomalies
                 // arriving in quick succession would otherwise
                 // queue multiple `stop()` Tasks, each racing on
@@ -1612,10 +1655,136 @@ public final class TunnelOrchestrator {
         trimLogs()
     }
 
-    private func recordError(_ message: String) {
+    /// Synchronous error record — stores the message + optional
+    /// `ErrorLayer` and writes the formatted line to `logEntries`.
+    /// Pre-2.0.29 took only the message; the new `layer:` parameter
+    /// defaults to `nil` so every existing call site keeps the prior
+    /// plain-text behaviour. Connection-failure paths use
+    /// [`recordClassifiedError`] which runs the layer probe before
+    /// calling this; layer-by-construction paths (engine spawn
+    /// failure, naive binary unusable, anomaly auto-stop) hardcode
+    /// `.local` because the classifier would just confirm what the
+    /// caller already knows.
+    private func recordError(_ message: String, layer: ErrorLayer? = nil) {
         lastError = message
-        logEntries.append(LogEntry(source: .stderr, text: "[error] \(message)"))
+        lastErrorLayer = layer
+        let prefix = layer.map { "[\($0.diagnosticLabel)] " } ?? ""
+        logEntries.append(LogEntry(source: .stderr, text: "[error] \(prefix)\(message)"))
         trimLogs()
+    }
+
+    /// **v2.0.29 (Deterministic Error Reporting):** runs the
+    /// connection-failure classifier (3 second budget), then
+    /// records the error with the resulting layer. Classifier
+    /// returns `nil` only on inconclusive probes — in which case
+    /// the banner falls back to the pre-2.0.29 plain-text
+    /// rendering, no chip. Used by the connection-bring-up paths
+    /// in `startCore` and the wake-recovery branch of
+    /// `handleSystemDidWake`.
+    private func recordClassifiedError(_ message: String) async {
+        let layer = await classifyConnectionFailure()
+        recordError(message, layer: layer)
+    }
+
+    /// **v2.0.29 (Deterministic Error Reporting):** layer
+    /// classifier. Two parallel probes:
+    ///
+    /// 1. **Apple NCSI endpoint** — Apple's own captive-portal
+    ///    detection URL. Unlikely to be blocked by ISPs and
+    ///    returns a deterministic body. If the probe fails,
+    ///    general internet is broken → upstream layer.
+    /// 2. **Direct TCP probe to the user's VPS hostname** —
+    ///    bypasses the system proxy so the probe sees raw
+    ///    network state, not the in-flight broken proxy path.
+    ///    If Apple succeeds but VPS fails, the VPS is broken.
+    ///
+    /// Both probes have a 3 s budget. The decision matrix:
+    ///
+    /// |           | Apple ✓     | Apple ✗      |
+    /// |-----------|-------------|--------------|
+    /// | **VPS ✓** | `.local`    | `.upstream`* |
+    /// | **VPS ✗** | `.vps`      | `.upstream`  |
+    ///
+    /// `*` Apple unreachable but VPS reachable is unusual — typically
+    /// indicates ISP-level NCSI blocking, DNS hijack, or a captive
+    /// portal that lets the user's VPS through (some hotel networks).
+    /// Most actionable verdict for the user is `.upstream`: their
+    /// path to the broader internet is constrained even if the
+    /// specific path to their VPS happens to work.
+    private func classifyConnectionFailure() async -> ErrorLayer? {
+        async let appleReachable = Self.probeReachability(host: "www.apple.com")
+        async let vpsReachable: Bool = {
+            guard let profile = self.selectedProfile else { return false }
+            // `profile.server` is "host" or "host:port" — strip the
+            // port for the TCP probe; we always test :443 since that's
+            // where NaiveProxy listens.
+            let host = String(profile.server.split(separator: ":").first ?? "")
+            guard !host.isEmpty else { return false }
+            return await Self.probeReachability(host: host)
+        }()
+
+        let internet = await appleReachable
+        let vps = await vpsReachable
+
+        switch (internet, vps) {
+        case (false, false): return .upstream
+        case (true, false): return .vps
+        case (false, true): return .upstream
+        case (true, true): return .local
+        }
+    }
+
+    /// **v2.0.29 (Deterministic Error Reporting):** raw TCP
+    /// reachability probe. Bypasses the system proxy by going
+    /// through `Network.NWConnection` directly — `URLSession`
+    /// would honour the system proxy that the orchestrator's own
+    /// `proxyController.enableSmartPAC` may have just installed,
+    /// and we'd loop the probe through the broken `naive` path
+    /// instead of testing raw connectivity.
+    ///
+    /// `port` defaults to 443 (NaiveProxy's standard listen port,
+    /// and Apple's NCSI endpoint is HTTPS too). 3 s timeout. The
+    /// continuation-resume guard uses an `NSLock` because the
+    /// `NWConnection.stateUpdateHandler` can fire multiple times
+    /// (e.g. `.preparing` → `.ready` → `.cancelled`) and the
+    /// timeout task races against real state transitions; without
+    /// the guard a `CheckedContinuation` would crash on a double
+    /// resume.
+    private static func probeReachability(
+        host: String,
+        port: UInt16 = 443,
+        timeout: TimeInterval = 3.0
+    ) async -> Bool {
+        final class State: @unchecked Sendable {
+            let lock = NSLock()
+            var resumed = false
+        }
+        let state = State()
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
+        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        let queue = DispatchQueue(label: "ct.probe.\(host).\(port)", qos: .userInitiated)
+
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            func resumeOnce(_ value: Bool) {
+                state.lock.lock()
+                defer { state.lock.unlock() }
+                guard !state.resumed else { return }
+                state.resumed = true
+                conn.cancel()
+                cont.resume(returning: value)
+            }
+            conn.stateUpdateHandler = { newState in
+                switch newState {
+                case .ready: resumeOnce(true)
+                case .failed, .cancelled, .waiting: resumeOnce(false)
+                default: break
+                }
+            }
+            conn.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + timeout) {
+                resumeOnce(false)
+            }
+        }
     }
 
     private func trimLogs() {
@@ -1632,6 +1801,7 @@ public final class TunnelOrchestrator {
         // showed empty, leading users to think the clear didn't
         // work or that the error reappeared.
         lastError = nil
+        lastErrorLayer = nil
     }
 
     /// **UX-F#1 (v0.1.7.17):** dismiss the error banner from
@@ -1639,6 +1809,7 @@ public final class TunnelOrchestrator {
     /// `lastError` stays `private(set)`.
     public func dismissLastError() {
         lastError = nil
+        lastErrorLayer = nil
     }
 
     private func parsePort(_ raw: String) throws -> UInt16 {
@@ -1660,6 +1831,72 @@ public final class TunnelOrchestrator {
 /// Errors raised by the orchestrator (separate from engine and OS errors,
 /// which surface as their own types).
 ///
+/// **v2.0.29 (Deterministic Error Reporting):** taxonomy that
+/// pinpoints which node in the connection chain is broken when a
+/// connection-failure path fires. Eliminates the "self-doubt"
+/// failure mode where the user has to run manual diagnostics to
+/// figure out whether the issue is on their Mac, between their
+/// Mac and the public internet, or on the operator's NaiveProxy
+/// server. Classifier ([`TunnelOrchestrator.classifyConnectionFailure`])
+/// runs two parallel probes (Apple's NCSI endpoint for general
+/// upstream reachability + a direct TCP probe to the user's VPS
+/// hostname bypassing the proxy) with a 3 second budget; both
+/// probes go around the system proxy so the classifier sees the
+/// raw network state, not the in-flight broken proxy path.
+public enum ErrorLayer: String, Sendable, Codable, Equatable {
+    /// The issue is on the user's Mac — `naive` isn't running, the
+    /// loopback bind failed, the OS firewall is blocking outbound
+    /// traffic, or the app's saved credentials are wrong.
+    case local
+    /// The issue is between the Mac and the public internet —
+    /// the ISP, Wi-Fi association, captive portal, or DNS. The
+    /// classifier reaches this verdict when even Apple's NCSI
+    /// endpoint is unreachable.
+    case upstream
+    /// The issue is the user's NaiveProxy server — DNS for the
+    /// configured hostname doesn't resolve, the host is up but
+    /// `:443` refuses connections, or the upstream daemon is
+    /// rejecting the handshake. The classifier reaches this
+    /// verdict when general internet works but the user's VPS
+    /// hostname specifically does not.
+    case vps
+
+    /// Short label rendered in the `HeaderView` error chip. Held to
+    /// one word + an opening / closing bracket so the chip stays
+    /// inside the banner's vertical metric.
+    public var diagnosticLabel: String {
+        switch self {
+        case .local: "Local"
+        case .upstream: "Upstream"
+        case .vps: "VPS"
+        }
+    }
+
+    /// Plain-language sentence the operator can read out loud to a
+    /// support partner. Used by `Disclaimer.md` § "Reporting issues"
+    /// + the `Diag` button's transcript export. Deliberately not
+    /// rendered in the banner itself — the banner shows the chip +
+    /// the original `lastError` so the message stays scannable.
+    public var humanExplanation: String {
+        switch self {
+        case .local:
+            return
+                "the issue is on your Mac — `naive` may not be running, "
+                + "the saved credentials may be wrong, or the OS firewall "
+                + "may be blocking outbound traffic"
+        case .upstream:
+            return
+                "the issue is between your Mac and the public internet — "
+                + "your ISP, Wi-Fi, captive portal, or DNS"
+        case .vps:
+            return
+                "the issue is your NaiveProxy server — its hostname may "
+                + "not resolve, `:443` may refuse connections, or the "
+                + "daemon may be rejecting the handshake"
+        }
+    }
+}
+
 /// **v2.0.28 (Seamless Recovery Protocol):** finite state machine
 /// for the orchestrator's system-sleep / wake transition. Owned by
 /// `TunnelOrchestrator.sleepWakeState` and read by `HeaderStatusPill`

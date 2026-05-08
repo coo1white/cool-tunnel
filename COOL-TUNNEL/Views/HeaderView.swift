@@ -61,19 +61,28 @@ import os
 /// when `lastError` is non-nil.
 public struct HeaderView: View {
     public let lastError: String?
+    /// **v2.0.29 (Deterministic Error Reporting):** layer
+    /// attribution from `TunnelOrchestrator.classifyConnectionFailure`.
+    /// `nil` → banner renders without a chip (pre-2.0.29 behaviour).
+    /// Non-`nil` → banner shows a compact `[Local]` / `[Upstream]` /
+    /// `[VPS]` chip leading the message so the operator can see the
+    /// broken node without running `Diag` manually.
+    public let lastErrorLayer: ErrorLayer?
     public let onDismissError: () -> Void
 
     public init(
         lastError: String?,
+        lastErrorLayer: ErrorLayer? = nil,
         onDismissError: @escaping () -> Void
     ) {
         self.lastError = lastError
+        self.lastErrorLayer = lastErrorLayer
         self.onDismissError = onDismissError
     }
 
     public var body: some View {
         if let lastError, !lastError.isEmpty {
-            errorBanner(message: lastError)
+            errorBanner(message: lastError, layer: lastErrorLayer)
         }
     }
 
@@ -84,18 +93,23 @@ public struct HeaderView: View {
     /// Uses the system `.red` accent through `.background` /
     /// `.foregroundStyle` so the banner picks up Increased
     /// Contrast and accessibility preferences for free.
-    private func errorBanner(message: String) -> some View {
+    private func errorBanner(message: String, layer: ErrorLayer?) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.white)
                 .padding(.top, 1)
                 .accessibilityHidden(true)
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.white)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 2) {
+                if let layer {
+                    layerChip(layer)
+                }
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
             Spacer(minLength: 8)
             Button {
                 onDismissError()
@@ -110,7 +124,30 @@ public struct HeaderView: View {
         .padding(.vertical, 8)
         .background(Color.red, in: .rect(cornerRadius: 8, style: .continuous))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Error: \(message). Double-tap to dismiss.")
+        .accessibilityLabel(accessibilityLabel(message: message, layer: layer))
+    }
+
+    /// **v2.0.29:** compact `[Layer]` chip rendered above the
+    /// banner message. White-on-translucent-white so it picks up
+    /// the banner's red field without needing a second colour
+    /// token, and stays inside the banner's vertical metric
+    /// (caption font, tight padding). Mirrors the operator's own
+    /// diagnostic vocabulary: *Local* / *Upstream* / *VPS*.
+    private func layerChip(_ layer: ErrorLayer) -> some View {
+        Text(layer.diagnosticLabel.uppercased())
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(.white.opacity(0.18), in: .capsule)
+            .accessibilityHidden(true)
+    }
+
+    private func accessibilityLabel(message: String, layer: ErrorLayer?) -> String {
+        if let layer {
+            return "Error in \(layer.diagnosticLabel) layer: \(message). Double-tap to dismiss."
+        }
+        return "Error: \(message). Double-tap to dismiss."
     }
 }
 
