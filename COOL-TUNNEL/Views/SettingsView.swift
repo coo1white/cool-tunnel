@@ -1051,7 +1051,7 @@ public struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(appVersion.displayString)
                     .font(.callout.weight(.medium))
-                Text("Apache 2.0 · macOS 14+")
+                Text("AGPL-3.0-only · macOS 14+")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
