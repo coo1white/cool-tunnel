@@ -384,8 +384,23 @@ public final class TunnelOrchestrator {
                     activeProfileEdited = true
                 }
             }
+            // **v2.0.25 hotfix:** previously this was an
+            // update-in-place only — `if let index { profiles[index]
+            // = updated }`. When the assigned profile carried an id
+            // not present in `profiles` (the subscription-import
+            // path's `selectedProfile?.id ?? UUID().uuidString`
+            // fallback fires, or the previous selectedProfileID was
+            // dangling), the new profile was silently dropped:
+            // `selectedProfileID` advanced to the phantom id but the
+            // array — and therefore `save(profiles:)` and the
+            // credential store — never saw the imported credentials.
+            // Result: subscription-imported password not saved on
+            // next launch. Append-when-not-found makes any value
+            // assigned through `selectedProfile =` persistent.
             if let index = profiles.firstIndex(where: { $0.id == updated.id }) {
                 profiles[index] = updated
+            } else {
+                profiles.append(updated)
             }
             selectedProfileID = updated.id
             profileStore.save(profiles: profiles)
