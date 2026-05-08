@@ -9,6 +9,39 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.24] — 2026-05-08 (Hotfix: managed-engine self-heal)
+
+Single fix. The Rust Core (engine) panel in Settings could surface
+a contradictory state when the managed binary at
+`~/Library/Application Support/COOL-TUNNEL/cool-tunnel-core-managed`
+was missing — green "You're on the latest version ()." with empty
+parens *alongside* red "binary not found." Cause: a stale
+`lastInstalledTag` entry in UserDefaults claimed currency against
+a binary that no longer existed on disk, and the empty
+`currentVersion` (because `Test` had not yet run) bled through to
+the message template.
+
+### Fixed
+
+- **`RustCoreUpdater.checkForUpdates`** now self-heals: if
+  `installedURL` doesn't exist on disk, `lastInstalledTag` is
+  cleared *before* the tag-currency check runs. The next state
+  the user sees is `.available(tag)` with a real "Update to vX.Y.Z"
+  button, so a single click recovers the engine.
+- **`SettingsView.rustUpdaterMessage`** falls back to the resolved
+  release tag if `currentVersion` is empty so the parens never
+  render blank — defence in depth for any path that bypasses the
+  self-heal.
+
+### How it broke
+
+Any path that disconnects the persisted tag from the actual binary
+file: Application Support cleanup, manual delete, fresh-Mac
+UserDefaults sync via iCloud, an interrupted `update()` call that
+wrote `lastInstalledTag` before the atomic install completed.
+Pre-2.0.24, the panel was unrecoverable except via `Choose…` or
+`Reset` — neither of which is discoverable from the NG state.
+
 ## [2.0.23] — 2026-05-07 (Auto-updater fix: macOS 15+/26 incompatibility)
 
 One real shipping bug. v2.0.22 (and every release before it) shipped
