@@ -56,23 +56,153 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
         localPort: "1080"
     )
 
-    /// True when every required field is filled. Drives the
-    /// Start button's enabled state in `ControlPanelView` so the
-    /// user can't launch the engine against a half-filled profile
-    /// (the engine would otherwise spawn `naive` with empty
-    /// credentials, fail to authenticate upstream, and surface as
-    /// `× upstream_via_socks` in the diagnostics — confusing the
-    /// user about what went wrong).
+    /// True when every required field is filled AND every
+    /// shape-validated field is well-formed. Drives the Start
+    /// button's enabled state in `ControlPanelView` so the user
+    /// can't launch the engine against a half-filled or
+    /// malformed profile (the engine would otherwise spawn
+    /// `naive` with garbage input, fail to authenticate or bind,
+    /// and surface as a generic `× upstream_via_socks` in the
+    /// diagnostics — confusing the user about what went wrong).
     ///
     /// Whitespace-only entries count as empty. Password is also
     /// trimmed: a password of pure whitespace is almost always a
     /// typo, and the upstream would reject it anyway.
+    ///
+    /// **v2.0.30 (Defensive Input Logic):** server-shape and
+    /// local-port-range checks are now part of the gate.
+    /// Previously a typo'd port (e.g. "abc") or a pasted full
+    /// URL with `https://` prefix would clear the gate and the
+    /// failure surfaced only at engine-validate time. Now the
+    /// Start button stays disabled until the inputs are
+    /// well-formed, and the inline captions in
+    /// `ConnectionFormView` tell the user exactly what to fix.
     public var isStartable: Bool {
-        !server.trimmingCharacters(in: .whitespaces).isEmpty
+        serverValidation == .valid
             && !username.trimmingCharacters(in: .whitespaces).isEmpty
             && !password.trimmingCharacters(in: .whitespaces).isEmpty
-            && !localPort.trimmingCharacters(in: .whitespaces).isEmpty
+            && localPortValue != nil
     }
+
+    /// **v2.0.30 (Defensive Input Logic):** parses `localPort` as
+    /// a `UInt16` in the range `[1024, 65535]`. Returns `nil` for
+    /// any non-numeric, out-of-range, or blank input.
+    ///
+    /// We refuse ports below 1024 because `naive` binding to a
+    /// well-known port requires `setuid root` privileges the app
+    /// neither has nor should have; the system proxy
+    /// `networksetup` happily accepts any port, so without this
+    /// gate the operator would see "Connected" while every
+    /// browser request silently failed. The standard NaiveProxy
+    /// client port is 1080.
+    public var localPortValue: UInt16? {
+        let trimmed = localPort.trimmingCharacters(in: .whitespaces)
+        guard let port = UInt16(trimmed), port >= 1024 else {
+            return nil
+        }
+        return port
+    }
+
+    /// **v2.0.30 (Defensive Input Logic):** validates the `server`
+    /// field against NaiveProxy's wire-shape contract — bare host
+    /// or `host:port`, no scheme, no path. Returns the verdict so
+    /// the UI can render a precise inline caption ("remove the
+    /// https:// prefix") instead of a generic "bad server."
+    ///
+    /// Pairs with [`Profile.normaliseServer`], which auto-strips
+    /// the scheme and path on paste so the operator's "Good Deed"
+    /// is to fix the messy paste, not just complain about it.
+    public var serverValidation: ServerValidation {
+        let trimmed = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .empty }
+
+        // Scheme prefix? `^[a-zA-Z][a-zA-Z0-9+.-]*://` matches
+        // the RFC-3986 scheme grammar (so we catch `http://`,
+        // `https://`, `naive+https://`, etc.).
+        if let schemeRange = trimmed.range(
+            of: #"^[a-zA-Z][a-zA-Z0-9+.\-]*://"#, options: .regularExpression)
+        {
+            let scheme = String(trimmed[..<schemeRange.upperBound])
+            return .hasScheme(scheme)
+        }
+        // Path component?
+        if trimmed.contains("/") {
+            return .hasPath
+        }
+        // Strip optional `:port` suffix before hostname-shape
+        // check. The port part itself is NOT what `localPort`
+        // gates on — that one is the local SOCKS port; this is
+        // the upstream NaiveProxy server's port. Engine accepts
+        // either form.
+        let host: String
+        if let lastColon = trimmed.lastIndex(of: ":") {
+            let portPart = String(trimmed[trimmed.index(after: lastColon)...])
+            if UInt16(portPart) != nil {
+                host = String(trimmed[..<lastColon])
+            } else {
+                host = trimmed
+            }
+        } else {
+            host = trimmed
+        }
+        // Loose RFC-1123 hostname check — labels are separated by
+        // dots, alphanumerics + hyphens, no leading/trailing dot,
+        // total ≤ 253 chars. NaiveProxy's own resolver will
+        // reject anything bizarre at start; we just want to catch
+        // obvious typos here.
+        guard !host.isEmpty,
+            host.count <= 253,
+            !host.hasPrefix("."), !host.hasSuffix("."),
+            host.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" })
+        else {
+            return .malformed(reason: "invalid hostname")
+        }
+        return .valid
+    }
+
+    /// **v2.0.30 (Defensive Input Logic):** the "Good Deed" half
+    /// of the input contract — auto-strips a scheme prefix
+    /// (`https?://`, `naive+https://`, …) and any trailing path
+    /// from a pasted URL. Used by `ConnectionFormView`'s
+    /// `.onChange(of:)` so the field self-corrects on the next
+    /// runloop tick after a paste.
+    ///
+    /// Idempotent: calling on an already-bare hostname returns
+    /// the input verbatim (modulo whitespace trimming).
+    public static func normaliseServer(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let schemeRange = s.range(
+            of: #"^[a-zA-Z][a-zA-Z0-9+.\-]*://"#, options: .regularExpression)
+        {
+            s = String(s[schemeRange.upperBound...])
+        }
+        if let slash = s.firstIndex(of: "/") {
+            s = String(s[..<slash])
+        }
+        return s
+    }
+}
+
+/// **v2.0.30 (Defensive Input Logic):** verdict from
+/// [`Profile.serverValidation`]. The associated values carry
+/// enough context for `ConnectionFormView` to render a precise
+/// inline caption instead of a generic "bad server."
+public enum ServerValidation: Sendable, Equatable {
+    /// Bare hostname or `host:port` — engine-acceptable.
+    case valid
+    /// Trimmed input is empty. Treated as "still typing" by the
+    /// UI (no red caption shown for this case).
+    case empty
+    /// Pasted with a scheme prefix; the captured string is the
+    /// matched prefix verbatim ("https://", "naive+https://", …)
+    /// so the caption can quote it back to the user.
+    case hasScheme(String)
+    /// Contains a `/` — looks like the user pasted a URL with a
+    /// path. Auto-stripped by `normaliseServer`.
+    case hasPath
+    /// Other format failure. The reason is a one-line lowercase
+    /// noun phrase suitable for inlining in a sentence.
+    case malformed(reason: String)
 }
 
 // MARK: - Modes

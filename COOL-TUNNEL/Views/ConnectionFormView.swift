@@ -167,6 +167,32 @@ public struct ConnectionFormView: View {
                     )
                     .textContentType(.URL)
                     .autocorrectionDisabled()
+                    // **v2.0.30 (Defensive Input Logic — "Good
+                    // Deed"):** auto-strip a scheme prefix
+                    // (`https://`, `naive+https://`, …) and any
+                    // trailing path on paste. The runloop tick that
+                    // immediately follows the binding update fires
+                    // this `.onChange`; if the normaliser changes
+                    // the value, we write it back through the
+                    // orchestrator so the user sees the field
+                    // self-correct without a manual fix step. The
+                    // "newValue != normalised" guard prevents
+                    // infinite re-firing — once the field is bare
+                    // hostname, normaliser is idempotent.
+                    .onChange(of: orchestrator.selectedProfile?.server ?? "") { _, newValue in
+                        let normalised = Profile.normaliseServer(newValue)
+                        guard normalised != newValue,
+                            var current = orchestrator.selectedProfile
+                        else { return }
+                        current.server = normalised
+                        orchestrator.selectedProfile = current
+                    }
+
+                    if let caption = Self.serverValidationCaption(profile.server) {
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
 
                     TextField(
                         "Username",
@@ -189,6 +215,12 @@ public struct ConnectionFormView: View {
                         prompt: Text("1080")
                     )
                     .autocorrectionDisabled()
+
+                    if let caption = Self.localPortValidationCaption(profile.localPort) {
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 } header: {
                     Text("Server")
                 } footer: {
@@ -267,5 +299,56 @@ public struct ConnectionFormView: View {
         if profile.id == "default" { return "Default" }
         if !profile.server.isEmpty { return profile.server }
         return "Profile \(profile.id.prefix(6))"
+    }
+
+    // MARK: - Defensive-input captions (v2.0.30)
+
+    /// **v2.0.30 (Defensive Input Logic — "First Scold" half):**
+    /// translates a [`ServerValidation`] verdict into the inline
+    /// red caption shown immediately under the Server field.
+    /// Returns `nil` when the value is well-formed or empty
+    /// ("still typing"), so the caption only appears when there's
+    /// a concrete problem to fix.
+    ///
+    /// `.hasScheme` and `.hasPath` are auto-corrected by the
+    /// `onChange` paste-normaliser on the next runloop tick, so
+    /// the captions for those cases use language framed around
+    /// what already happened ("we're stripping the …") rather
+    /// than instruction. `.malformed` has no auto-fix; the
+    /// caption tells the operator the field needs manual
+    /// attention.
+    fileprivate static func serverValidationCaption(_ server: String) -> String? {
+        // Build a throwaway profile to drive the validation —
+        // `serverValidation` is pure on `server`, so the other
+        // field values don't matter here.
+        let probe = Profile(
+            id: "_probe", server: server, username: "", password: "", localPort: "")
+        switch probe.serverValidation {
+        case .valid, .empty:
+            return nil
+        case .hasScheme(let scheme):
+            return "Stripping \"\(scheme)\" — server is just the hostname."
+        case .hasPath:
+            return "Stripping the path — server is just the hostname."
+        case .malformed(let reason):
+            return "Server looks malformed (\(reason)). Use \"host\" or \"host:port\"."
+        }
+    }
+
+    /// **v2.0.30 (Defensive Input Logic):** translates a raw
+    /// `localPort` string into the inline red caption shown
+    /// immediately under the Local port field. Returns `nil`
+    /// when blank (treated as "still typing") or when the value
+    /// parses to a `UInt16` ≥ 1024.
+    fileprivate static func localPortValidationCaption(_ port: String) -> String? {
+        let trimmed = port.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        guard let value = UInt16(trimmed) else {
+            return "Local port must be a number (e.g. 1080)."
+        }
+        if value < 1024 {
+            return "Local port must be ≥ 1024 — `naive` can't bind below that without root."
+        }
+        return nil
     }
 }
