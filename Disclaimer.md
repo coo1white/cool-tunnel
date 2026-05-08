@@ -17,6 +17,32 @@ This software is intended for legitimate uses such as:
 This software is **not** intended to facilitate any activity that would
 violate applicable law in the jurisdiction where it is used.
 
+## Jurisdictional legal risk
+
+This software has the technical capability to circumvent network
+restrictions imposed by governments, employers, schools, and ISPs.
+**Some jurisdictions criminalise the use of unauthorised
+circumvention tools, the operation of unauthorised proxy servers,
+or both.** You are solely responsible for understanding and
+complying with the laws of any jurisdiction where you download,
+build, install, run, distribute, or operate Cool Tunnel — including
+laws that may apply when traffic transits a jurisdiction other than
+the one in which you are physically located.
+
+The authors and contributors of Cool Tunnel:
+
+- Have **no knowledge** of who downloads, builds, installs, runs,
+  or operates this software (no telemetry; see "No data collection"
+  below).
+- Provide **no legal advice** about the use of this software in
+  any jurisdiction. Consult a qualified lawyer in your jurisdiction
+  before relying on this software for any purpose where legality
+  is uncertain.
+- Will **not respond to law-enforcement requests** asking us to
+  identify users — we have no records to provide. The repository's
+  git history and GitHub's account-level metadata are the only
+  records that exist, and they're already public.
+
 ## User responsibility
 
 By downloading, building, installing, or running COOL TUNNEL you acknowledge
