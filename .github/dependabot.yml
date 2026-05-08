@@ -19,7 +19,11 @@ updates:
       interval: weekly
       day: monday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      # OPSEC: keep the public dependabot config timezone-neutral.
+      # Hard-coding `Asia/Shanghai` (or any specific TZ) leaks
+      # rough maintainer location, which matters disproportionately
+      # for an anti-censorship tool. UTC is the convention.
+      timezone: "Etc/UTC"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
@@ -36,7 +40,7 @@ updates:
       interval: weekly
       day: monday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: "Etc/UTC"
     open-pull-requests-limit: 3
     commit-message:
       prefix: "ci"
