@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Views/LogConsoleView.swift
 //
 // **Phase 2.3 (v0.2):** the live log gains a real export

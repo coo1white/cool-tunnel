@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Core/Protocol.swift
 //
 // Swift Codable mirror of the Rust crate's `protocol` module

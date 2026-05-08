@@ -1,17 +1,17 @@
 Cool Tunnel
-Copyright 2026 Alice (coo1white)
+Copyright (C) 2026 coolwhite LLC
 
-Licensed under the Apache License, Version 2.0 (the "License"); you may
-not use this software except in compliance with the License. You may
-obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License version 3
+as published by the Free Software Foundation.
 
-    http://www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Affero General Public License for more details:
+<https://www.gnu.org/licenses/>.
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-implied. See the License for the specific language governing permissions
-and limitations under the License.
+The full licence text is in the LICENSE file at the repo root.
 
 ------------------------------------------------------------------------
 
@@ -24,7 +24,27 @@ This product bundles the following third-party software:
   release tags pinned in COOL-TUNNEL/naive.upstream.json.
 
 * Rust crates (see core/Cargo.toml and core/Cargo.lock for the full
-  dependency graph): tokio, serde, serde_json, tracing,
+  dependency graph): tokio, axum, tower, serde, serde_json, tracing,
   tracing-subscriber, thiserror, regex, bytes, and their transitive
   dependencies. Each is distributed under its own license (mostly
   MIT and/or Apache-2.0); see the source repositories for details.
+
+* Apple SDK frameworks (SwiftUI, AppKit, Foundation, Security, etc.)
+  Linked at runtime; subject to the macOS SDK terms. SF Symbols are
+  used by reference under the Apple SF Pro / SF Symbols Licence.
+
+------------------------------------------------------------------------
+
+AGPL-3.0 + bundled-component compatibility
+
+NaiveProxy (BSD-3) and the linked Rust crate set (MIT, Apache-2.0,
+BSD-3, ISC, MPL-2.0) are all AGPL-3.0-compatible. The combined work
+distributed by coolwhite LLC is therefore licensable under
+AGPL-3.0-only in its entirety. Apple SDK headers and SF Symbols are
+used by reference, not redistributed in source form, so their
+proprietary terms do not propagate to this distribution.
+
+The licence change to AGPL-3.0 applies prospectively from the first
+release tagged after this commit; releases tagged on or before
+`v2.0.25` were distributed under Apache-2.0 and remain available
+under that licence to anyone who downloaded them.

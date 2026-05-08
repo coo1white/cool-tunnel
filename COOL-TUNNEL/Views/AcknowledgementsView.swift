@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Views/AcknowledgementsView.swift
 //
 // **Phase 2.4 (v0.2):** licensed-third-party-software disclosure
@@ -59,9 +62,13 @@ public struct AcknowledgementsView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
             Divider()
-            Text("Cool Tunnel itself is distributed under the Apache License, Version 2.0.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Text(
+                "Cool Tunnel itself is distributed under the GNU Affero General Public License, Version 3 (AGPL-3.0-only). "
+                    + "Copyright © 2026 coolwhite LLC. The bundled and linked components below ship under their own "
+                    + "upstream licences (BSD-3-Clause, MIT, Apache-2.0, MPL-2.0, ISC) — all AGPL-3.0-compatible."
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
             HStack(spacing: 4) {
                 Link(
                     "View the full NOTICE file on GitHub",

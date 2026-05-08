@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // SystemIntegration/FirewallProbe.swift
 //
 // Reads the macOS Application Firewall global state. Surfaced in the UI

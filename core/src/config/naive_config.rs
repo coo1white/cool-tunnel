@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! `NaiveProxy` JSON config generation.
 //!
 //! Produces the `config.json` consumed by the bundled `naive` binary.

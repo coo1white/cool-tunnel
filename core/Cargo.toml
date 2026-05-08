@@ -1,10 +1,11 @@
 [package]
 name = "cool-tunnel-core"
-version = "2.0.25"
+version = "2.0.26"
 edition = "2021"
 rust-version = "1.80"
 description = "Cross-platform Rust engine for Cool Tunnel — JSON-over-stdio client and HTTP server modes"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
+authors  = ["coolwhite LLC"]
 repository = "https://github.com/coo1white/cool-tunnel"
 homepage = "https://github.com/coo1white/cool-tunnel"
 documentation = "https://github.com/coo1white/cool-tunnel/tree/main/core"

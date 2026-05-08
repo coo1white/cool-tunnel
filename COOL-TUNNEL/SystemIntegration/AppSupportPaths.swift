@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // SystemIntegration/AppSupportPaths.swift
 //
 // Resolves the paths the app reads from and writes to. Centralising them
