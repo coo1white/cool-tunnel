@@ -9,6 +9,39 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.27] — 2026-05-09 (Hotfix: NaiveUpdater self-heals stale lastInstalledTag)
+
+Single-line behaviour fix in `NaiveUpdater`. Mirrors the v2.0.24
+fix to `RustCoreUpdater` (PR #31): same defect class, same fix
+shape, different updater. No protocol or infrastructure change.
+
+### Fixed
+
+- **`NaiveUpdater.checkForUpdates` self-heals when the managed
+  `naive` binary is missing.** Pre-fix symptom (now reachable for
+  the bundled-`naive` panel rather than just the engine panel):
+  with `~/Library/Application Support/COOL-TUNNEL/naive-managed`
+  deleted (Application Support cleanup, manual delete, fresh Mac
+  with iCloud-synced UserDefaults from a previous host that did
+  install it), the panel would say *"You're on the latest version
+  (X)."* while the binary was in fact missing — because
+  `lastInstalledTag` in UserDefaults remained authoritative for
+  the currency check.
+
+  At the top of `checkForUpdates`, if the file at `installedURL`
+  doesn't exist on disk, `lastInstalledTag` is now cleared before
+  the tag-currency check runs. The next state the user sees is
+  `.available(tag)` with a real *"Update to vX.Y.Z"* button, so a
+  single click recovers the binary.
+
+- **Sister-bug discovery process.** This was a sister bug we
+  should have caught when fixing `RustCoreUpdater` in #31; the
+  audit suite doesn't yet have a codified gate for *"parity-
+  required across the three updaters (App / Naive / RustCore)."*
+  No change to the audit suite this release — single-occurrence
+  fix landed first; if a third asymmetry surfaces in a future
+  round-N review, that's the trigger for codifying the gate.
+
 ## [2.0.26] — 2026-05-08 (Licence: Apache-2.0 → AGPL-3.0-only)
 
 > **Abandoned all commercial restrictions in favor of absolute
