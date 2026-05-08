@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Lifecycle management of the `naive` child process.
 //!
 //! [`ProxySupervisor`] owns one running `naive` instance. Spawning installs

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Pure functions that turn a validated [`crate::domain::Profile`] into the
 //! artifacts `NaiveProxy` and macOS need: a JSON config file and a JavaScript
 //! PAC file.

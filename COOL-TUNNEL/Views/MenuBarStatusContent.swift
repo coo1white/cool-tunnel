@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Views/MenuBarStatusContent.swift
 //
 // **MenuBar-F#1 (v0.2):** primary control surface for the proxy use

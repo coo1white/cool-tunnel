@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // SystemIntegration/NaiveBinaryResolver.swift
 //
 // Centralises everything we need to know about the `naive` Mach-O before

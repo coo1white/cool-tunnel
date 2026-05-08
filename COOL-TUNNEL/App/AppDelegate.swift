@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // App/AppDelegate.swift
 //
 // Window lifecycle for v0.1.5.8 single-window app:

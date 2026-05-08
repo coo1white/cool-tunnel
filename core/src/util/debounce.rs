@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Per-key fixed-window debouncer.
 //!
 //! When the proxy is flapping the [`crate::monitor`] loop can fire the

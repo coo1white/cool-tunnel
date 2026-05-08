@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Anomaly detection thresholds applied to a parsed lsof snapshot.
 //!
 //! The thresholds and detection order match the Swift implementation:

@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
+//
+// This software is a sanctuary for personal privacy. Any
+// redistribution or modification must strictly adhere to the
+// AGPL-3.0 terms to ensure the spirit of freedom remains
+// untainted.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

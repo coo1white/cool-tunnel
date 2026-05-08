@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Persistence/CredentialStore.swift
 //
 // Common interface for per-profile password storage so the higher

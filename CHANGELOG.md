@@ -9,6 +9,68 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.26] — 2026-05-08 (Licence: Apache-2.0 → AGPL-3.0-only)
+
+> **Abandoned all commercial restrictions in favor of absolute
+> transparency and open-source stewardship.**
+>
+> *This project belongs to the community. coolwhite LLC chooses
+> transparency over profit, and freedom over control.*
+
+Strategic licence transition under the **coolwhite LLC** copyright
+anchor, aligned with the simultaneous switch on the upstream Cool
+Tunnel Server stack. Forward-only — every release tagged on or
+before `v2.0.25` remains Apache-2.0 for anyone who downloaded it;
+AGPL-3.0-only applies prospectively from this tag.
+
+### Changed
+
+- **`LICENSE`** replaced with the verbatim FSF GNU Affero General
+  Public License v3 text (`gnu.org/licenses/agpl-3.0.txt`).
+- **67 source files** (`.rs` + `.swift` under `core/` + `COOL-TUNNEL/`)
+  carry an SPDX short-form header:
+
+  ```
+  // SPDX-License-Identifier: AGPL-3.0-only
+  // Copyright (C) 2026 coolwhite LLC
+  // See LICENSE for full terms.
+  ```
+
+  Modern lawyer-blessed shorthand; full preamble lives in `LICENSE`.
+- **`core/src/main.rs`** and **`COOL-TUNNEL/App/CoolTunnelApp.swift`**
+  carry an additional intent-of-licence note at the entry point:
+  *"This software is a sanctuary for personal privacy. Any
+  redistribution or modification must strictly adhere to the
+  AGPL-3.0 terms to ensure the spirit of freedom remains
+  untainted."*
+- **`core/Cargo.toml`**: `license = "AGPL-3.0-only"`,
+  `authors = ["coolwhite LLC"]`. `Cargo.lock` refreshed.
+- **`MARKETING_VERSION`** in the Xcode project: `2.0.25 → 2.0.26`
+  (Debug + Release configs).
+- **`README.md`**, **`NOTICE`**, **`Disclaimer.md`**,
+  **`COOL-TUNNEL/Views/AcknowledgementsView.swift`** rewritten to
+  reference AGPL-3.0 throughout. Bundled-component compatibility
+  table preserved (NaiveProxy BSD-3, Rust crate set MIT/Apache-2.0/
+  BSD-3/ISC/MPL-2.0 — all AGPL-3.0-compatible). Apple SDK headers
+  and SF Symbols are used by reference, not redistributed in
+  source form, so their proprietary terms do not propagate.
+
+### Why
+
+Coolwhite LLC chose the **Lighthouse** over the **Fortress**: the
+project exists to provide order and transparency, not to collect
+fees. The Apache-2.0 → AGPL-3.0 transition closes the SaaS loophole
+for any future modified server-side variant while keeping the
+client itself fully open and freely redistributable.
+
+### What this means in practice
+
+| Audience | Effect |
+| --- | --- |
+| End users | None. The `.dmg` you download still installs the same way. |
+| Forks / packagers | Modifications must be released under AGPL-3.0 with source available; AGPL § 13 obliges source-availability for modified versions run as a network service. |
+| Enterprises wanting to embed | Talk to `coolwhite LLC`. The AGPL § 13 source-availability obligation is the trigger to re-evaluate. |
+
 ## [2.0.25] — 2026-05-08 (Hotfix: subscription-imported password persists)
 
 Single fix to a silent persistence bug in the subscription-import

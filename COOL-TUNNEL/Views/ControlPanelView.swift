@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Views/ControlPanelView.swift
 //
 // **Phase 2.1 (v0.2):** the custom mode-chip rail is replaced by

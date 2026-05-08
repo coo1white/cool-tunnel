@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // Views/ConnectionFormView.swift
 //
 // **Phase 2.1 (v0.2):** rewritten as a real
