@@ -9,6 +9,103 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.30] — 2026-05-09 — Defensive Input Logic ("First Scold, Then Do Good")
+
+> **The UI is now strict on input to protect the engine's
+> integrity, but kind enough to fix your messy pastes for you.**
+> No more *"Couldn't start"* failures from a typo'd port or a
+> pasted full URL — the field self-corrects what it can, the
+> Start button stays disabled until what it can't is fixed, and
+> the inline captions tell the operator exactly what to do next.
+
+Final layer of UX hardening for the `ConnectionFormView` + Direct
+Domains flow. Closes audit findings D-1 through D-4. No protocol
+or infrastructure change; existing deployments can update without
+operator action beyond the in-app Update button.
+
+### Added
+
+- **`Profile.serverValidation: ServerValidation`** — pure
+  validator on the wire-shape contract (bare host or `host:port`,
+  no scheme, no path). Returns one of:
+  - `.valid` — engine-acceptable.
+  - `.empty` — treated as "still typing" (no caption).
+  - `.hasScheme(String)` — pasted with a scheme prefix; the
+    captured string is the matched prefix verbatim.
+  - `.hasPath` — contains `/`, looks like a pasted URL.
+  - `.malformed(reason: String)` — other format failure.
+- **`Profile.localPortValue: UInt16?`** — parses `localPort` as
+  a `UInt16` ≥ 1024. `nil` for non-numeric, out-of-range, or
+  blank input. The 1024 floor is enforced because `naive`
+  binding to a well-known port requires `setuid root` privileges
+  the app neither has nor should have.
+- **`Profile.normaliseServer(_:)`** — the "Good Deed" half of
+  the input contract. Auto-strips a scheme prefix
+  (`https?://`, `naive+https://`, …) and any trailing path from
+  a pasted URL. Idempotent.
+- **Inline red captions** in `ConnectionFormView` under the
+  Server and Local port fields. Only render when there's a
+  concrete problem to fix; absent during empty / valid /
+  still-typing states.
+- **`onChange`-driven paste normaliser** on the Server field.
+  When the user pastes a full URL, the field self-corrects on
+  the next runloop tick — they see "https://example.com/path"
+  briefly, then it collapses to "example.com." Same effect on
+  the Direct Domains TextField.
+- **`@State domainAddError: String?`** in `SettingsView` to
+  surface rejection reasons inline. Pre-2.0.30 the rejection
+  was silent — the operator clicked Add, the field cleared,
+  and they assumed success.
+
+### Changed
+
+- **`Profile.isStartable`** is now gated on
+  `serverValidation == .valid` AND `localPortValue != nil`.
+  Pre-2.0.30 it only checked "non-empty after trim." A typo'd
+  port (e.g. `"abc"`) or a pasted full URL would clear the gate
+  and the failure surfaced only at engine-validate time. Now
+  the Start button stays disabled until the inputs are
+  well-formed.
+- **`SettingsView.addDomain`** routes through `Profile.normaliseServer`
+  + a new `isPlausibleDomainShape` check (loose RFC-1123 hostname
+  shape: alphanumerics + dots + hyphens, ≤ 253 chars, must
+  contain a dot, no leading/trailing dot, no empty labels).
+  Rejects scheme prefixes, path components, and single-label
+  inputs like `localhost` (the latter shouldn't be on a public
+  PAC bypass list anyway).
+
+### UX guarantees (the "ballast" you don't have to doubt)
+
+| Field | Empty | Valid | Pasted URL | Bad port | Malformed host |
+|---|---|---|---|---|---|
+| Server | no caption | no caption | auto-strips, transient caption | n/a | red caption + blocks Start |
+| Username | no caption | no caption | n/a | n/a | n/a |
+| Password | no caption | no caption | n/a | n/a | n/a |
+| Local port | no caption | no caption | n/a | red caption + blocks Start | n/a |
+| Direct domain | no caption | added silently | auto-strips, then re-validates | n/a | inline error |
+
+Start button reflects all four upstream gates at once — operator
+never has to guess which field is blocking.
+
+### Out of scope (deliberate)
+
+- **Live keystroke-by-keystroke rejection** — HIG-violating;
+  validation fires on `onSubmit` / focus-leave / Start-press,
+  not on every key.
+- **Hard-rejecting paste of valid `https://host` URLs** — better
+  UX is to normalise + show the user what was accepted.
+- **Refactoring the FSM substrate** — already in place per the
+  prior "State-Driven UI" audit.
+
+### Process note
+
+Caught a Swift 6 strict-concurrency gap during local Debug
+xcodebuild *before* opening the PR — same class of error the
+v2.0.29 PR landed and only surfaced at `cut_release.sh` time.
+Local Debug build added to the pre-PR ritual; a future hardening
+of `.github/workflows/ci.yml` to run `xcodebuild build` is the
+trigger if a fourth instance surfaces.
+
 ## [2.0.29] — 2026-05-09 — Deterministic Error Reporting (`ErrorLayer` taxonomy)
 
 > **No more *"Couldn't start Smart Mode"* with no signal whether
