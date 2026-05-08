@@ -1397,8 +1397,12 @@ public struct SettingsView: View {
         switch rustUpdater.state {
         case .idle: nil
         case .checking: "Checking Cool Tunnel releases…"
-        case .upToDate(let current, _):
-            "You're on the latest version (\(current))."
+        case .upToDate(let current, let latest):
+            // **v2.0.24 hotfix:** before Test runs, `currentVersion`
+            // is "", which used to render as "(...)" — empty parens.
+            // Fall back to the resolved tag so the user sees a real
+            // version even if engine inspection hasn't populated yet.
+            "You're on the latest version (\(current.isEmpty ? latest : current))."
         case .available(let tag, _):
             "Update available: \(tag)."
         case .resolvingRelease: "Resolving latest cool-tunnel release…"
