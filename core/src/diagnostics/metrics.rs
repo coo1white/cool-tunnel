@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Parser for `curl --write-out` output and a small unit-conversion helper.
 //!
 //! The Swift app passes a `\n`-delimited list of `key=value` pairs through

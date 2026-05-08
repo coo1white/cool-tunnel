@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Diagnostic probes that exercise the proxy and the upstream server.
 //!
 //! Each probe is a thin wrapper around `curl` invoked with `--write-out`. The

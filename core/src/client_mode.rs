@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Client mode: long-lived JSON-over-stdio engine driven by the
 //! macOS app (or any other client UI).
 //!

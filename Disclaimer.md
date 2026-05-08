@@ -64,10 +64,27 @@ and agree that:
 
 ## No warranty
 
-This software is distributed under the **Apache License, Version 2.0**
-(see [LICENSE](./LICENSE)). It is provided **without any warranty** —
-express or implied — including without limitation the warranties of
-merchantability, fitness for a particular purpose, and non-infringement.
+This software is distributed under the **GNU Affero General Public
+License, Version 3** (see [LICENSE](./LICENSE)), copyright © 2026
+coolwhite LLC. It is provided **without any warranty** — express
+or implied — including without limitation the warranties of
+merchantability, fitness for a particular purpose, and
+non-infringement (AGPL §§ 15–16).
+
+Two AGPL clauses worth highlighting before you deploy:
+
+- **Source-availability on network use** (AGPL § 13). If you
+  modify Cool Tunnel and run a modified version as a network
+  service that other users interact with, you must offer those
+  users access to the corresponding source under the same AGPL
+  terms. For a desktop GUI client run on your own machine for
+  your own use this clause has no surface to attach to; it
+  matters only when running modified copies as a service.
+- **No warranty / no liability** (AGPL §§ 15–16). The software
+  is provided "AS IS, AS AVAILABLE, WITHOUT ANY WARRANTY". The
+  contributors are not liable for any damages, claims, or legal
+  consequences arising from your deployment, your network's
+  activities, or any third party's use of this software.
 
 ## No liability
 
@@ -93,7 +110,7 @@ in-app Update buttons in Settings.
 COOL TUNNEL bundles a precompiled `naive` Mach-O binary built from
 [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy), which is
 distributed under the BSD-3-Clause license. Users redistributing COOL
-TUNNEL must comply with that license in addition to Apache-2.0. The
+TUNNEL must comply with that license in addition to AGPL-3.0. The
 [NOTICE](./NOTICE) file at the repository root lists every bundled
 component and its licence — keep it intact in any redistribution.
 

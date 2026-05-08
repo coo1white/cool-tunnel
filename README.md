@@ -8,7 +8,7 @@
 traffic that looks indistinguishable from a normal browser visit.**
 
 [![Latest release](https://img.shields.io/github/v/release/coo1white/cool-tunnel?label=latest&color=ff6b8b)](https://github.com/coo1white/cool-tunnel/releases/latest)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-1c5cdc)](./LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1c5cdc)](./LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%20Sonoma%2B-blue)](#compatibility)
 [![CI](https://github.com/coo1white/cool-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/coo1white/cool-tunnel/actions/workflows/ci.yml)
 [![Engine: Rust](https://img.shields.io/badge/engine-Rust-orange)](./core)
@@ -55,7 +55,7 @@ your own NaiveProxy server.
 
 **3. You can audit every line.**
 The whole project — the Swift app, the Rust engine, the build
-scripts — is on GitHub under [Apache-2.0](./LICENSE). You don't have
+scripts — is on GitHub under [AGPL-3.0-only](./LICENSE). You don't have
 to take anyone's word for what it does. You can read it. So can a
 journalist, a security researcher, or anyone else who wants to verify.
 
@@ -213,7 +213,7 @@ are the substitute. Full threat model in [SECURITY.md](./SECURITY.md).
 > can save you. Pick a server you trust (or run your own).
 
 > **Is it free?**
-> Yes. Apache-2.0 licensed, no paid tier, no premium server, no
+> Yes. AGPL-3.0 licensed, no paid tier, no premium server, no
 > donation pop-up. The app itself is free; you'll need to pay for a
 > server you control (any Linux VPS at $3–5/month is enough).
 
@@ -350,10 +350,24 @@ curl http://127.0.0.1:8787/health
 
 ## License & credits
 
-Cool Tunnel ships under **[Apache-2.0](./LICENSE)** — chosen for
-its explicit patent grant, which MIT/BSD don't carry. Every release
-is reproducible from public source via `cargo build --locked` +
-`xcodebuild`. Anyone may fork.
+> **Powered by coolwhite LLC. Open source for freedom; consultancy
+> available for excellence.**
+>
+> *This project belongs to the community. coolwhite LLC chooses
+> transparency over profit, and freedom over control.*
+
+Cool Tunnel ships under **[AGPL-3.0-only](./LICENSE)** — copyleft
+with an explicit patent grant. Modified versions distributed in any
+form (binary, source, or run as a network service per AGPL § 13)
+must be released under AGPL-3.0 with source available. Every
+release is reproducible from public source via `cargo build --locked`
++ `xcodebuild`. Anyone may fork.
+
+Copyright (C) 2026 coolwhite LLC. The licence change to AGPL-3.0
+applies prospectively from the first release tagged after this
+commit; releases tagged on or before `v2.0.25` were distributed
+under Apache-2.0 and remain available under that licence to anyone
+who downloaded them.
 
 Bundled-component attribution: [NOTICE](./NOTICE).
 Read the [Disclaimer](./Disclaimer.md) before you install.

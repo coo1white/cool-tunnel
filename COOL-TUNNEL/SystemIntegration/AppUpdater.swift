@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // SystemIntegration/AppUpdater.swift
 //
 // In-app self-updater for the Cool Tunnel `.app`. SHA-256

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 // SystemIntegration/HostMachine.swift
 //
 // Rich snapshot of the running Mac's hardware: CPU brand string,

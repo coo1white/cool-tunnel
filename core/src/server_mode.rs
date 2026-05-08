@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Server mode: HTTP API for the future Cool Tunnel admin UI
 //! (Filament/PHP server tier).
 //!

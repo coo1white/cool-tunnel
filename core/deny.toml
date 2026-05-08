@@ -58,6 +58,14 @@ allow = [
 # upgrade.
 confidence-threshold = 1.0
 
+# Our workspace crate declares `license = "AGPL-3.0-only"` (copyleft,
+# not on the permissive `allow` list above). cargo-deny would
+# otherwise reject our own publish=false crate; `[licenses.private]
+# ignore = true` exempts it. Third-party deps still go through the
+# full licence check on the `allow` list above.
+[licenses.private]
+ignore = true
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

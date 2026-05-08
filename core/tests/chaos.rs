@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
 //! Chaos engineering test suite.
 //!
 //! Where `protocol_roundtrip.rs` exercises the happy path,
