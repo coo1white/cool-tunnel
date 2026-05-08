@@ -31,21 +31,32 @@ skip = []
 
 [licenses]
 version = 2
-# Allow-list rather than deny-list. Adding a new licence here is a
-# deliberate review, not a side effect of a `cargo update`.
+# Strict allow-list — only licences actually encountered in the
+# current dep tree. Adding a new licence here is a deliberate
+# review, not a side effect of a `cargo update`. The previous
+# entries `BSD-2-Clause`, `ISC`, `MPL-2.0`, `Unicode-DFS-2016`,
+# and `Zlib` were `unmatched license allowance` warnings (no
+# crate in the tree carried them), so we drop them — a future
+# transitive dep that pulls one of these in will now fail
+# `cargo deny check` and force an explicit allow-list update,
+# rather than slipping in unnoticed.
 allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
-    "Zlib",
-    "MPL-2.0",
 ]
-confidence-threshold = 0.93
+# Strict (was 0.93). `1.0` requires an exact match against the
+# SPDX licence template — anything fuzzier (a crate with a
+# hand-edited LICENSE file that drifts from the canonical text)
+# fails the gate and forces the maintainer to either fix the
+# upstream LICENSE or add a `[[licenses.exceptions]]` entry
+# clarifying why the deviation is acceptable. Today's dep tree
+# is uniformly mainstream crates (axum, tokio, serde, regex,
+# tracing, hyper) with clean SPDX licences, so 1.0 is a free
+# upgrade.
+confidence-threshold = 1.0
 
 [sources]
 unknown-registry = "deny"
