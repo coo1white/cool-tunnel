@@ -14,15 +14,13 @@ traffic that looks indistinguishable from a normal browser visit.**
 [![Engine: Rust](https://img.shields.io/badge/engine-Rust-orange)](./core)
 [![Universal binary](https://img.shields.io/badge/Mac-Apple%20Silicon%20%2B%20Intel-success)](#compatibility)
 
-<!-- VISUAL ANCHOR -->
 <!--
-  Replace with a clean screenshot of the running app
-  (Header pill in pink-active, mode chips, log scrolling).
-  Recommended: 1200×750 PNG, 2x retina,
-  saved to docs/screenshots/hero-v2.0.x.png
--->
+  VISUAL ANCHOR — drop a 1200×750 PNG (2x retina) at
+  docs/screenshots/hero.png and uncomment the <img> below.
+  Header pill pink-active, mode chips, log scrolling.
 
-<img src="docs/screenshots/hero.png" alt="Cool Tunnel running in Smart mode — pink status pill, log streaming a successful connection" width="780" />
+  <img src="docs/screenshots/hero.png" alt="Cool Tunnel running in Smart mode" width="780" />
+-->
 
 </div>
 
@@ -90,8 +88,8 @@ Designed so a non-technical user can finish in one sitting.
 ### Step 1 — Download the latest `.dmg` 📥
 
 Go to **[github.com/coo1white/cool-tunnel/releases/latest][releases]**.
-Pick the latest **`Cool-tunnel-v2.0.x.dmg`** (the page lists the
-current version at the top — currently **v2.0.21**).
+Pick the **`Cool-tunnel-v2.0.x.dmg`** asset — the latest release is
+listed at the top.
 
 ### Step 2 — Drag it into Applications 📂
 
@@ -187,32 +185,21 @@ This is what makes the project boring to attack and reliable in practice.
 | **Anomaly auto-stop** | If `naive` ever binds outside `127.0.0.1`, the engine auto-stops the proxy within one monitor probe (≤5 seconds). |
 | **Log redaction** | Every log line that touches credentials, `Authorization` / `Cookie` headers, or JSON `password` fields is redacted before reaching the live log. |
 
-### What it deliberately does NOT do
-
-- **No sandbox** — the app needs to spawn `naive` and call
-  `networksetup`. App Sandbox would block both. Hardened runtime
-  + ad-hoc-signed binary + audited surfaces are the substitute.
-- **No notarization** — there's no Apple Developer ID behind this
-  project. The right-click → Open dance is the user-side trust gesture.
-- **No cloud, ever** — the only outbound traffic from the app is to
-  GitHub when you click an Update button. Profile changes, log
-  entries, diagnostics — all of it stays local.
-
 ### What it cannot defend against
 
-Honesty matters here:
-- A malicious app running as your macOS user (anything in
-  `~/Library/Application Support/COOL-TUNNEL/` is readable to every
-  process running as you).
+- A malicious app running as your macOS user (`~/Library/Application
+  Support/COOL-TUNNEL/` is readable to any process running as you).
 - Physical access to an unlocked Mac.
-- A compromised NaiveProxy server you point Cool Tunnel at — it can
-  log every request you proxy through it.
-- Bit-flips inside GitHub's CDN during an update of the bundled
-  NaiveProxy. SHA pinning for the Rust core landed in v0.1.7.18;
-  bundled-NaiveProxy SHA pinning is still targeted for a future
-  release.
+- A compromised NaiveProxy server *you* picked — it can log every
+  request you route through it. Pick one you trust, or run your own.
+- Bit-flips inside GitHub's CDN during a bundled-NaiveProxy update
+  (SHA pinning for the Rust core is shipped; bundled-naive pinning
+  is on the roadmap).
 
-The full threat model is in [SECURITY.md](./SECURITY.md).
+No App Sandbox (the app needs `networksetup` and a child process),
+no Apple notarization (no $99 Developer ID). The hardened runtime,
+ad-hoc signature, right-click → Open gesture, and the defences above
+are the substitute. Full threat model in [SECURITY.md](./SECURITY.md).
 
 ---
 
@@ -361,43 +348,17 @@ curl http://127.0.0.1:8787/health
 
 ---
 
-## License — and why that matters to you
+## License & credits
 
-Cool Tunnel is licensed under
-**[Apache-2.0](./LICENSE)**, deliberately:
+Cool Tunnel ships under **[Apache-2.0](./LICENSE)** — chosen for
+its explicit patent grant, which MIT/BSD don't carry. Every release
+is reproducible from public source via `cargo build --locked` +
+`xcodebuild`. Anyone may fork.
 
-- **Open** — every line of source code is on GitHub. You can read
-  it. So can a journalist, a security researcher, anyone else who
-  wants to verify what the app does.
-- **Transparent** — every release is reproducible from the public
-  source via `cargo build --locked` + `xcodebuild`.
-- **Legally vetted** — Apache-2.0 includes an explicit *patent
-  grant* that other permissive licenses (MIT, BSD) lack. If a future
-  patent claim ever surfaces against the underlying technology, the
-  grant protects you, the user, by name.
-- **Forkable** — anyone is free to fork, modify, and redistribute
-  Cool Tunnel under the same license. The community can keep the
-  project alive even if I don't.
+Bundled-component attribution: [NOTICE](./NOTICE).
+Read the [Disclaimer](./Disclaimer.md) before you install.
+Report security issues privately per [SECURITY.md](./SECURITY.md).
 
-> **For users, this means:** the code is open, transparent, and
-> legally vetted for your protection. You're not depending on me
-> staying interested or staying alive. You're depending on the
-> source, which is published and stays published.
-
-Bundled-component attribution lives in [NOTICE](./NOTICE). Read
-the [Disclaimer](./Disclaimer.md) before you install. Report
-security issues privately via the process in
-[SECURITY.md](./SECURITY.md).
-
----
-
-## Thank you
-
-Cool Tunnel wraps the upstream
-[NaiveProxy](https://github.com/klzgrad/naiveproxy) (BSD-3 licensed);
-without that project there'd be nothing to wrap. Apple ships
-Monaco, Helvetica, and SF Pro Rounded with macOS — those three
-fonts do most of the visual work. The rest is careful packaging
-and a small Rust crate.
-
-If Cool Tunnel helps you, that's the whole point.
+Cool Tunnel wraps upstream
+[NaiveProxy](https://github.com/klzgrad/naiveproxy) (BSD-3) — without
+it there would be nothing to wrap. The rest is careful packaging.
