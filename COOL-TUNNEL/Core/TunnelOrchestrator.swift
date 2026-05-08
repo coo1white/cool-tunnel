@@ -1712,14 +1712,25 @@ public final class TunnelOrchestrator {
     /// path to the broader internet is constrained even if the
     /// specific path to their VPS happens to work.
     private func classifyConnectionFailure() async -> ErrorLayer? {
+        // Capture the VPS host string on `@MainActor` BEFORE the
+        // `async let` branches. `selectedProfile` is MainActor-
+        // isolated; reading it from inside a Sendable async closure
+        // is a Swift 6 strict-concurrency error. Pinning to a `let`
+        // here also keeps the host stable across the parallel probes
+        // — a profile-switch mid-classification can't cause one
+        // probe to test against a different server than the other.
+        let vpsHost: String? = {
+            guard let profile = self.selectedProfile else { return nil }
+            // `profile.server` is "host" or "host:port" — strip the
+            // port for the TCP probe; we always test :443 since
+            // that's where NaiveProxy listens.
+            let host = String(profile.server.split(separator: ":").first ?? "")
+            return host.isEmpty ? nil : host
+        }()
+
         async let appleReachable = Self.probeReachability(host: "www.apple.com")
         async let vpsReachable: Bool = {
-            guard let profile = self.selectedProfile else { return false }
-            // `profile.server` is "host" or "host:port" — strip the
-            // port for the TCP probe; we always test :443 since that's
-            // where NaiveProxy listens.
-            let host = String(profile.server.split(separator: ":").first ?? "")
-            guard !host.isEmpty else { return false }
+            guard let host = vpsHost else { return false }
             return await Self.probeReachability(host: host)
         }()
 
@@ -1765,7 +1776,16 @@ public final class TunnelOrchestrator {
         let queue = DispatchQueue(label: "ct.probe.\(host).\(port)", qos: .userInitiated)
 
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            func resumeOnce(_ value: Bool) {
+            // `@Sendable` is required because `resumeOnce` is
+            // captured into both `stateUpdateHandler` (a Sendable
+            // closure on `NWConnection`) and the dispatch-queue
+            // timeout block; Swift 6 strict concurrency rejects
+            // capture of a non-Sendable local function in a
+            // Sendable closure. The body only touches Sendable
+            // state (`NSLock`, the `@unchecked Sendable` flag
+            // box, and the `CheckedContinuation` which is itself
+            // Sendable), so the annotation is sound.
+            @Sendable func resumeOnce(_ value: Bool) {
                 state.lock.lock()
                 defer { state.lock.unlock() }
                 guard !state.resumed else { return }
