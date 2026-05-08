@@ -130,6 +130,20 @@ final class NaiveUpdater {
         default:
             break
         }
+        // **v2.0.27 hotfix (parity with v2.0.24's RustCoreUpdater
+        // self-heal):** if the managed binary at `installedURL` is
+        // gone (deleted by user, lost in Application Support cleanup,
+        // never installed on this Mac, fresh Mac with iCloud-synced
+        // UserDefaults from a previous host), a persisted
+        // `lastInstalledTag` from UserDefaults is stale and points at
+        // nothing. Without this self-heal `tagIsConsideredCurrent`
+        // returns true on the stale tag and the panel says "You're on
+        // the latest version (X)" while the binary is in fact missing
+        // — the same contradictory NG/OK shape RustCoreUpdater hit
+        // until 2.0.24. Same fix.
+        if !FileManager.default.fileExists(atPath: installedURL.path) {
+            lastInstalledTag = nil
+        }
         state = .checking
         do {
             let tag = try await Self.resolveLatestStableTag()
