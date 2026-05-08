@@ -110,10 +110,10 @@ Open `/Applications`, find **Cool Tunnel**, and **right-click → Open**.
 Click **Open** again in the dialog macOS shows you. After that, you
 can open it normally — every time.
 
-> **Why right-click?** Cool Tunnel is signed with my own key, not
-> Apple's $99/year Developer ID. macOS shows a warning the first
-> time it sees that. Right-click → Open is the user-side "I trust
-> this" approval. One-time only.
+> **Why right-click?** Cool Tunnel is signed with our own
+> Developer ID, not Apple's $99/year notarized chain. macOS
+> shows a warning the first time it sees that. Right-click →
+> Open is the user-side "I trust this" approval. One-time only.
 
 ### Step 4 — Fill in your server ✏️
 
