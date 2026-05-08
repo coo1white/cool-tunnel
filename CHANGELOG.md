@@ -9,6 +9,88 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.29] — 2026-05-09 — Deterministic Error Reporting (`ErrorLayer` taxonomy)
+
+> **No more *"Couldn't start Smart Mode"* with no signal whether
+> to check your wifi, your server, or your app.** When a connection
+> fails, the banner chip now pinpoints the broken node — `[Local]`,
+> `[Upstream]`, or `[VPS]` — without the operator having to run
+> `Diag` manually.
+
+Final intelligence layer added to the `v2.0.28` Seamless Recovery
+Protocol. The orchestrator now classifies connection-failure paths
+into one of three layers and renders the verdict as a chip on the
+`HeaderView` error banner. Passive — the classifier only runs on
+failure, never during normal operation; energy posture from the
+v2.0.28 audit is preserved.
+
+### Added
+
+- **`ErrorLayer` enum** — public `Sendable Codable Equatable`,
+  three cases:
+  - `.local` — the issue is on the Mac (`naive` not running, OS
+    firewall, saved credentials wrong).
+  - `.upstream` — the issue is between the Mac and the public
+    internet (ISP, Wi-Fi, captive portal, DNS).
+  - `.vps` — the issue is the user's NaiveProxy server (hostname
+    doesn't resolve, `:443` refuses, daemon rejecting handshake).
+  Carries `diagnosticLabel` (chip text) and `humanExplanation`
+  (used by `Disclaimer.md` § "Reporting issues" + the `Diag`
+  button's transcript export).
+- **`TunnelOrchestrator.lastErrorLayer: ErrorLayer?`** —
+  observable state slot; cleared on successful start / mode-switch.
+- **`TunnelOrchestrator.classifyConnectionFailure()`** — runs
+  two parallel reachability probes (Apple's NCSI endpoint for
+  general upstream + a direct TCP probe to the user's VPS
+  hostname bypassing the system proxy) with a 3-second budget.
+  Decision matrix:
+  | | Apple ✓ | Apple ✗ |
+  |---|---|---|
+  | **VPS ✓** | `.local` | `.upstream`* |
+  | **VPS ✗** | `.vps` | `.upstream` |
+  *Apple unreachable but VPS reachable typically indicates ISP
+  NCSI blocking or a captive portal that lets the user's VPS
+  through; `.upstream` is the most actionable verdict.
+- **`TunnelOrchestrator.recordClassifiedError(_:)`** — async
+  helper that runs the classifier, then records the error with
+  the resulting layer. Used by the connection-failure paths in
+  `startCore` and the wake-recovery branch of `handleSystemDidWake`.
+
+### Changed
+
+- **`recordError(_:layer:)`** signature. Existing call sites
+  unchanged in behaviour — `layer:` defaults to `nil` so plain-text
+  rendering is preserved everywhere except the connection paths.
+- **Wake-recovery path** (`handleSystemDidWake`) now calls
+  `recordClassifiedError` on failure. Pre-2.0.29 the message was
+  *"auto-recovery after sleep failed — click a mode to restart
+  manually."* The chip now provides the actionable node directly
+  (e.g. `[VPS]` after waking onto a network that blocks the
+  operator's server).
+- **`HeaderView.errorBanner`** — renders the layer chip leading
+  the banner message. `nil` layer → no chip, exact pre-2.0.29
+  rendering. Layer present → compact uppercase pill (`LOCAL`,
+  `UPSTREAM`, `VPS`) above the message in the same banner.
+  Accessibility label updated to read *"Error in `<Layer>` layer"*.
+
+### Hardcoded `.local` (no classifier needed)
+
+Three call sites are local-by-construction — running the
+classifier would only confirm what the caller already knows:
+
+- `engine failed to start: …` (orchestrator bootstrap throws)
+- `naive binary unusable / inspection failed` (binary picker)
+- `Critical: …. Auto-stopping.` (anomaly auto-stop)
+
+### Out of scope (deliberate)
+
+- **Microsecond telemetry & persistent Performance HUD** — both
+  rejected as speculative noise per the audit response. Only the
+  `ErrorLayer` taxonomy was authorised for v2.0.29.
+- **Auto-respawn on engine crash** — boundary preserved per the
+  *"system resilience, not unauthorised persistence"* framing
+  from v2.0.28.
+
 ## [2.0.28] — 2026-05-09 — Seamless Recovery Protocol (sleep/wake survival)
 
 > **End of *"click Stop, then restart your mode."*** The system can
