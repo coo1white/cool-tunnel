@@ -1,0 +1,33 @@
+# .github/CODEOWNERS
+#
+# Single-maintainer LTSC project — all paths route to @coo1white.
+# This file's primary purpose isn't review-routing (there's only
+# one reviewer) but to make GitHub render @coo1white as the
+# canonical owner on every file's blame view, and to enable the
+# `require_code_owner_reviews` branch-protection setting if/when
+# the maintainer model expands.
+#
+# Path-specific rules below over-ride the catch-all when added.
+
+# Catch-all: the maintainer is the owner of every path until
+# explicit sub-paths reassign.
+*                                       @coo1white
+
+# Security-relevant surfaces — explicit pin so a future
+# `require_code_owner_reviews: true` flip on `main` cannot let
+# a reviewer with weaker auth (when the project gains a second
+# maintainer) wave through changes to credential-handling,
+# updater logic, or release scripts.
+/COOL-TUNNEL/Persistence/                @coo1white
+/COOL-TUNNEL/SystemIntegration/          @coo1white
+/COOL-TUNNEL/Core/CoreClient.swift       @coo1white
+/COOL-TUNNEL/Core/Subscription*.swift    @coo1white
+/core/src/redaction.rs                   @coo1white
+/core/src/domain/credentials.rs          @coo1white
+/scripts/                                @coo1white
+/.github/                                @coo1white
+/Disclaimer.md                           @coo1white
+/SECURITY.md                             @coo1white
+/SUPPORT.md                              @coo1white
+/LICENSE                                 @coo1white
+/NOTICE                                  @coo1white

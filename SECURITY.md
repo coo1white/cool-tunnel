@@ -99,6 +99,63 @@ into production.
   gap for the engine binary and matches the App self-updater
   posture.
 
+## Anonymity is NOT promised
+
+Cool Tunnel is a **proxy client**, not an **anonymity tool**.
+Forwarding traffic through a server you control hides the
+*destination* from the network in front of you, but it does
+NOT make you anonymous. Specifically, Cool Tunnel does not
+defend against:
+
+- **Server-side logging.** The NaiveProxy server you connect to
+  sees every destination URL, every IP you connect from, every
+  byte volume. If the operator (or anyone with access to the
+  server) is hostile, they have a complete log of your usage.
+  The server is the trust boundary; pick the operator like
+  you'd pick a doctor.
+- **Traffic correlation.** A passive observer with visibility
+  on both sides of the tunnel — your network and the server's
+  network, or two points along the path — can correlate
+  request/response timing and packet sizes to deanonymise the
+  flow. NaiveProxy's HTTP/2 cover-traffic mitigates this against
+  unsophisticated observers; a state-level adversary with
+  bandwidth taps on both endpoints is not in scope.
+- **TLS-fingerprint analysis.** NaiveProxy sends a Chrome-style
+  TLS Client Hello to blend in. This is sufficient against
+  passive DPI but not against active probing or a vendor-specific
+  fingerprint database. Read the upstream
+  [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy)
+  threat model — Cool Tunnel inherits it verbatim.
+- **Endpoint compromise.** A malicious browser extension, a
+  shared user account, or a kernel-level rootkit on your Mac
+  sees the cleartext traffic *before* it reaches Cool Tunnel.
+  Encryption-in-transit doesn't help if the endpoint is
+  compromised.
+- **Bandwidth correlation against video / streaming.** Even
+  with TLS, the bandwidth signature of streaming a specific
+  video at a specific resolution is recognisable to a
+  sufficiently-resourced observer.
+
+If your threat model is "**passive ISP-level censorship that
+blocks specific domains**" — Cool Tunnel does what it says.
+If your threat model is "**state-level adversary actively trying
+to identify and prosecute me**" — Cool Tunnel is not enough on
+its own. Pair with Tor, run on a separate device, vary your
+network path, and be careful about endpoint metadata. Plenty of
+people use it for the first threat model; don't treat the second
+as covered by this software.
+
+## Maintainer key fingerprint
+
+Releases are not yet signed by a maintainer key (deferred —
+ad-hoc binary signing only, see "Apple Developer ID" below).
+A future revision will publish a Sigstore / minisign / GPG
+fingerprint here so users can verify a release artefact was
+authored by the maintainer rather than substituted via a CDN
+takeover. Until then, the trust anchor is "TLS to GitHub +
+SHA-256 manifest pin on `cool-tunnel-core` (per-release)" — see
+the "What runs over the network" section.
+
 ## Apple Developer ID
 
 Cool Tunnel is **not** notarised by Apple — there's no Apple
