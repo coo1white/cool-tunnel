@@ -9,6 +9,41 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.25] — 2026-05-08 (Hotfix: subscription-imported password persists)
+
+Single fix to a silent persistence bug in the subscription-import
+flow. Without this, importing a subscription URL would briefly
+appear to work — the profile fields populated, the success banner
+fired — but the password never reached
+`~/Library/Application Support/COOL-TUNNEL/credentials.json`. On
+the next launch the profile was missing or stripped of credentials,
+forcing the user to re-enter the password by hand.
+
+### Fixed
+
+- **`TunnelOrchestrator.selectedProfile` setter — persist when id
+  not in list.** The setter was update-in-place only:
+  `if let index = profiles.firstIndex { profiles[index] = updated }`.
+  Profiles assigned through `selectedProfile =` whose id wasn't
+  already in `profiles` were silently dropped — `selectedProfileID`
+  advanced to the new id but `profiles` (and therefore
+  `profileStore.save(profiles:)` and the credential store) never
+  saw them. `importFromSubscriptionURL` falls back to
+  `UUID().uuidString` when no profile is selected; that fresh UUID
+  was never in `profiles`, the setter dropped the assignment, and
+  the imported password never persisted. Append-when-not-found
+  makes any value assigned through `selectedProfile =` durable.
+
+### How it broke
+
+Any path that assigns a brand-new `Profile` to `selectedProfile`
+when the existing selection is empty or dangling: subscription
+import (the failure mode users actually hit), and any future flow
+that wants to atomically swap in a freshly-constructed profile.
+Existing call sites — the `ConnectionFormView` field bindings and
+the `addProfile` path — assign profiles already in the array, so
+they were unaffected and remain so post-fix.
+
 ## [2.0.24] — 2026-05-08 (Hotfix: managed-engine self-heal)
 
 Single fix. The Rust Core (engine) panel in Settings could surface
