@@ -1,147 +1,113 @@
 <div align="center">
 
-# Cool Tunnel 🐶
+# Cool Tunnel
 
-### *Open the web. Quietly.*
+**A non-custodial macOS client for borderless, surveillance-resistant communication.**
 
-**A friendly Mac app that gives you private, uncensored internet — using
-traffic that looks indistinguishable from a normal browser visit.**
+*Transparency over profit. Freedom over control.*
 
-[![Latest release](https://img.shields.io/github/v/release/coo1white/cool-tunnel?label=latest&color=ff6b8b)](https://github.com/coo1white/cool-tunnel/releases/latest)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1c5cdc)](./LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/coo1white/cool-tunnel?label=latest)](https://github.com/coo1white/cool-tunnel/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%20Sonoma%2B-blue)](#compatibility)
 [![CI](https://github.com/coo1white/cool-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/coo1white/cool-tunnel/actions/workflows/ci.yml)
 [![Engine: Rust](https://img.shields.io/badge/engine-Rust-orange)](./core)
 [![Universal binary](https://img.shields.io/badge/Mac-Apple%20Silicon%20%2B%20Intel-success)](#compatibility)
 
-<!--
-  VISUAL ANCHOR — drop a 1200×750 PNG (2x retina) at
-  docs/screenshots/hero.png and uncomment the <img> below.
-  Header pill pink-active, mode chips, log scrolling.
-
-  <img src="docs/screenshots/hero.png" alt="Cool Tunnel running in Smart mode" width="780" />
--->
-
 </div>
 
 ---
 
-> **Read this first.** Cool Tunnel is a tool for getting around
-> internet blocks. The [Disclaimer](./Disclaimer.md) covers what
-> it is for, what it is *not* for, and the rules you should know
-> before you use it. By installing, you agree you've read it.
+## ⚖️ Manifesto
+
+Digital borders are policy, not topology. Surveillance is a posture, not an inevitability. Cool Tunnel exists because the right to private, undirected communication is older than the networks that mediate it.
+
+We do not run a service. We publish a tool, sign no certificate of trust, host no user state, and operate no fleet. The user is sovereign. The protocol is the only authority.
+
+> **Read this first.** This software has the technical capability to circumvent network restrictions. The [Disclaimer](./Disclaimer.md) covers what it is for, what it is not for, and the rules you should know before installing. By installing, you agree you have read it.
 
 ---
 
-## Why Cool Tunnel?
+## ⚓ The Covenant — AGPL-3.0-only as Stewardship
 
-There are dozens of tools that promise "private internet." Most ask you
-to trust a logo, a server somewhere, or a subscription page. Cool Tunnel
-is different on three things that matter:
+This software ships under the **GNU Affero General Public License v3, no-or-later qualifier (AGPL-3.0-only)**. Copyright © 2026 coolwhite LLC. The covenant is precise:
 
-**1. The connection actually looks normal.**
-Most circumvention tools leave a fingerprint — a TLS shape, a packet
-size pattern, a port number — that a moderately funded censor can spot.
-Cool Tunnel uses [NaiveProxy](https://github.com/klzgrad/naiveproxy),
-which makes your traffic look identical to Chrome talking to a regular
-HTTPS website. There's nothing to spot.
+| You may | You must |
+|---|---|
+| Use, study, modify, redistribute the source | Preserve the licence and source-availability |
+| Run private modifications without disclosure | (no obligation while the modification stays private) |
+| Operate a modified version as a network service | Publish those modifications under AGPL-3.0 |
+| Sell, package, or vendor the source | Preserve the licence; charge for service, not the gift |
 
-**2. The code is on your computer, not a service.**
-Cool Tunnel is a `.app` you install. Your password lives in a file
-*on your disk* (mode 0600 — only your user can read it). Nothing is
-sent to a third party. There is no account, no telemetry, no cloud
-sync. If you delete the app, the only thing left is what you put in
-your own NaiveProxy server.
-
-**3. You can audit every line.**
-The whole project — the Swift app, the Rust engine, the build
-scripts — is on GitHub under [AGPL-3.0-only](./LICENSE). You don't have
-to take anyone's word for what it does. You can read it. So can a
-journalist, a security researcher, or anyone else who wants to verify.
-
-> **The philosophy:**
-> *Security as the foundation. Performance as the ballast.*
-> Both are written into the code; neither was added later.
+The covenant is not a fence. It is the guarantee that no future hand can take this code from the commons. Every release tagged on or before `v2.0.25` was distributed under Apache-2.0 and remains available under that licence to anyone who downloaded it; AGPL-3.0-only applies prospectively from `v2.0.26`.
 
 ---
 
-## What you actually get (no jargon)
+## 🛡️ Heng — Constancy over Feature Velocity
 
-| What it says under the hood | What that means for you |
+Roadmaps invite scope creep. We practise *Heng* — constancy. Releases ship on what we cannot leave in the field, not on what we could demonstrate at a keynote.
+
+| What we ship on | What we do not ship on |
+|---|---|
+| Reproducibility regressions | Marketing dates |
+| Operator-reported defects | Influencer roadmaps |
+| Audit-cycle findings | Feature-velocity targets |
+| Upstream protocol drift | "Innovation theatre" |
+
+Each release is a fix or an architectural correction. Each release is reproducible from public source via `cargo build --locked` + `xcodebuild`. Every prior release remains downloadable and independently buildable.
+
+---
+
+## Protocol is Truth
+
+We do not ask for trust. We make trust unnecessary.
+
+| Property | Mechanism |
+|---|---|
+| Indistinguishable transport | NaiveProxy traffic is the wire-shape of Chrome talking to a regular HTTPS site. No fingerprint a network observer can attribute to the proxy class. |
+| No central authority | No telemetry, no identity service, no key registry. The connection is a function of *your* server and *your* credentials. |
+| Reproducible binary | Every release is buildable bit-for-bit from public source. The signed `.app` corresponds to a public commit. |
+| Pinned updates | The in-app updater verifies SHA-256 against a published manifest before adopting any new binary. |
+| Hardened runtime + ad-hoc signature | Library-injection blocked at runtime; the App is signed with our own key (no Apple Developer subscription required for the project to ship). |
+
+The protocol is the contract. The contract is verifiable. We are not asking for your trust; we are showing you our work.
+
+---
+
+## ⚡ Quick Start
+
+A non-technical user can finish in one sitting.
+
+### Step 1 — Download the latest `.dmg`
+
+Go to **[github.com/coo1white/cool-tunnel/releases/latest][releases]**. Pick the **`Cool-tunnel-v2.0.x.dmg`** asset.
+
+### Step 2 — Drag into Applications
+
+Double-click the `.dmg`. Drag the Cool Tunnel icon onto the **Applications** folder shortcut.
+
+### Step 3 — First launch (one-time approval)
+
+Open `/Applications`, find **Cool Tunnel**, and **right-click → Open**. Click **Open** in the dialog macOS shows. After that, normal launch every time. Required because the app is signed with our key, not Apple's $99-per-year Developer ID — the right-click gesture is the user-side trust acknowledgement.
+
+### Step 4 — Configure your server
+
+You need a NaiveProxy server somewhere on the internet. Fill in the address, username, and password. Leave **Local Port** at `1080` unless you have a reason. Without a server: spin one up via [`coo1white/cool-tunnel-server`](https://github.com/coo1white/cool-tunnel-server) — Debian + Docker, ~15 minutes.
+
+### Step 5 — Pick a mode
+
+| Mode | When |
 | --- | --- |
-| **Built in [Rust](https://www.rust-lang.org/)** (the engine) | Memory-safe by design. Won't crash your Mac. Won't leak your password into the wrong place because some pointer was misused. The whole class of bugs that takes down other privacy tools is structurally impossible here. |
-| **[NaiveProxy](https://github.com/klzgrad/naiveproxy) protocol** | Your encrypted traffic *literally* looks like a normal Chrome browser visiting a normal HTTPS website. Censorship systems that block "VPN-shaped" packets cannot identify it as anything to block. |
-| **[Axum](https://github.com/tokio-rs/axum) + [Tokio](https://tokio.rs/) async runtime** | The engine handles thousands of small connections at once without slowing your Mac down. The whole proxy uses about 30 MB of memory while it's running — less than a single browser tab. |
-| **Universal binary** | One `.app` file that works on every Mac since 2018 — Apple Silicon (M1/M2/M3/M4) AND older Intel models. No "wrong build for your chip" mistake possible. |
-| **Hardened runtime + ad-hoc signed** | macOS knows the app hasn't been tampered with since I built it. Library injection by other software is blocked at runtime. |
-| **No accounts, no telemetry, no cloud** | Cool Tunnel never phones home. The only outbound traffic from the app itself is to GitHub when *you* click "Check for Updates." |
+| **Smart** | Most of the time. Routes blocked sites through your server, lets local sites skip the proxy for speed. |
+| **Global** | Maximum privacy — every TCP connection through your server. |
+| **Local** | Listens on `127.0.0.1:1080` without altering system network settings. For pointing one specific app at the proxy. |
 
----
-
-## ⚡ 5-Minute Quick Start
-
-Designed so a non-technical user can finish in one sitting.
-
-> **Recommended path** for most people: download the prebuilt `.dmg`
-> below. No terminal. No `cargo build`. No "open Xcode and pray."
-
-### Step 1 — Download the latest `.dmg` 📥
-
-Go to **[github.com/coo1white/cool-tunnel/releases/latest][releases]**.
-Pick the **`Cool-tunnel-v2.0.x.dmg`** asset — the latest release is
-listed at the top.
-
-### Step 2 — Drag it into Applications 📂
-
-Double-click the `.dmg`. A Finder window opens with a Cool Tunnel
-icon and an **Applications** folder shortcut. Drag the icon onto
-the shortcut.
-
-> **Why .dmg and not .pkg?** The .dmg is recommended because the
-> drag-install preserves your user's ownership of the bundle —
-> `.app` files installed via the `.pkg` route are owned by `root`
-> and the in-app updater can't replace them without admin
-> elevation. Both flavours work; the .dmg path keeps self-update
-> friction-free.
-
-### Step 3 — First launch (one-time approval) 🔑
-
-Open `/Applications`, find **Cool Tunnel**, and **right-click → Open**.
-Click **Open** again in the dialog macOS shows you. After that, you
-can open it normally — every time.
-
-> **Why right-click?** Cool Tunnel is signed with our own
-> Developer ID, not Apple's $99/year notarized chain. macOS
-> shows a warning the first time it sees that. Right-click →
-> Open is the user-side "I trust this" approval. One-time only.
-
-### Step 4 — Fill in your server ✏️
-
-You need a NaiveProxy server somewhere on the internet. If you have
-one, type its address, your username, and your password into the
-form. Leave **Local Port** at `1080` unless you have a reason.
-
-> **Don't have a server yet?** Spin one up in 15 minutes following
-> [NaiveProxy_Server_Setup.md](./NaiveProxy_Server_Setup.md). It walks
-> through a Debian server with Caddy.
-
-### Step 5 — Click a mode 🚀
-
-| Click... | When |
-| --- | --- |
-| **Smart** | Most of the time. Routes blocked sites through your server, lets local sites (Chinese, Korean, etc.) skip the proxy for speed. |
-| **Global** | Maximum privacy — every TCP connection routes through your server. |
-| **Local** | The proxy listens on `127.0.0.1:1080` but doesn't change your system network settings. Useful for pointing one specific app at it. |
-
-The status pill at the top of the window will turn pink and start
-pulsing — that means it's working. Open your browser and try a
-blocked site.
+Status pill at the top turns pink and pulses; that means it is working.
 
 [releases]: https://github.com/coo1white/cool-tunnel/releases/latest
 
 ---
 
-## How it works (one picture)
+## How it works
 
 ```
 ┌─────────────────────┐
@@ -152,147 +118,63 @@ blocked site.
           ▼
 ┌─────────────────────┐
 │  Your NaiveProxy    │
-│  server somewhere   │  ← you set this up
+│  server somewhere   │  ← you run this
 └─────────┬───────────┘
           │  the actual website request
           ▼
 ┌─────────────────────┐
-│  google.com /       │
 │  any-website.com    │
 └─────────────────────┘
 ```
 
-A network observer between you and your server only sees the **top
-arrow** — encrypted traffic indistinguishable from every other HTTPS
-request on the internet. Your server (which you control) does the
-routing on your behalf.
+A network observer between you and your server sees only the top arrow — encrypted traffic indistinguishable from any other HTTPS request.
 
 ---
 
-## Security & Ethics — the *ballast*
+## Security posture
 
-This is what makes the project boring to attack and reliable in practice.
-
-### What protects you
-
-| Defence | What it does |
+| Control | What it does |
 | --- | --- |
-| **Hardened runtime** | macOS blocks library-injection and runtime tampering against the app process. |
-| **Mode-0600 credentials** | Your NaiveProxy password lives in `~/Library/Application Support/COOL-TUNNEL/credentials.json`, readable only by your user account. Not Keychain (intentional — see [SECURITY.md](./SECURITY.md)). Not UserDefaults. |
-| **SHA-256 update pinning** | When you click "Update Cool Tunnel", the app downloads a SHA-256 manifest separately and refuses to install if the bytes don't match. CDN tampering can't slip a substituted binary past it. |
-| **Trusted-host redirect guard** | All three update flows (app, NaiveProxy, engine) refuse any HTTP redirect that leaves `*.github.com` / `*.githubusercontent.com`. |
-| **Hard-link + symlink-escape rejection** | A malicious .zip can't plant `Resources/foo` as a hard link to `/etc/passwd`. The extraction walker rejects it. |
-| **Anomaly auto-stop** | If `naive` ever binds outside `127.0.0.1`, the engine auto-stops the proxy within one monitor probe (≤5 seconds). |
-| **Log redaction** | Every log line that touches credentials, `Authorization` / `Cookie` headers, or JSON `password` fields is redacted before reaching the live log. |
+| Hardened runtime | macOS blocks library injection and runtime tampering against the app process. |
+| Mode-0600 credentials | NaiveProxy password lives in `~/Library/Application Support/COOL-TUNNEL/credentials.json`, readable only by your user. Not Keychain (intentional — see [SECURITY.md](./SECURITY.md)). |
+| SHA-256 update pinning | The updater downloads a manifest separately and refuses to install if bytes don't match. |
+| Trusted-host redirect guard | All update flows refuse any HTTP redirect that leaves `*.github.com` / `*.githubusercontent.com`. |
+| Hard-link / symlink-escape rejection | A malicious archive cannot plant a hard link to a system file. The extraction walker rejects it. |
+| Anomaly auto-stop | If `naive` ever binds outside `127.0.0.1`, the engine auto-stops the proxy within ≤5 seconds. |
+| Log redaction | Lines touching credentials, `Authorization` / `Cookie` headers, or JSON `password` fields are redacted before reaching the live log. |
 
-### What it cannot defend against
+What we cannot defend against: a malicious app running as your macOS user; physical access to an unlocked Mac; a NaiveProxy server *you* picked that decides to log you. Pick a server you trust or run your own.
 
-- A malicious app running as your macOS user (`~/Library/Application
-  Support/COOL-TUNNEL/` is readable to any process running as you).
-- Physical access to an unlocked Mac.
-- A compromised NaiveProxy server *you* picked — it can log every
-  request you route through it. Pick one you trust, or run your own.
-- Bit-flips inside GitHub's CDN during a bundled-NaiveProxy update
-  (SHA pinning for the Rust core is shipped; bundled-naive pinning
-  is on the roadmap).
-
-No App Sandbox (the app needs `networksetup` and a child process),
-no Apple notarization (no $99 Developer ID). The hardened runtime,
-ad-hoc signature, right-click → Open gesture, and the defences above
-are the substitute. Full threat model in [SECURITY.md](./SECURITY.md).
-
----
-
-## FAQ for Newbies
-
-> **Is this safe?**
-> The app's threat model is published in [SECURITY.md](./SECURITY.md)
-> — read it. The short answer: against a network-level censor between
-> you and your server, yes — the connection is encrypted and shaped
-> like normal HTTPS. Against a malicious server *you* picked, no app
-> can save you. Pick a server you trust (or run your own).
-
-> **Is it free?**
-> Yes. AGPL-3.0 licensed, no paid tier, no premium server, no
-> donation pop-up. The app itself is free; you'll need to pay for a
-> server you control (any Linux VPS at $3–5/month is enough).
-
-> **Do I need a server?**
-> Yes. Cool Tunnel is the *client* part. You set up a NaiveProxy
-> server (or get access to a friend's). The
-> [NaiveProxy_Server_Setup.md](./NaiveProxy_Server_Setup.md) walks
-> through it on Debian + Caddy in about 15 minutes.
-
-> **Will my employer / school / ISP see what I'm doing?**
-> They'll see encrypted HTTPS-looking traffic to your server's IP
-> address. They'll *not* see which sites you're visiting through it.
-> Whether they can correlate the connection with you depends on
-> your local situation; Cool Tunnel doesn't claim anonymity, only
-> traffic-shape indistinguishability.
-
-> **Will it slow my internet down?**
-> About 5–10 ms of added latency for the encryption round-trip,
-> usually invisible. Throughput is bottlenecked by your server's
-> egress bandwidth, not by Cool Tunnel itself. The Rust engine
-> handles many simultaneous connections at <30 MB memory.
-
-> **Can I use this for [BitTorrent / banking / online games]?**
-> Banking — yes, totally fine, end-to-end encryption stays end-to-end.
-> Games — works for most; some games have their own latency-sensitive
-> protocols that don't love proxies. BitTorrent — technically works
-> but is hard on a single-user server; check whether your server's
-> provider allows it before you start seeding.
-
-> **What if my Mac is older than 2018?**
-> macOS 14 Sonoma is the floor. If your Mac runs macOS 14, Cool
-> Tunnel runs. If your Mac stops at macOS 13 or earlier, this isn't
-> the tool for you (and Apple has dropped security support for those
-> macOSes anyway).
-
-> **What happens if I uninstall?**
-> Drag the app to the Trash, then delete
-> `~/Library/Application Support/COOL-TUNNEL/`. That's it. No
-> launch agents, no kernel extensions, no leftover registry. The
-> system proxy settings revert when you click Stop or quit the app.
-
-> **What's the bundled "naive" binary?**
-> The actual NaiveProxy client. We bundle a universal-binary build of
-> [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy) (BSD-3
-> licensed) as `Contents/Resources/naive`. The Settings → Naive Binary
-> → Update button refreshes it from upstream.
+Full threat model: [SECURITY.md](./SECURITY.md).
 
 ---
 
 ## Updating without reinstalling
 
-Open Settings (⚙️ button) and you'll see three **Update** buttons:
+Settings (⚙️) shows three **Update** buttons:
 
 | Update | What it does |
 | --- | --- |
-| **Cool Tunnel → Update** | Downloads the latest version of the app itself, verifies it against a published SHA-256 manifest, and relaunches when ready. |
-| **Naive Binary → Update** | Pulls the latest NaiveProxy from upstream, makes one universal file from the arm64 + x86_64 versions, ad-hoc signs it. |
-| **Rust Core → Update** | Pulls the latest engine binary from the Cool Tunnel release. Takes effect on the next app launch. |
+| Cool Tunnel → Update | Downloads the latest app, verifies SHA-256, relaunches. |
+| Naive Binary → Update | Pulls latest NaiveProxy upstream, lipo-merges arm64 + x86_64, ad-hoc signs. |
+| Rust Core → Update | Pulls the latest engine binary from the Cool Tunnel release. |
 
-All three are one click. No terminal, no recompiling. Each
-validates the URL is on a trusted GitHub-served host and caps the
-download size before adopting the new file.
+All three: one click, no terminal, host-validated, size-capped.
 
 ---
 
-## Where things live on your Mac
+## Where things live
 
 | What | Where |
 | --- | --- |
-| The app itself | `/Applications/Cool Tunnel.app` |
-| Your saved password | `~/Library/Application Support/COOL-TUNNEL/credentials.json` (mode 0600) |
-| The proxy config | `~/Library/Application Support/COOL-TUNNEL/config.json` |
-| Smart-mode routing rules | `~/Library/Application Support/COOL-TUNNEL/smart-proxy.pac` |
-| Updated `naive` (if you clicked Update) | `~/Library/Application Support/COOL-TUNNEL/naive-managed` |
-| Updated engine (if you clicked Update) | `~/Library/Application Support/COOL-TUNNEL/cool-tunnel-core-managed` |
-| Relaunch helper log | `~/Library/Logs/cool-tunnel/relaunch.log` |
+| The app | `/Applications/Cool Tunnel.app` |
+| Saved password | `~/Library/Application Support/COOL-TUNNEL/credentials.json` (mode 0600) |
+| Proxy config | `~/Library/Application Support/COOL-TUNNEL/config.json` |
+| Smart-mode rules | `~/Library/Application Support/COOL-TUNNEL/smart-proxy.pac` |
+| Updated `naive` | `~/Library/Application Support/COOL-TUNNEL/naive-managed` |
+| Updated engine | `~/Library/Application Support/COOL-TUNNEL/cool-tunnel-core-managed` |
 
-To completely uninstall: drag the app to Trash, then delete the
-`~/Library/Application Support/COOL-TUNNEL` folder.
+Uninstall: drag app to Trash, delete `~/Library/Application Support/COOL-TUNNEL/`.
 
 ---
 
@@ -300,79 +182,40 @@ To completely uninstall: drag the app to Trash, then delete the
 
 | Need | Detail |
 | --- | --- |
-| **Mac model** | Any Mac that runs macOS 14 (Apple Silicon, or 2018-or-newer Intel + 2017 iMac Pro) |
-| **macOS** | 14 (Sonoma) or newer |
-| **Disk** | About 45 MB installed |
-| **Memory** | About 30 MB while running |
-| **Admin password** | Never needed |
+| Mac model | Any Mac that runs macOS 14 (Apple Silicon, or 2018+ Intel + 2017 iMac Pro) |
+| macOS | 14 (Sonoma) or newer |
+| Disk | About 45 MB installed |
+| Memory | About 30 MB while running |
+| Admin password | Never required |
 
 ---
 
-## Need help?
+## Community
 
-When something doesn't work, in this order:
+| Action | How |
+| --- | --- |
+| **Contribute** | Open a PR. CI gates the merge: Rust (build + clippy + test), Swift (format lint --strict), ShellCheck. |
+| **Fork** | AGPL-3.0 grants the right; preserve the licence and source-availability under § 13. |
+| **Audit** | Every release passes a synthetic CI gate (`scripts/preflight.sh` + `scripts/security_check.sh`). The full per-release security audit is recorded in `CHANGELOG.md`. |
 
-1. **Check the live log** at the bottom of the window. Most
-   problems explain themselves there.
-2. **Click Diag** while the proxy is running — it sends a test
-   request and prints the timing.
-3. **Click Latency** to measure DNS, connect, TLS, and first-byte
-   timings to a couple of test URLs.
-4. **Open Settings** → **Naive Binary** or **Rust Core** → **Test**
-   to check whichever component you think might be off. Green **OK**
-   = good; red **NG** = the message tells you what to fix.
-5. **Open an [issue](https://github.com/coo1white/cool-tunnel/issues)**
-   — paste the relevant log lines. Credentials are auto-redacted
-   before they reach the log, so it's safe to share.
-
-For security-sensitive issues, please report privately via the
-process in [SECURITY.md](./SECURITY.md).
+Architecture, build steps, contribution guide: [CONTRIBUTING.md](./CONTRIBUTING.md). Long-term support contract: [SUPPORT.md](./SUPPORT.md).
 
 ---
 
-## For developers
+## Enterprise
 
-Architecture, build steps, and contribution guide:
-[CONTRIBUTING.md](./CONTRIBUTING.md). Release-by-release changelog:
-[CHANGELOG.md](./CHANGELOG.md). Security threat model:
-[SECURITY.md](./SECURITY.md). Long-term support contract:
-[SUPPORT.md](./SUPPORT.md).
+The code is free. Time and expertise are the premium tier.
 
-A quick taste — running the engine binary as a server:
+| Engagement | Outcome |
+| --- | --- |
+| Architecture review | Formal third-party assessment of your deployment shape, threat model, and operational runbook. |
+| Consultancy | Non-trivial integrations, custom packaging, security-posture review. |
+| Excellence | Durable engineering judgement on demand. |
 
-```sh
-./cool-tunnel-core --mode server --listen 127.0.0.1:8787
-curl http://127.0.0.1:8787/health
-# → {"status":"ok"}
-```
+For commercial inquiries: open an issue tagged `enterprise:` on this repository.
 
 ---
 
-## License & credits
+<sub>**Jurisdiction:** Wyoming, USA · **Posture:** Non-Custodial · **Philosophy:** AGPL-3.0 Hard-Copyleft · **Steward:** coolwhite LLC</sub>
 
-> **Powered by coolwhite LLC. Open source for freedom; consultancy
-> available for excellence.**
->
-> *This project belongs to the community. coolwhite LLC chooses
-> transparency over profit, and freedom over control.*
-
-Cool Tunnel ships under **[AGPL-3.0-only](./LICENSE)** — copyleft
-with an explicit patent grant. Modified versions distributed in any
-form (binary, source, or run as a network service per AGPL § 13)
-must be released under AGPL-3.0 with source available. Every
-release is reproducible from public source via `cargo build --locked`
-+ `xcodebuild`. Anyone may fork.
-
-Copyright (C) 2026 coolwhite LLC. The licence change to AGPL-3.0
-applies prospectively from the first release tagged after this
-commit; releases tagged on or before `v2.0.25` were distributed
-under Apache-2.0 and remain available under that licence to anyone
-who downloaded them.
-
-Bundled-component attribution: [NOTICE](./NOTICE).
-Read the [Disclaimer](./Disclaimer.md) before you install.
-Report security issues privately per [SECURITY.md](./SECURITY.md).
-
-Cool Tunnel wraps upstream
-[NaiveProxy](https://github.com/klzgrad/naiveproxy) (BSD-3) — without
-it there would be nothing to wrap. The rest is careful packaging.
+<sub>Cool Tunnel wraps upstream [NaiveProxy](https://github.com/klzgrad/naiveproxy) (BSD-3). Without it there would be nothing to wrap. Per-component attribution: [NOTICE](./NOTICE).</sub>
