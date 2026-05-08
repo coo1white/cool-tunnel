@@ -68,6 +68,12 @@ public struct SettingsView: View {
     @Binding public var isShowing: Bool
 
     @State private var newDomain: String = ""
+    /// **v2.0.30 (Defensive Input Logic):** caption surfaced
+    /// inline under the Direct Domains TextField when `addDomain`
+    /// rejects malformed input (scheme prefix, path component,
+    /// non-hostname chars, or already-present in the list).
+    /// Cleared on the next successful add or on next typing.
+    @State private var domainAddError: String?
 
     // -- Naive Binary state
     @State private var binaryPickerError: String?
@@ -147,8 +153,17 @@ public struct SettingsView: View {
                             // typed value — a real workflow
                             // trap).
                             .onSubmit { addDomain() }
+                            // **v2.0.30:** clear the rejection
+                            // caption as soon as the user resumes
+                            // typing — they're trying again.
+                            .onChange(of: newDomain) { _, _ in domainAddError = nil }
                         Button("Add") { addDomain() }
                             .disabled(newDomain.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    if let error = domainAddError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
                     }
                     if orchestrator.settings.directDomains.isEmpty {
                         Text("No direct domains. All traffic will be proxied.")
@@ -1113,14 +1128,56 @@ public struct SettingsView: View {
         .frame(maxHeight: 220)
     }
 
+    /// **v2.0.30 (Defensive Input Logic):** "First Scold, Then
+    /// Do Good" applied to the Direct Domains list.
+    ///
+    /// - **Good Deed:** auto-strip a scheme prefix and path
+    ///   components from a pasted URL, so `https://example.com/x`
+    ///   silently becomes `example.com`. Same `Profile.normaliseServer`
+    ///   helper the Server field uses, so the operator only has
+    ///   to remember one rule.
+    /// - **First Scold:** if the result still isn't a plausible
+    ///   hostname (no dot, leading/trailing dot, illegal chars,
+    ///   or already in the list), surface a precise red caption
+    ///   under the field and refuse the add. Pre-2.0.30 the
+    ///   rejection was silent — the operator clicked Add, the
+    ///   field cleared, and they assumed the add succeeded.
     private func addDomain() {
-        let trimmed =
-            newDomain
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalised =
+            Profile
+            .normaliseServer(newDomain)
             .lowercased()
-        guard !trimmed.isEmpty, !orchestrator.settings.directDomains.contains(trimmed) else { return }
-        orchestrator.settings.directDomains.append(trimmed)
+        guard !normalised.isEmpty else { return }
+        guard isPlausibleDomainShape(normalised) else {
+            domainAddError = "Doesn't look like a domain. Use \"example.com\" shape — no scheme, no path."
+            return
+        }
+        guard !orchestrator.settings.directDomains.contains(normalised) else {
+            domainAddError = "\"\(normalised)\" is already on the list."
+            return
+        }
+        orchestrator.settings.directDomains.append(normalised)
         newDomain = ""
+        domainAddError = nil
+    }
+
+    /// **v2.0.30 (Defensive Input Logic):** loose RFC-1123
+    /// hostname check — labels separated by dots, alphanumerics
+    /// + hyphens, no leading/trailing dot, total ≤ 253 chars,
+    /// must contain at least one dot (rules out single-label
+    /// inputs like "localhost" — those don't belong on a public
+    /// PAC bypass list anyway).
+    private func isPlausibleDomainShape(_ host: String) -> Bool {
+        guard !host.isEmpty,
+            host.count <= 253,
+            !host.hasPrefix("."), !host.hasSuffix("."),
+            host.contains("."),
+            host.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" })
+        else {
+            return false
+        }
+        // No empty labels (e.g. "foo..com").
+        return !host.split(separator: ".").contains(where: \.isEmpty)
     }
 
     /// Opens an `NSOpenPanel`, validates the selected file's code
