@@ -39,6 +39,23 @@ public final class TunnelOrchestrator {
     public var settings: AppSettings = .default
     public private(set) var activeMode: ProxyMode = .stopped
     public private(set) var isRunning: Bool = false
+
+    /// **v2.0.28 (Seamless Recovery Protocol):** live state of the
+    /// system-sleep / wake transition. Drives the `HeaderStatusPill`'s
+    /// transient *"Pausing for sleep…" / "Asleep" / "Recovering after
+    /// wake…"* labels so the user sees the recovery phases instead of
+    /// a stale *"Connected"* or *"Error"* pill while the orchestrator
+    /// is mid-cycle. `.idle` is the steady-state and never observed by
+    /// the user as a pill label — the base `isRunning` / `lastError`
+    /// rendering takes over.
+    public private(set) var sleepWakeState: SleepWakeState = .idle
+
+    /// Snapshot of `activeMode` taken at `handleSystemWillSleep`.
+    /// Re-applied by `handleSystemDidWake` to bring the proxy back
+    /// to the same mode the user was running before the system
+    /// suspended — autonomously, without an operator click.
+    /// Cleared once the wake recovery completes (success or failure).
+    private var modeBeforeSleep: ProxyMode?
     public private(set) var logEntries: [LogEntry] = []
     public private(set) var firewallState: FirewallState = .unknown
     public private(set) var lastDiagnosticReport: DiagnosticReport?
@@ -1263,24 +1280,90 @@ public final class TunnelOrchestrator {
     /// `startCore` catch arm via `recordError`.
     private static let hotSwapLogger = Logger.cooltunnel("HotSwap")
 
-    /// **UX-F#4 (v0.1.7.18):** called by AppDelegate when the
-    /// system wakes from sleep. If the proxy is still nominally
-    /// running, send a probe through it; if the probe fails the
-    /// connection became zombie during sleep (TCP keepalives
-    /// dropped, naive's upstream was reset). Surface a
-    /// `lastError` so the user sees the dead-proxy state in the
-    /// HeaderView banner instead of trusting the still-pink
-    /// status pill.
-    public func handleSystemDidWake() async {
+    /// **F-1 (v2.0.28 — Seamless Recovery Protocol):** called by
+    /// AppDelegate when `NSWorkspace.willSleepNotification` fires.
+    /// Pauses the engine cleanly *before* the system suspends so
+    /// upstream TCP gets closed gracefully and the lsof
+    /// `monitor_loop` stops hammering across the sleep window.
+    /// Pre-v2.0.28 there was no willSleep listener at all — the
+    /// engine kept its state through suspend, hardware NIC dropped
+    /// the upstream connections under it, and the user woke up to
+    /// a "Connected" pill that no longer carried any traffic
+    /// (the "zombie" symptom).
+    ///
+    /// Skips:
+    /// - `.stopped` mode — nothing to pause.
+    /// - `.localOnly` mode — the SOCKS listener on `127.0.0.1` has
+    ///   no upstream TCP that gets dropped by hardware sleep, so
+    ///   there's nothing to recover from on wake.
+    ///
+    /// State machine: `.idle → .pausing → .paused`. The wake
+    /// handler picks up from `.paused` and re-applies
+    /// `modeBeforeSleep`.
+    public func handleSystemWillSleep() async {
         guard isRunning, activeMode != .stopped, activeMode != .localOnly else {
             return
         }
-        appendInfo("system woke from sleep — probing engine health")
+        let snapshotMode = activeMode
+        sleepWakeState = .pausing
+        appendInfo(
+            "system entering sleep — pausing engine to avoid zombie connections after wake")
+        await stop()
+        // `stop()` clears `activeMode` and `isRunning`; we pinned
+        // the pre-sleep mode in `snapshotMode` above so the wake
+        // handler can re-apply it.
+        modeBeforeSleep = snapshotMode
+        sleepWakeState = .paused
+    }
+
+    /// **F-2 (v2.0.28 — Seamless Recovery Protocol):** called by
+    /// AppDelegate when `NSWorkspace.didWakeNotification` fires.
+    /// Two paths:
+    ///
+    /// **Path A — clean checkpoint (preferred).** If `willSleep`
+    /// reached us (so `sleepWakeState == .paused` and
+    /// `modeBeforeSleep` carries the pre-sleep mode), the engine
+    /// is already stopped and we just re-spawn it in the same
+    /// mode. 500 ms cooldown lets the network stack settle (DNS
+    /// TTLs reset, route table sync, Wi-Fi association complete)
+    /// before we ask `naive` to bind upstream again. End state:
+    /// `sleepWakeState = .idle`, mode restored, no operator
+    /// intervention required.
+    ///
+    /// **Path B — missing checkpoint (fallback).** If we somehow
+    /// missed `willSleep` (app launched mid-sleep window, or the
+    /// notification raced after the system already suspended), we
+    /// fall through to the prior probe-only behaviour from
+    /// v0.1.7.18 so we at least surface the zombie state through
+    /// the error banner.
+    public func handleSystemDidWake() async {
+        // Path A — we cleanly paused via willSleep.
+        if sleepWakeState == .paused, let mode = modeBeforeSleep {
+            sleepWakeState = .recovering
+            appendInfo("system woke — recovering engine in \(mode.title) mode")
+            // 500 ms cooldown for the network stack to settle.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            do {
+                try await switchMode(to: mode)
+                sleepWakeState = .idle
+                modeBeforeSleep = nil
+                appendInfo("recovery complete — \(mode.title) restored")
+            } catch {
+                sleepWakeState = .idle
+                modeBeforeSleep = nil
+                recordError(
+                    "auto-recovery after sleep failed — click a mode to restart manually: \(error.localizedDescription)"
+                )
+            }
+            return
+        }
+
+        // Path B — missing checkpoint, fall back to probe-only.
+        guard isRunning, activeMode != .stopped, activeMode != .localOnly else {
+            return
+        }
+        appendInfo("system woke — probing engine health (no pre-sleep checkpoint)")
         do {
-            // Light-touch probe: send a `Ping`-equivalent — the
-            // existing diagnostics is heavier than we need here.
-            // Use the same validate-profile path the start flow
-            // uses; if the engine pipe is dead, this throws.
             guard let profile = selectedProfile else { return }
             _ = try await core.send(.validateProfile(profile))
         } catch {
@@ -1577,6 +1660,43 @@ public final class TunnelOrchestrator {
 /// Errors raised by the orchestrator (separate from engine and OS errors,
 /// which surface as their own types).
 ///
+/// **v2.0.28 (Seamless Recovery Protocol):** finite state machine
+/// for the orchestrator's system-sleep / wake transition. Owned by
+/// `TunnelOrchestrator.sleepWakeState` and read by `HeaderStatusPill`
+/// to render the transient phase labels.
+///
+/// Lifecycle:
+///
+/// ```text
+///                  willSleepNotification
+///   .idle  ─────────────────────────────►  .pausing
+///                                              │ (await stop())
+///                                              ▼
+///                                          .paused
+///                                              │ didWakeNotification
+///                                              ▼
+///                                         .recovering
+///                                              │ (await switchMode(to: modeBeforeSleep))
+///                                              ▼
+///                                            .idle
+/// ```
+///
+/// `.idle` is the steady-state outside sleep transitions; the pill
+/// falls back to the base `isRunning` / `lastError` rendering.
+public enum SleepWakeState: String, Sendable, Codable, Equatable {
+    /// Steady state. No sleep transition in flight.
+    case idle
+    /// `willSleepNotification` fired. `stop()` is in progress;
+    /// engine is being asked to drain cleanly.
+    case pausing
+    /// Engine fully stopped; system is presumably asleep. Waiting
+    /// for `didWakeNotification` to drive the recovery branch.
+    case paused
+    /// `didWakeNotification` fired; the orchestrator is re-spawning
+    /// the engine and reapplying the pre-sleep `ProxyMode`.
+    case recovering
+}
+
 /// **Conforms to `LocalizedError`, not just `Error`.** Without
 /// `LocalizedError`, the `(error as? LocalizedError)?.errorDescription`
 /// cast at the catch sites in `startCore` etc. silently misses

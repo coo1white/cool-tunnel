@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var commandWMonitor: Any?
     private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
 
     /// Set by the SwiftUI scene's `.task` once bootstrap finishes.
     /// `applicationWillTerminate` reads it to perform a clean
@@ -61,6 +62,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor [weak self] in
                 guard let orchestrator = self?.orchestrator else { return }
                 await orchestrator.handleSystemDidWake()
+            }
+        }
+
+        // **F-1 (v2.0.28 — Seamless Recovery Protocol):** complement
+        // the wake observer with a sleep observer so the engine can
+        // pause cleanly *before* the system suspends. Pre-v2.0.28
+        // there was no willSleep listener — engines kept their state
+        // through suspend, hardware NIC dropped upstream connections
+        // under them, and users woke to a "Connected" pill that no
+        // longer carried traffic. The orchestrator's
+        // `handleSystemWillSleep` calls `stop()` and pins the active
+        // mode in `modeBeforeSleep` so `handleSystemDidWake` can
+        // re-spawn the engine autonomously without operator action.
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let orchestrator = self?.orchestrator else { return }
+                await orchestrator.handleSystemWillSleep()
             }
         }
     }
