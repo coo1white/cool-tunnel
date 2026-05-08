@@ -123,6 +123,18 @@ final class RustCoreUpdater {
         default:
             break
         }
+        // **v2.0.24 hotfix:** if the managed binary at `installedURL`
+        // is gone (deleted by user, lost in Application Support
+        // cleanup, never installed on this Mac, etc.), a persisted
+        // `lastInstalledTag` from UserDefaults is stale and points at
+        // nothing. Without this self-heal `tagIsConsideredCurrent`
+        // returns true on the stale tag and the panel says "You're on
+        // the latest version ()." (empty parens because
+        // `currentVersion` is empty pre-Test) while the engine is in
+        // fact missing — the contradictory NG/OK seen in 2.0.23.
+        if !FileManager.default.fileExists(atPath: installedURL.path) {
+            lastInstalledTag = nil
+        }
         state = .checking
         do {
             let resolved = try await Self.resolveLatestAsset()
