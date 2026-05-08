@@ -128,10 +128,21 @@ public struct HeaderView: View {
 public struct HeaderStatusPill: View {
     public let isRunning: Bool
     public let lastError: String?
+    /// **v2.0.28 (Seamless Recovery Protocol):** non-`.idle` values
+    /// take precedence over `isRunning` / `lastError` so the user
+    /// sees the recovery phase explicitly instead of a stale
+    /// *"Connected"* / *"Error"* label while the orchestrator is
+    /// transitioning across a sleep/wake cycle.
+    public let sleepWakeState: SleepWakeState
 
-    public init(isRunning: Bool, lastError: String?) {
+    public init(
+        isRunning: Bool,
+        lastError: String?,
+        sleepWakeState: SleepWakeState = .idle
+    ) {
         self.isRunning = isRunning
         self.lastError = lastError
+        self.sleepWakeState = sleepWakeState
     }
 
     public var body: some View {
@@ -158,12 +169,23 @@ public struct HeaderStatusPill: View {
     }
 
     private var statusTint: Color {
+        switch sleepWakeState {
+        case .pausing, .recovering: return .yellow
+        case .paused: return .secondary
+        case .idle: break
+        }
         if lastError != nil { return .red }
         if isRunning { return .green }
         return .secondary
     }
 
     private var headline: String {
+        switch sleepWakeState {
+        case .pausing: return "Pausing for sleep…"
+        case .paused: return "Asleep"
+        case .recovering: return "Recovering after wake…"
+        case .idle: break
+        }
         if lastError != nil { return "Error" }
         if isRunning { return "Connected" }
         return "Not connected"

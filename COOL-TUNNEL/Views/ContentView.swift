@@ -214,7 +214,8 @@ public struct ContentView: View {
         HStack(spacing: 12) {
             HeaderStatusPill(
                 isRunning: orchestrator.isRunning,
-                lastError: orchestrator.lastError
+                lastError: orchestrator.lastError,
+                sleepWakeState: orchestrator.sleepWakeState
             )
             // Flexible gap so the status pill hugs leading and
             // the controls cluster centre-trailing. `minLength`

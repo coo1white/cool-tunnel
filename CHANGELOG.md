@@ -9,6 +9,86 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.28] — 2026-05-09 — Seamless Recovery Protocol (sleep/wake survival)
+
+> **End of *"click Stop, then restart your mode."*** The system can
+> now sleep, the laptop can close, the network can vanish — when the
+> machine comes back, the proxy is already running again.
+
+Three wired fixes covering the F-1 / F-2 / F-4 audit findings.
+Pre-v2.0.28 the orchestrator only listened for `didWakeNotification`;
+on wake it sent one probe and, if the probe failed, surfaced
+*"connection became unresponsive while system slept — click Stop,
+then restart your mode"* and waited for the operator to act. The
+audit also surfaced that the lsof-based `monitor_loop` ran every 5 s
+across the entire sleep window even though no hardware state could
+change. This release closes both gaps with one cohesive recovery
+protocol.
+
+### Added
+
+- **`willSleepNotification` listener (F-1).** A new `sleepObserver`
+  in `AppDelegate` subscribes to `NSWorkspace.willSleepNotification`
+  and routes it into `TunnelOrchestrator.handleSystemWillSleep()`.
+  The orchestrator pins the active mode in `modeBeforeSleep`, flips
+  `sleepWakeState = .pausing`, and calls `stop()` to drain cleanly
+  *before* the system suspends. Local-only mode is exempt — its
+  SOCKS listener has no upstream TCP to lose during sleep.
+- **Autonomous wake recovery (F-2).** `handleSystemDidWake()` is
+  rewritten with two paths:
+  - **Path A — clean checkpoint (preferred).** If `sleepWakeState
+    == .paused` and `modeBeforeSleep` is set, the orchestrator
+    flips to `.recovering`, waits 500 ms for the network stack to
+    settle (DNS TTLs reset, route table sync, Wi-Fi association
+    complete), then re-applies the prior mode via `switchMode(to:)`.
+    End state: `.idle`, mode restored, no operator click.
+  - **Path B — missing checkpoint (fallback).** If we somehow
+    missed `willSleep` (app launched mid-sleep, or notification
+    raced the suspend), fall through to the prior probe-only
+    behaviour from v0.1.7.18 so the zombie state still surfaces.
+- **`SleepWakeState` enum.** Public `Sendable Codable` finite-state-
+  machine type owned by the orchestrator: `.idle / .pausing /
+  .paused / .recovering`. Drives the new pill labels below.
+
+### Changed
+
+- **`HeaderStatusPill` renders the recovery phases (F-2).** New
+  `sleepWakeState:` parameter (default `.idle` — old call sites
+  unchanged in behaviour). Non-`.idle` values take precedence
+  over `isRunning` / `lastError`:
+  | State | Pill colour | Pill text |
+  | --- | --- | --- |
+  | `.pausing` | amber | *Pausing for sleep…* |
+  | `.paused` | secondary | *Asleep* |
+  | `.recovering` | amber | *Recovering after wake…* |
+  Steady-state rendering (`.idle`) is unchanged.
+
+### Performance / Energy
+
+- **`monitor_loop` is now intelligent (F-4).** The 5-second lsof
+  cadence in the Rust core was unconditional pre-v2.0.28; it ran
+  through every system suspend. Because `handleSystemWillSleep`
+  now calls `stop()` (which terminates the engine subprocess
+  cleanly), the supervised PID is gone for the duration of the
+  sleep window and `monitor_loop` exits naturally on its own
+  *"supervised process gone"* check. No new protocol surface, no
+  pause/resume RPC — the existing subprocess-lifecycle gate does
+  the right thing once the engine actually shuts down on sleep.
+  Net effect: zero lsof invocations during system sleep,
+  vs. one every 5 seconds pre-fix.
+
+### Out of scope (deliberate)
+
+- **Auto-respawn on engine crash (F-3).** Maintained the existing
+  boundary: if the user explicitly stops the engine it stays
+  stopped. The recovery protocol shipped here is system-resilience
+  scoped, not unauthorised-persistence scoped.
+- **Window-occluded conditional cadence.** Behaviour change for the
+  foreground-but-occluded case is a UX call deferred until evidence
+  surfaces.
+- **Memory tightening (F-7 / F-8 / F-9).** Audit confirmed the
+  existing discipline; speculative tightening is off the table.
+
 ## [2.0.27] — 2026-05-09 (Hotfix: NaiveUpdater self-heals stale lastInstalledTag)
 
 Single-line behaviour fix in `NaiveUpdater`. Mirrors the v2.0.24
