@@ -1941,6 +1941,182 @@ public final class TunnelOrchestrator {
         lastErrorLayer = nil
     }
 
+    // MARK: - Declarative UI schema
+
+    /// Pure projection from mutable orchestrator fields to the
+    /// structured state SwiftUI renders.
+    ///
+    /// **Heng / Silent Operator invariant:** this is the public map
+    /// of what the UI is allowed to know. Keep operational recovery
+    /// policy in the orchestrator, and keep views as pure functions
+    /// of this value plus local UI draft state. Future AI-led edits
+    /// should extend this schema before reaching directly into
+    /// lifecycle internals from a leaf view.
+    public func viewState(
+        ui: CoolTunnelUIState = CoolTunnelUIState()
+    ) -> CoolTunnelViewState {
+        let error: CoolTunnelViewState.ErrorBanner? =
+            lastError.flatMap { message in
+                message.isEmpty
+                    ? nil
+                    : CoolTunnelViewState.ErrorBanner(
+                        message: message,
+                        layer: lastErrorLayer
+                    )
+            }
+        let hasSelectedProfile = selectedProfile != nil
+        let selectedProfileIsStartable = selectedProfile?.isStartable ?? false
+        let connection = CoolTunnelViewState.Connection(
+            isRunning: isRunning,
+            activeMode: activeMode,
+            sleepWakeState: sleepWakeState,
+            firewallState: firewallState,
+            error: error
+        )
+        let controlPanel = CoolTunnelViewState.ControlPanel(
+            isRunning: isRunning,
+            activeMode: activeMode,
+            hasSelectedProfile: hasSelectedProfile,
+            selectedProfileIsStartable: selectedProfileIsStartable
+        )
+        return CoolTunnelViewState(
+            ui: ui,
+            connection: connection,
+            header: CoolTunnelViewState.Header(
+                statusPill: Self.statusPill(
+                    isRunning: isRunning,
+                    lastError: error?.message,
+                    sleepWakeState: sleepWakeState
+                ),
+                errorBanner: error,
+                showsFirewallBadge: firewallState == .enabled
+            ),
+            controlPanel: controlPanel,
+            menuBar: CoolTunnelViewState.MenuBar(
+                statusLine: Self.menuBarStatusLine(
+                    error: error?.message,
+                    isRunning: isRunning,
+                    activeMode: activeMode
+                ),
+                symbolName: Self.menuBarSymbol(
+                    hasError: error != nil,
+                    isRunning: isRunning
+                ),
+                isRunning: isRunning,
+                activeMode: activeMode,
+                hasSelectedProfile: hasSelectedProfile
+            ),
+            profiles: CoolTunnelViewState.Profiles(
+                all: profiles,
+                selectedID: selectedProfileID,
+                selected: selectedProfile
+            ),
+            activityLog: CoolTunnelViewState.ActivityLog(entries: logEntries),
+            diagnostics: CoolTunnelViewState.Diagnostics(
+                lastDiagnosticReport: lastDiagnosticReport,
+                lastLatencyReport: lastLatencyReport
+            ),
+            settings: settings,
+            resources: CoolTunnelViewState.Resources(
+                activeNaiveDescriptor: activeNaiveDescriptor
+            )
+        )
+    }
+
+    /// Applies an explicit UI intent. This is the only imperative
+    /// bridge the SwiftUI composition root needs for tunnel controls.
+    ///
+    /// Leaf views should emit `TunnelIntent` instead of invoking
+    /// `start`, `stop`, diagnostics, or log mutation directly. That
+    /// preserves the Silent Operator design: screens describe operator
+    /// intent, while this layer decides the quietest safe operational
+    /// action.
+    public func perform(_ intent: TunnelIntent) async {
+        switch intent {
+        case .switchMode(let mode):
+            do {
+                try await switchMode(to: mode)
+            } catch {
+                Self.uiIntentLogger.error(
+                    "mode intent \(mode.rawValue, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        case .toggleRunning(let preferredMode):
+            let target: ProxyMode = isRunning ? .stopped : preferredMode
+            do {
+                try await switchMode(to: target)
+            } catch {
+                Self.uiIntentLogger.error(
+                    "toggle intent target=\(target.rawValue, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        case .runDiagnostics:
+            await runDiagnostics()
+        case .runLatencyTest(let mode):
+            await runLatencyTest(mode: mode)
+        case .dismissError:
+            dismissLastError()
+        case .clearLogs:
+            clearLogs()
+        }
+    }
+
+    private static func statusPill(
+        isRunning: Bool,
+        lastError: String?,
+        sleepWakeState: SleepWakeState
+    ) -> CoolTunnelViewState.StatusPill {
+        switch sleepWakeState {
+        case .pausing:
+            return CoolTunnelViewState.StatusPill(
+                headline: "Pausing for sleep…",
+                tint: .yellow
+            )
+        case .paused:
+            return CoolTunnelViewState.StatusPill(
+                headline: "Asleep",
+                tint: .secondary
+            )
+        case .recovering:
+            return CoolTunnelViewState.StatusPill(
+                headline: "Recovering after wake…",
+                tint: .yellow
+            )
+        case .idle:
+            break
+        }
+        if lastError != nil {
+            return CoolTunnelViewState.StatusPill(headline: "Error", tint: .red)
+        }
+        if isRunning {
+            return CoolTunnelViewState.StatusPill(headline: "Connected", tint: .green)
+        }
+        return CoolTunnelViewState.StatusPill(headline: "Not connected", tint: .secondary)
+    }
+
+    private static func menuBarStatusLine(
+        error: String?,
+        isRunning: Bool,
+        activeMode: ProxyMode
+    ) -> String {
+        if let error, !error.isEmpty {
+            return "Error · \(error)"
+        }
+        if isRunning {
+            return "Active · \(activeMode.title)"
+        }
+        return "Idle"
+    }
+
+    private static func menuBarSymbol(hasError: Bool, isRunning: Bool) -> String {
+        if hasError {
+            return "exclamationmark.triangle.fill"
+        }
+        return isRunning ? "arrow.up.right.circle.fill" : "arrow.up.right.circle"
+    }
+
+    private static let uiIntentLogger = Logger.cooltunnel("UI.Intent")
+
     private func parsePort(_ raw: String) throws -> UInt16 {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = UInt16(trimmed), port > 0 else {

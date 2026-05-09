@@ -56,8 +56,11 @@ public struct LogConsoleView: View {
     /// to File… menu item.
     @State private var isExporting: Bool = false
     @State private var lastAutoScroll: ContinuousClock.Instant = .now
+    public let onIntent: (TunnelIntent) -> Void
 
-    public init() {}
+    public init(onIntent: @escaping (TunnelIntent) -> Void = { _ in }) {
+        self.onIntent = onIntent
+    }
 
     /// Animations run only when both the hardware tier permits
     /// it AND the user hasn't asked the system to reduce motion.
@@ -242,7 +245,7 @@ public struct LogConsoleView: View {
             Divider()
 
             Button("Clear", role: .destructive) {
-                orchestrator.clearLogs()
+                onIntent(.clearLogs)
             }
             .disabled(orchestrator.logEntries.isEmpty)
         } label: {

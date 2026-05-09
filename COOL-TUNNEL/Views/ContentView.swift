@@ -32,20 +32,25 @@ import SwiftUI
 public struct ContentView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
     @State private var isShowingSettings = false
+    /// Local draft state that belongs to SwiftUI, not the engine.
+    /// It becomes part of `CoolTunnelUIState` before rendering so
+    /// the full screen still has one explicit schema.
+    @State private var pendingMode: ProxyMode = .smart
 
     public init() {}
 
     public var body: some View {
+        let state = viewState
         ZStack {
             // Always render the main stack underneath. When Settings
             // is shown it sits on top with its own opaque background;
             // doing it this way keeps the window background animation
             // continuous instead of restarting on every panel swap.
-            mainStack
-                .opacity(isShowingSettings ? 0 : 1)
-                .allowsHitTesting(!isShowingSettings)
+            mainStack(state: state)
+                .opacity(state.ui.isShowingSettings ? 0 : 1)
+                .allowsHitTesting(!state.ui.isShowingSettings)
 
-            if isShowingSettings {
+            if state.ui.isShowingSettings {
                 // Inline Settings panel. Cmd+W and the Back button
                 // both flip `isShowingSettings = false`; the
                 // AppDelegate's window-hide handling on Cmd+W is
@@ -92,6 +97,25 @@ public struct ContentView: View {
         }
     }
 
+    /// Single SwiftUI-facing schema for this render pass.
+    ///
+    /// **Heng / Silent Operator invariant:** every child view below
+    /// renders from this value and emits `TunnelIntent`; hidden
+    /// operational side effects stay in the orchestrator. This is the
+    /// shape future AI-led refactors should preserve.
+    private var viewState: CoolTunnelViewState {
+        orchestrator.viewState(
+            ui: CoolTunnelUIState(
+                isShowingSettings: isShowingSettings,
+                pendingMode: pendingMode
+            )
+        )
+    }
+
+    private func send(_ intent: TunnelIntent) {
+        Task { await orchestrator.perform(intent) }
+    }
+
     /// **v2.0.8:** apply an AppearanceMode at the AppKit level
     /// by setting `NSApp.appearance`. Cocoa propagates the
     /// resolved appearance to every NSWindow (including the
@@ -117,7 +141,7 @@ public struct ContentView: View {
         NSApp.appearance = appearance
     }
 
-    private var mainStack: some View {
+    private func mainStack(state: CoolTunnelViewState) -> some View {
         // **v2.0.6:** the four panes used to live in a single
         // `VStack`. Live log had `frame(minHeight: 220)` but no
         // upper bound, so on a tall window it ate every extra
@@ -155,7 +179,7 @@ public struct ContentView: View {
                 // the title-bar area collapses from three rows
                 // of chrome to one, plus the optional error
                 // banner below.
-                mergedHeaderRow
+                mergedHeaderRow(state: state)
 
                 // Error banner under the merged row when an
                 // engine error is live. HeaderView is now
@@ -163,12 +187,11 @@ public struct ContentView: View {
                 // when there's no error its body is an empty
                 // view and contributes zero height.
                 HeaderView(
-                    lastError: orchestrator.lastError,
-                    lastErrorLayer: orchestrator.lastErrorLayer,
-                    onDismissError: { orchestrator.dismissLastError() }
+                    state: state.header,
+                    onIntent: send
                 )
                 .padding(.horizontal, 20)
-                .padding(.bottom, orchestrator.lastError == nil ? 0 : 8)
+                .padding(.bottom, state.header.errorBanner == nil ? 0 : 8)
 
                 ConnectionFormView()
             }
@@ -183,7 +206,7 @@ public struct ContentView: View {
             .frame(minHeight: 320)
 
             // --- Bottom pane: live log ---
-            LogConsoleView()
+            LogConsoleView(onIntent: send)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
                 .padding(.top, 8)
@@ -211,12 +234,10 @@ public struct ContentView: View {
     /// before the buttons do, then the picker shrinks before
     /// the firewall pill drops its label — same priority order
     /// the system uses for toolbar items.
-    private var mergedHeaderRow: some View {
+    private func mergedHeaderRow(state: CoolTunnelViewState) -> some View {
         HStack(spacing: 12) {
             HeaderStatusPill(
-                isRunning: orchestrator.isRunning,
-                lastError: orchestrator.lastError,
-                sleepWakeState: orchestrator.sleepWakeState
+                state: state.header.statusPill
             )
             // Flexible gap so the status pill hugs leading and
             // the controls cluster centre-trailing. `minLength`
@@ -225,11 +246,14 @@ public struct ContentView: View {
             Spacer(minLength: 16)
 
             ControlPanelView(
-                isShowingSettings: $isShowingSettings
+                state: state.controlPanel,
+                pendingMode: $pendingMode,
+                isShowingSettings: $isShowingSettings,
+                onIntent: send
             )
             .layoutPriority(1)
 
-            if orchestrator.firewallState == .enabled {
+            if state.header.showsFirewallBadge {
                 FirewallBadge()
             }
         }
