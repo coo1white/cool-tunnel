@@ -60,6 +60,7 @@ public struct CoolTunnelViewState: Sendable, Equatable {
     public var profiles: Profiles
     public var activityLog: ActivityLog
     public var diagnostics: Diagnostics
+    public var developer: Developer
     public var settings: AppSettings
     public var resources: Resources
 
@@ -72,6 +73,7 @@ public struct CoolTunnelViewState: Sendable, Equatable {
         profiles: Profiles,
         activityLog: ActivityLog,
         diagnostics: Diagnostics,
+        developer: Developer,
         settings: AppSettings,
         resources: Resources
     ) {
@@ -83,6 +85,7 @@ public struct CoolTunnelViewState: Sendable, Equatable {
         self.profiles = profiles
         self.activityLog = activityLog
         self.diagnostics = diagnostics
+        self.developer = developer
         self.settings = settings
         self.resources = resources
     }
@@ -115,8 +118,8 @@ extension CoolTunnelViewState {
     }
 
     /// Error-banner payload. `layer` is optional because some failures
-    /// are operational rather than classifiable as Local / Upstream /
-    /// VPS.
+    /// are operational rather than classifiable as ISP / VPS /
+    /// Local Kernel.
     public struct ErrorBanner: Sendable, Equatable {
         public var message: String
         public var layer: ErrorLayer?
@@ -286,6 +289,14 @@ extension CoolTunnelViewState {
         ) {
             self.lastDiagnosticReport = lastDiagnosticReport
             self.lastLatencyReport = lastLatencyReport
+        }
+    }
+
+    public struct Developer: Sendable, Equatable {
+        public var metrics: DeveloperMetrics
+
+        public init(metrics: DeveloperMetrics) {
+            self.metrics = metrics
         }
     }
 

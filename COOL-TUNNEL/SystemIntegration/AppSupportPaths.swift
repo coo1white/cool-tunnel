@@ -18,6 +18,8 @@ public struct AppSupportPaths: Sendable {
     public let configFile: URL
     /// Smart-routing PAC file path referenced by `networksetup`.
     public let pacFile: URL
+    /// JSONL lifecycle telemetry written by the macOS client.
+    public let lifecycleTelemetryFile: URL
 
     public init() throws {
         let base = try FileManager.default.url(
@@ -58,6 +60,10 @@ public struct AppSupportPaths: Sendable {
         self.supportDirectory = support
         self.configFile = support.appendingPathComponent("config.json", isDirectory: false)
         self.pacFile = support.appendingPathComponent("smart-proxy.pac", isDirectory: false)
+        self.lifecycleTelemetryFile = support.appendingPathComponent(
+            "lifecycle-telemetry.jsonl",
+            isDirectory: false
+        )
     }
 
     /// Memberwise initialiser used by [`fallback`] when the real
@@ -67,6 +73,10 @@ public struct AppSupportPaths: Sendable {
         self.supportDirectory = supportDirectory
         self.configFile = configFile
         self.pacFile = pacFile
+        self.lifecycleTelemetryFile = supportDirectory.appendingPathComponent(
+            "lifecycle-telemetry.jsonl",
+            isDirectory: false
+        )
     }
 
     /// Degraded-mode paths rooted in a per-process temporary
