@@ -55,6 +55,7 @@ public struct LogConsoleView: View {
     /// Drives the `.fileExporter` sheet; flipped by the Save
     /// to File… menu item.
     @State private var isExporting: Bool = false
+    @State private var lastAutoScroll: ContinuousClock.Instant = .now
 
     public init() {}
 
@@ -288,8 +289,16 @@ public struct LogConsoleView: View {
                 // volume — and (2) when the user has Reduce Motion on.
                 // The static jump-to-bottom keeps the UI usable in
                 // both cases.
+                let now = ContinuousClock.now
+                let elapsed = now - lastAutoScroll
+                let elapsedMs =
+                    Double(elapsed.components.seconds) * 1000.0
+                    + Double(elapsed.components.attoseconds) / 1.0e15
+                guard elapsedMs >= Self.minimumAutoScrollIntervalMs else { return }
+                lastAutoScroll = now
+
                 if animateLogSurface {
-                    withAnimation(.linear(duration: 0.1)) {
+                    withAnimation(.linear(duration: 0.08)) {
                         proxy.scrollTo("__bottom__", anchor: .bottom)
                     }
                 } else {
@@ -298,6 +307,8 @@ public struct LogConsoleView: View {
             }
         }
     }
+
+    private static let minimumAutoScrollIntervalMs: Double = 250
 
     // MARK: - Empty states
 

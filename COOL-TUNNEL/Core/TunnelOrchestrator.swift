@@ -111,6 +111,12 @@ public final class TunnelOrchestrator {
     /// auto-stop. A burst of anomaly events would otherwise queue
     /// duplicate `stop()` tasks racing on `activeMode`.
     private var autoStopTask: Task<Void, Never>?
+    private var selfHealTask: Task<Void, Never>?
+    private var pendingLogEntries: [LogEntry] = []
+    private var logFlushTask: Task<Void, Never>?
+    private let logFlushIntervalNanos: UInt64 = PerformanceProfile.current.logFlushIntervalNanos
+    private let maxLogBatchEntries: Int = PerformanceProfile.current.maxLogBatchEntries
+    private let maxLogLineCharacters: Int = PerformanceProfile.current.maxLogLineCharacters
 
     /// Cached descriptor for the naive binary the app is currently
     /// configured to spawn. Populated on bootstrap and after each
@@ -315,6 +321,9 @@ public final class TunnelOrchestrator {
     /// expected (and not an engine crash).
     public func shutdown() async {
         isShuttingDown = true
+        selfHealTask?.cancel()
+        selfHealTask = nil
+        flushPendingLogs()
         // Flush any pending debounced settings write before we go
         // away — without this, a settings edit made <250ms before
         // Cmd+Q would be silently dropped.
@@ -687,6 +696,8 @@ public final class TunnelOrchestrator {
     ///     `proxyController` state is recovered by stopQuiet's
     ///     `disableAll()`, then startCore writes the correct config.
     public func switchMode(to newMode: ProxyMode) async throws {
+        selfHealTask?.cancel()
+        selfHealTask = nil
         // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
         // rapid second click while a prior switchMode is
         // mid-flight (between stopQuiet and startCore) is a
@@ -1064,7 +1075,7 @@ public final class TunnelOrchestrator {
                     binaryPath: descriptor.url.path,
                     configPath: paths.configFile.path,
                     port: port,
-                    monitorIntervalSecs: nil
+                    monitorIntervalSecs: PerformanceProfile.current.connectionMonitorIntervalSecs
                 ))
             guard case .started = started else {
                 throw OrchestratorError.unexpectedResponse
@@ -1133,6 +1144,8 @@ public final class TunnelOrchestrator {
     }
 
     public func stop() async {
+        selfHealTask?.cancel()
+        selfHealTask = nil
         // Guard against re-entry when we're already stopped. A
         // user spam-clicking the Stop button would otherwise loop
         // back through `disableAll()` (which iterates every active
@@ -1264,12 +1277,12 @@ public final class TunnelOrchestrator {
         )
 
         for pid in orphans {
-            kill(pid, SIGTERM)
+            _ = kill(pid, SIGTERM)
         }
         try? await Task.sleep(nanoseconds: 500_000_000)
         for pid in orphans where kill(pid, 0) == 0 {
             // Still alive after SIGTERM grace — escalate.
-            kill(pid, SIGKILL)
+            _ = kill(pid, SIGKILL)
         }
     }
 
@@ -1402,14 +1415,33 @@ public final class TunnelOrchestrator {
         guard isRunning, activeMode != .stopped, activeMode != .localOnly else {
             return
         }
+        let mode = activeMode
         appendInfo("system woke — probing engine health (no pre-sleep checkpoint)")
         do {
             guard let profile = selectedProfile else { return }
+            try await verifyRunningProxyHealthy(profile: profile)
             _ = try await core.send(.validateProfile(profile))
         } catch {
-            recordError(
-                "connection became unresponsive while system slept — click Stop, then restart your mode")
+            try? await proxyController.disableAll()
+            ProxyActiveFlag.clear(
+                at: ProxyActiveFlag.path(in: paths.supportDirectory))
+            isRunning = false
+            activeMode = .stopped
+            didBootstrap = false
+            scheduleSelfHeal(
+                mode: mode,
+                reason: "connection became unresponsive while system slept")
         }
+    }
+
+    private func verifyRunningProxyHealthy(profile: Profile) async throws {
+        let response = try await core.send(.probeNaiveLive)
+        guard case .naiveLiveness(let running, _) = response else {
+            throw OrchestratorError.unexpectedResponse
+        }
+        guard running else { throw HotSwapError.engineDied }
+        let report = try await core.probe(profile: profile, timeoutSecs: 3)
+        guard report.reachable else { throw HotSwapError.engineDied }
     }
 
     public func runDiagnostics() async {
@@ -1513,6 +1545,7 @@ public final class TunnelOrchestrator {
             for await event in stream {
                 self.handle(event: event)
             }
+            self.flushPendingLogs()
             // Stream ended. Two cases produce that:
             //   1. We deliberately shut the engine down via
             //      `shutdown()` — `isShuttingDown` is true and we
@@ -1523,27 +1556,71 @@ public final class TunnelOrchestrator {
             //      receiving lines and they assume "nothing's
             //      happening" while the proxy is silently dead.
             if !self.isShuttingDown {
-                // **UX-F#16 (v0.1.7.19):** the engine
-                // (`cool-tunnel-core`) subprocess died — pipe
-                // broke or process crashed. The previous
-                // "click Start again" message was misleading;
-                // a Start click hits `core.send(...)` which
-                // throws `.notRunning`. Now: revert the
-                // system proxy first (UX-F#5 reasoning), flip
-                // `didBootstrap` back to false so the next
-                // mode click re-runs the bootstrap path
-                // (which calls `core.start()`), and surface
-                // an actionable error.
-                try? await self.proxyController.disableAll()
-                ProxyActiveFlag.clear(
-                    at: ProxyActiveFlag.path(in: self.paths.supportDirectory))
-                self.isRunning = false
-                self.activeMode = .stopped
-                self.didBootstrap = false
-                self.recordError(
-                    "Engine subprocess exited unexpectedly — system proxy reverted. Click a mode chip to relaunch the engine and try again."
-                )
+                await self.handleEngineStreamEnded()
             }
+        }
+    }
+
+    private func handleEngineStreamEnded() async {
+        let modeToRecover = modeBeforeSleep ?? activeMode
+        let shouldRecover =
+            isRunning
+            && modeToRecover != .stopped
+            && sleepWakeState != .pausing
+            && sleepWakeState != .recovering
+
+        try? await proxyController.disableAll()
+        ProxyActiveFlag.clear(
+            at: ProxyActiveFlag.path(in: paths.supportDirectory))
+        isRunning = false
+        activeMode = .stopped
+        didBootstrap = false
+        if shouldRecover {
+            scheduleSelfHeal(
+                mode: modeToRecover,
+                reason: "engine subprocess exited unexpectedly")
+        } else {
+            recordError(
+                "Engine subprocess exited unexpectedly — system proxy reverted. Click a mode chip to relaunch the engine and try again.",
+                layer: .local
+            )
+        }
+    }
+
+    private func scheduleSelfHeal(mode: ProxyMode, reason: String) {
+        guard mode != .stopped else { return }
+        guard selfHealTask == nil else { return }
+        lastError = nil
+        lastErrorLayer = nil
+        appendInfo("\(reason) - self-healing will restart \(mode.title)")
+        selfHealTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.selfHealTask = nil }
+            let delays: [UInt64] = [
+                500_000_000,
+                2_000_000_000,
+                5_000_000_000,
+            ]
+            for (index, delay) in delays.enumerated() {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                await self.bootstrapIfNeeded()
+                do {
+                    try await self.start(mode: mode)
+                    self.appendInfo(
+                        "self-healing recovered \(mode.title) on attempt \(index + 1)"
+                    )
+                    return
+                } catch {
+                    self.appendInfo(
+                        "self-healing attempt \(index + 1) failed: \(error.localizedDescription)"
+                    )
+                }
+            }
+            self.recordError(
+                "Self-healing could not restart \(mode.title). System proxy is reverted; check the log before retrying.",
+                layer: .local
+            )
         }
     }
 
@@ -1583,6 +1660,7 @@ public final class TunnelOrchestrator {
             // HeaderView; the proxy revert makes the visible
             // state actually match the network state.
             let wasRunning = isRunning
+            let modeBeforeStop = activeMode
             isRunning = running
             if !running {
                 activeMode = .stopped
@@ -1600,9 +1678,9 @@ public final class TunnelOrchestrator {
                         try? await self.proxyController.disableAll()
                         ProxyActiveFlag.clear(
                             at: ProxyActiveFlag.path(in: self.paths.supportDirectory))
-                        self.recordError(
-                            "naive stopped unexpectedly — system proxy reverted. Check the log for why, then click a mode to retry."
-                        )
+                        self.scheduleSelfHeal(
+                            mode: modeBeforeStop,
+                            reason: "naive stopped unexpectedly")
                     }
                 }
             }
@@ -1646,13 +1724,11 @@ public final class TunnelOrchestrator {
     // MARK: - Helpers
 
     private func appendLog(source: LogSource, text: String) {
-        logEntries.append(LogEntry(source: source, text: text))
-        trimLogs()
+        enqueueLog(LogEntry(source: source, text: boundedLogText(text)))
     }
 
     private func appendInfo(_ message: String) {
-        logEntries.append(LogEntry(source: .stdout, text: "[orchestrator] \(message)"))
-        trimLogs()
+        enqueueLog(LogEntry(source: .stdout, text: "[orchestrator] \(boundedLogText(message))"))
     }
 
     /// Synchronous error record — stores the message + optional
@@ -1666,11 +1742,41 @@ public final class TunnelOrchestrator {
     /// `.local` because the classifier would just confirm what the
     /// caller already knows.
     private func recordError(_ message: String, layer: ErrorLayer? = nil) {
-        lastError = message
+        let bounded = boundedLogText(message)
+        lastError = bounded
         lastErrorLayer = layer
         let prefix = layer.map { "[\($0.diagnosticLabel)] " } ?? ""
-        logEntries.append(LogEntry(source: .stderr, text: "[error] \(prefix)\(message)"))
+        enqueueLog(LogEntry(source: .stderr, text: "[error] \(prefix)\(bounded)"), flushNow: true)
+    }
+
+    private func enqueueLog(_ entry: LogEntry, flushNow: Bool = false) {
+        pendingLogEntries.append(entry)
+        if flushNow || pendingLogEntries.count >= maxLogBatchEntries {
+            flushPendingLogs()
+            return
+        }
+        guard logFlushTask == nil else { return }
+        logFlushTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.logFlushIntervalNanos)
+            guard !Task.isCancelled else { return }
+            self.flushPendingLogs()
+        }
+    }
+
+    private func flushPendingLogs() {
+        logFlushTask?.cancel()
+        logFlushTask = nil
+        guard !pendingLogEntries.isEmpty else { return }
+        logEntries.append(contentsOf: pendingLogEntries)
+        pendingLogEntries.removeAll(keepingCapacity: true)
         trimLogs()
+    }
+
+    private func boundedLogText(_ text: String) -> String {
+        guard text.count > maxLogLineCharacters else { return text }
+        let prefix = text.prefix(maxLogLineCharacters)
+        return "\(prefix)... [truncated]"
     }
 
     /// **v2.0.29 (Deterministic Error Reporting):** runs the
@@ -1814,6 +1920,9 @@ public final class TunnelOrchestrator {
     }
 
     public func clearLogs() {
+        pendingLogEntries.removeAll(keepingCapacity: false)
+        logFlushTask?.cancel()
+        logFlushTask = nil
         logEntries.removeAll()
         // Also clear `lastError` — a user clicking "Clear logs"
         // expects the error pill to disappear too. The previous

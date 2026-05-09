@@ -21,6 +21,13 @@ use crate::error::CoreError;
 use crate::protocol::{Event, LogSource};
 use crate::redaction::redact;
 
+/// Maximum bytes retained for one child-process log line before
+/// forwarding it to Swift. A hostile or broken `naive` build can
+/// otherwise write a newline-free blob and make `BufReadExt::lines`
+/// allocate until EOF. 16 KiB is far above legitimate diagnostic
+/// lines and keeps the UI/export buffer bounded.
+const MAX_CHILD_LOG_LINE_BYTES: usize = 16 * 1024;
+
 /// Handle to a running `naive` child.
 ///
 /// Drop the handle (or call [`Self::stop`]) to terminate the child.
@@ -184,10 +191,24 @@ async fn read_lines<R>(reader: R, source: LogSource, events: mpsc::Sender<Event>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
+    let mut buffer = Vec::with_capacity(1024);
     loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer).await {
+            Ok(0) => return,
+            Ok(_) => {
+                let truncated = buffer.len() > MAX_CHILD_LOG_LINE_BYTES;
+                if truncated {
+                    buffer.truncate(MAX_CHILD_LOG_LINE_BYTES);
+                }
+                while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                    buffer.pop();
+                }
+                let mut line = String::from_utf8_lossy(&buffer).into_owned();
+                if truncated {
+                    line.push_str("... [truncated]");
+                }
                 // Redact `scheme://user:pass@host` patterns before any
                 // forwarding. `naive` prints its proxy URL with userinfo
                 // at startup; without this filter those credentials reach
@@ -204,7 +225,6 @@ where
                     return;
                 }
             }
-            Ok(None) => return,
             Err(err) => {
                 // Log the IO error before dropping it. Loss of a
                 // log stream is the most likely cause of mid-
