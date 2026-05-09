@@ -60,29 +60,53 @@ import os
 /// stack when there's no error, and the destructive-tinted row
 /// when `lastError` is non-nil.
 public struct HeaderView: View {
-    public let lastError: String?
-    /// **v2.0.29 (Deterministic Error Reporting):** layer
-    /// attribution from `TunnelOrchestrator.classifyConnectionFailure`.
-    /// `nil` → banner renders without a chip (pre-2.0.29 behaviour).
-    /// Non-`nil` → banner shows a compact `[Local]` / `[Upstream]` /
-    /// `[VPS]` chip leading the message so the operator can see the
-    /// broken node without running `Diag` manually.
-    public let lastErrorLayer: ErrorLayer?
-    public let onDismissError: () -> Void
+    public let state: CoolTunnelViewState.Header
+    public let onIntent: (TunnelIntent) -> Void
 
     public init(
         lastError: String?,
         lastErrorLayer: ErrorLayer? = nil,
         onDismissError: @escaping () -> Void
     ) {
-        self.lastError = lastError
-        self.lastErrorLayer = lastErrorLayer
-        self.onDismissError = onDismissError
+        self.state = CoolTunnelViewState.Header(
+            statusPill: CoolTunnelViewState.StatusPill(
+                headline: "",
+                tint: .secondary
+            ),
+            errorBanner: lastError.flatMap { message in
+                message.isEmpty
+                    ? nil
+                    : CoolTunnelViewState.ErrorBanner(
+                        message: message,
+                        layer: lastErrorLayer
+                    )
+            },
+            showsFirewallBadge: false
+        )
+        self.onIntent = { intent in
+            if intent == .dismissError {
+                onDismissError()
+            }
+        }
+    }
+
+    /// Schema-first initializer used by the composition root.
+    ///
+    /// **Heng / Silent Operator invariant:** the banner is a pure
+    /// rendering of `CoolTunnelViewState.Header.errorBanner`; the
+    /// only output is `.dismissError`. Recovery, retry, and layer
+    /// classification remain in the orchestrator.
+    public init(
+        state: CoolTunnelViewState.Header,
+        onIntent: @escaping (TunnelIntent) -> Void
+    ) {
+        self.state = state
+        self.onIntent = onIntent
     }
 
     public var body: some View {
-        if let lastError, !lastError.isEmpty {
-            errorBanner(message: lastError, layer: lastErrorLayer)
+        if let error = state.errorBanner, !error.message.isEmpty {
+            errorBanner(message: error.message, layer: error.layer)
         }
     }
 
@@ -112,7 +136,7 @@ public struct HeaderView: View {
             }
             Spacer(minLength: 8)
             Button {
-                onDismissError()
+                onIntent(.dismissError)
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.white.opacity(0.85))
@@ -163,35 +187,40 @@ public struct HeaderView: View {
 /// action) or redundant with the mode picker's own visible
 /// selection — pure vertical waste.
 public struct HeaderStatusPill: View {
-    public let isRunning: Bool
-    public let lastError: String?
-    /// **v2.0.28 (Seamless Recovery Protocol):** non-`.idle` values
-    /// take precedence over `isRunning` / `lastError` so the user
-    /// sees the recovery phase explicitly instead of a stale
-    /// *"Connected"* / *"Error"* label while the orchestrator is
-    /// transitioning across a sleep/wake cycle.
-    public let sleepWakeState: SleepWakeState
+    public let state: CoolTunnelViewState.StatusPill
 
     public init(
         isRunning: Bool,
         lastError: String?,
         sleepWakeState: SleepWakeState = .idle
     ) {
-        self.isRunning = isRunning
-        self.lastError = lastError
-        self.sleepWakeState = sleepWakeState
+        self.state = Self.legacyState(
+            isRunning: isRunning,
+            lastError: lastError,
+            sleepWakeState: sleepWakeState
+        )
+    }
+
+    /// Schema-first initializer used by the main window.
+    ///
+    /// **Heng / Silent Operator invariant:** the pill never starts,
+    /// stops, or probes. It only names the current phase supplied by
+    /// the schema so the recovery state stays observable without
+    /// exposing lifecycle policy to SwiftUI.
+    public init(state: CoolTunnelViewState.StatusPill) {
+        self.state = state
     }
 
     public var body: some View {
         HStack(spacing: 8) {
             statusDot
-            Text(headline)
+            Text(state.headline)
                 .font(.headline)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(headline)
+        .accessibilityLabel(state.headline)
     }
 
     /// Colour + shape redundancy: the status is communicated by
@@ -206,26 +235,44 @@ public struct HeaderStatusPill: View {
     }
 
     private var statusTint: Color {
-        switch sleepWakeState {
-        case .pausing, .recovering: return .yellow
-        case .paused: return .secondary
-        case .idle: break
+        switch state.tint {
+        case .secondary: return .secondary
+        case .green: return .green
+        case .yellow: return .yellow
+        case .red: return .red
         }
-        if lastError != nil { return .red }
-        if isRunning { return .green }
-        return .secondary
     }
 
-    private var headline: String {
+    private static func legacyState(
+        isRunning: Bool,
+        lastError: String?,
+        sleepWakeState: SleepWakeState
+    ) -> CoolTunnelViewState.StatusPill {
         switch sleepWakeState {
-        case .pausing: return "Pausing for sleep…"
-        case .paused: return "Asleep"
-        case .recovering: return "Recovering after wake…"
+        case .pausing:
+            return CoolTunnelViewState.StatusPill(
+                headline: "Pausing for sleep…",
+                tint: .yellow
+            )
+        case .paused:
+            return CoolTunnelViewState.StatusPill(
+                headline: "Asleep",
+                tint: .secondary
+            )
+        case .recovering:
+            return CoolTunnelViewState.StatusPill(
+                headline: "Recovering after wake…",
+                tint: .yellow
+            )
         case .idle: break
         }
-        if lastError != nil { return "Error" }
-        if isRunning { return "Connected" }
-        return "Not connected"
+        if lastError != nil {
+            return CoolTunnelViewState.StatusPill(headline: "Error", tint: .red)
+        }
+        if isRunning {
+            return CoolTunnelViewState.StatusPill(headline: "Connected", tint: .green)
+        }
+        return CoolTunnelViewState.StatusPill(headline: "Not connected", tint: .secondary)
     }
 }
 

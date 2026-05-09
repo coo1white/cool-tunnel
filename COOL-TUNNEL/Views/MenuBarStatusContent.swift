@@ -51,6 +51,7 @@ struct MenuBarStatusContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        let state = orchestrator.viewState().menuBar
         Group {
             // Status header + inline mode rows.
             //
@@ -59,28 +60,20 @@ struct MenuBarStatusContent: View {
             // Wi-Fi / AirPort menu's "Networks" header. The
             // three mode rows live inside this section so they
             // visually associate with the status they govern.
-            Section(statusLine) {
-                modeRow(.smart, label: "Smart")
-                modeRow(.global, label: "Global")
-                modeRow(.localOnly, label: "Local")
+            Section(state.statusLine) {
+                modeRow(.smart, label: "Smart", state: state)
+                modeRow(.global, label: "Global", state: state)
+                modeRow(.localOnly, label: "Local", state: state)
             }
 
             // Stop is the only way the menu can affect a running
             // proxy without changing mode. It only appears when
             // there is something to stop — a stopped menu has
             // three clear actions (the modes), no dead button.
-            if orchestrator.isRunning {
+            if state.isRunning {
                 Divider()
                 Button("Stop") {
-                    Task {
-                        do {
-                            try await orchestrator.switchMode(to: .stopped)
-                        } catch {
-                            Self.uiLogger.error(
-                                "menu-bar Stop failed: \(error.localizedDescription, privacy: .public)"
-                            )
-                        }
-                    }
+                    send(.switchMode(.stopped))
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
             }
@@ -108,23 +101,6 @@ struct MenuBarStatusContent: View {
         }
     }
 
-    // MARK: - Status line
-
-    /// Single string used by both the menu-bar header *and* the main
-    /// window's HeaderView subtitle should ever consume. If we add
-    /// more surfaces later (notifications, Today widgets, Shortcuts
-    /// app), they read this same descriptor — two surfaces never
-    /// disagree about state.
-    private var statusLine: String {
-        if let error = orchestrator.lastError, !error.isEmpty {
-            return "Error · \(error)"
-        }
-        if orchestrator.isRunning {
-            return "Active · \(orchestrator.activeMode.title)"
-        }
-        return "Idle"
-    }
-
     // MARK: - Mode rows
 
     /// Renders one inline mode row. Click semantics:
@@ -139,25 +115,14 @@ struct MenuBarStatusContent: View {
     /// the engine can't start, and clicking would surface a
     /// "no profile selected" error from the new P0 #1 path.
     @ViewBuilder
-    private func modeRow(_ mode: ProxyMode, label: String) -> some View {
-        let isActive = orchestrator.isRunning && orchestrator.activeMode == mode
+    private func modeRow(
+        _ mode: ProxyMode,
+        label: String,
+        state: CoolTunnelViewState.MenuBar
+    ) -> some View {
+        let isActive = state.isRunning && state.activeMode == mode
         Button {
-            Task {
-                do {
-                    try await orchestrator.switchMode(to: mode)
-                } catch {
-                    // **Engine-F#P2.4 (v0.2):** the orchestrator's
-                    // `startCore` now publishes the failure to
-                    // `lastError` before re-throwing, so the
-                    // status banner already reflects it. We log a
-                    // structured trace for support diagnostics —
-                    // empty catches were eating context that
-                    // bug reports need.
-                    Self.uiLogger.error(
-                        "menu-bar mode switch to \(mode.title, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
-                    )
-                }
-            }
+            send(.switchMode(mode))
         } label: {
             // Leading checkmark mirrors the AirPort menu's
             // "✓ network-name" pattern — system users read it
@@ -171,7 +136,15 @@ struct MenuBarStatusContent: View {
                 Text(label)
             }
         }
-        .disabled(orchestrator.selectedProfile == nil)
+        .disabled(!state.hasSelectedProfile)
+    }
+
+    /// Emits menu-bar operator intent through the same dispatcher as
+    /// the main window. This keeps the menu extra declarative and
+    /// prevents the two control surfaces from growing separate
+    /// lifecycle semantics.
+    private func send(_ intent: TunnelIntent) {
+        Task { await orchestrator.perform(intent) }
     }
 
     /// **Engine-F#P2.4 (v0.2):** project-wide UI logger. Empty
