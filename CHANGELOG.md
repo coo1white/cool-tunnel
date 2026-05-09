@@ -9,6 +9,54 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.31] — 2026-05-09 — Self-Healing Stability + Log Pressure Hardening
+
+> **The tunnel now recovers itself from core exits, proxy drops,
+> and sleep/wake edge cases while keeping bursty logs bounded.**
+> This release hardens the app's shipped stdio/Rust-core tunnel
+> path. The repository still does not contain an
+> `NEPacketTunnelProvider` target.
+
+Stability release for long-running menu-bar sessions. Focuses on
+bounded memory under noisy child-process output, automatic recovery
+after engine loss, and lower energy posture in the GUI/log surfaces.
+
+### Added
+
+- **Self-healing orchestrator loop** for unexpected core stream
+  termination and proxy stop events. Non-stopped modes now schedule
+  retry attempts automatically instead of leaving the operator with
+  a manual "click to retry" state.
+- **Sleep/wake health verification** that probes the running proxy
+  after wake. If the proxy is no longer reachable, the orchestrator
+  clears the stale sentinel, disables the system proxy, marks the
+  mode stopped, and lets the self-healing path restart the requested
+  mode.
+- **Performance-profile-derived pressure caps** for monitor interval,
+  log flush interval, log batch size, and maximum retained log-line
+  length.
+
+### Changed
+
+- **Core stdout ingestion is now frame-bounded** at the Swift side of
+  the JSON-over-stdio protocol. The app no longer relies on unbounded
+  `AsyncLineSequence` buffering when the core emits malformed or
+  newline-free output.
+- **Rust child-log forwarding is byte-bounded** before redaction and
+  event emission. Oversized `naive` log lines are truncated with a
+  marker instead of allocating an arbitrary string.
+- **Log publishing is batched** and flushed on a short timer or when
+  enough entries accumulate. Error entries still flush immediately so
+  operator-visible failures are not delayed.
+- **Log-console auto-scroll is throttled** and uses shorter animation,
+  reducing UI churn during noisy bursts.
+
+### Verified
+
+- `bash scripts/preflight.sh` — all green locally.
+- GitHub Actions on PR #46 — Rust build/clippy/test, Swift format
+  lint, and ShellCheck all passed before merge.
+
 ## [2.0.30] — 2026-05-09 — Defensive Input Logic ("First Scold, Then Do Good")
 
 > **The UI is now strict on input to protect the engine's
