@@ -32,6 +32,7 @@ import SwiftUI
 public struct ContentView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
     @State private var isShowingSettings = false
+    @State private var isShowingDeveloperOverlay = false
     /// Local draft state that belongs to SwiftUI, not the engine.
     /// It becomes part of `CoolTunnelUIState` before rendering so
     /// the full screen still has one explicit schema.
@@ -59,8 +60,21 @@ public struct ContentView: View {
                 SettingsView(isShowing: $isShowingSettings)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
+
+            if isShowingDeveloperOverlay && !state.ui.isShowingSettings {
+                VStack {
+                    Spacer()
+                    DeveloperOverlayView(metrics: state.developer.metrics)
+                        .padding(.bottom, 18)
+                }
+                .padding(.horizontal, 18)
+                .allowsHitTesting(false)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(2)
+            }
         }
         .animation(.easeInOut(duration: 0.25), value: isShowingSettings)
+        .animation(.easeInOut(duration: 0.18), value: isShowingDeveloperOverlay)
         // **Phase 2.1 (v0.2):** no `.background { … }` — the
         // window inherits the system's `.windowBackground`
         // material, which respects Light / Dark / Increased
@@ -249,6 +263,7 @@ public struct ContentView: View {
                 state: state.controlPanel,
                 pendingMode: $pendingMode,
                 isShowingSettings: $isShowingSettings,
+                isShowingDeveloperOverlay: $isShowingDeveloperOverlay,
                 onIntent: send
             )
             .layoutPriority(1)
