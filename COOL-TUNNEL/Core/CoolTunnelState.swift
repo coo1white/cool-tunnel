@@ -177,6 +177,7 @@ extension CoolTunnelViewState {
         public var activeMode: ProxyMode
         public var hasSelectedProfile: Bool
         public var selectedProfileIsStartable: Bool
+        public var selectedProfileCanRequestStart: Bool
         public var modeOptions: [ModeOption]
 
         public init(
@@ -184,12 +185,14 @@ extension CoolTunnelViewState {
             activeMode: ProxyMode,
             hasSelectedProfile: Bool,
             selectedProfileIsStartable: Bool,
+            selectedProfileCanRequestStart: Bool,
             modeOptions: [ModeOption] = ModeOption.defaultOptions
         ) {
             self.isRunning = isRunning
             self.activeMode = activeMode
             self.hasSelectedProfile = hasSelectedProfile
             self.selectedProfileIsStartable = selectedProfileIsStartable
+            self.selectedProfileCanRequestStart = selectedProfileCanRequestStart
             self.modeOptions = modeOptions
         }
 
@@ -198,7 +201,7 @@ extension CoolTunnelViewState {
         }
 
         public var isPrimaryActionEnabled: Bool {
-            isRunning || selectedProfileIsStartable
+            isRunning || selectedProfileCanRequestStart
         }
     }
 
@@ -241,19 +244,22 @@ extension CoolTunnelViewState {
         public var isRunning: Bool
         public var activeMode: ProxyMode
         public var hasSelectedProfile: Bool
+        public var selectedProfileCanRequestStart: Bool
 
         public init(
             statusLine: String,
             symbolName: String,
             isRunning: Bool,
             activeMode: ProxyMode,
-            hasSelectedProfile: Bool
+            hasSelectedProfile: Bool,
+            selectedProfileCanRequestStart: Bool
         ) {
             self.statusLine = statusLine
             self.symbolName = symbolName
             self.isRunning = isRunning
             self.activeMode = activeMode
             self.hasSelectedProfile = hasSelectedProfile
+            self.selectedProfileCanRequestStart = selectedProfileCanRequestStart
         }
     }
 
