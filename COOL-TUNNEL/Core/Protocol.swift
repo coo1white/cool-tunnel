@@ -263,12 +263,16 @@ public enum CoreEvent: Sendable, Hashable {
     /// `elapsedMs` is the wall-clock duration of the step in ms.
     /// Defaults to 0 when the engine omits it (older binaries).
     case diagnosticProgress(step: String, ok: Bool, elapsedMs: UInt64)
+    /// Lightweight monitor snapshot emitted by the engine on each
+    /// successful lsof tick. Powers the developer overlay.
+    case trafficSnapshot(pid: UInt32, established: UInt32, localClients: UInt32, remote: UInt32)
 
     private enum Tag: String, Decodable {
         case logLine = "log_line"
         case stateChanged = "state_changed"
         case anomaly
         case diagnosticProgress = "diagnostic_progress"
+        case trafficSnapshot = "traffic_snapshot"
     }
 
     private enum FrameKeys: String, CodingKey {
@@ -306,12 +310,21 @@ extension CoreEvent: Decodable {
                 ok: data.decode(Bool.self, forKey: .ok),
                 elapsedMs: elapsed
             )
+        case .trafficSnapshot:
+            self = try .trafficSnapshot(
+                pid: data.decode(UInt32.self, forKey: .pid),
+                established: data.decode(UInt32.self, forKey: .established),
+                localClients: data.decode(UInt32.self, forKey: .localClients),
+                remote: data.decode(UInt32.self, forKey: .remote)
+            )
         }
     }
 
     private enum DataKeys: String, CodingKey {
         case source, line, running, reason, detail, step, ok
+        case pid, established, remote
         case elapsedMs = "elapsed_ms"
+        case localClients = "local_clients"
     }
 }
 

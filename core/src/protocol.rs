@@ -465,6 +465,22 @@ pub enum Event {
         #[serde(default)]
         elapsed_ms: u64,
     },
+    /// Lightweight monitor snapshot for the developer overlay.
+    ///
+    /// Emitted on each successful connection-monitor tick. Counts
+    /// come from the same `lsof` parse that powers anomaly detection,
+    /// so the overlay's "VPS pressure" and "Local Kernel" readouts use
+    /// the same source of truth as the safety monitor.
+    TrafficSnapshot {
+        /// Supervised naive process ID.
+        pid: u32,
+        /// Total established TCP connections in the lsof snapshot.
+        established: u32,
+        /// Established connections whose endpoints are loopback.
+        local_clients: u32,
+        /// Established connections with at least one non-loopback endpoint.
+        remote: u32,
+    },
 }
 
 /// Source of a log line.
@@ -586,6 +602,23 @@ mod tests {
         assert_eq!(value["event"], "log_line");
         assert_eq!(value["data"]["source"], "stderr");
         assert_eq!(value["data"]["line"], "ready");
+    }
+
+    #[test]
+    fn traffic_snapshot_event_shape() {
+        let out = Outbound::Event(Event::TrafficSnapshot {
+            pid: 42,
+            established: 7,
+            local_clients: 5,
+            remote: 2,
+        });
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["kind"], "event");
+        assert_eq!(value["event"], "traffic_snapshot");
+        assert_eq!(value["data"]["pid"], 42);
+        assert_eq!(value["data"]["established"], 7);
+        assert_eq!(value["data"]["local_clients"], 5);
+        assert_eq!(value["data"]["remote"], 2);
     }
 
     #[test]

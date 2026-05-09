@@ -9,6 +9,46 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.33] — 2026-05-09 — Observability Certainty
+
+> **The operator can now inspect tunnel lifecycle, throughput,
+> encryption overhead, and failure layer attribution without guessing
+> which part of the path is broken.**
+
+Observability release for macOS client support sessions. The tunnel
+continues to run through the existing supervised Rust subprocess and
+NaiveProxy path; this release adds local telemetry and an optional
+developer HUD over that path.
+
+### Added
+
+- **Append-only lifecycle telemetry** at
+  `Application Support/Cool Tunnel/lifecycle-telemetry.jsonl`.
+  Each transition row includes wall-clock and monotonic microsecond
+  timestamps, mode/running state, optional failure layer, and redacted
+  details for support correlation.
+- **Developer Overlay** toggle in the control bar. The non-interactive
+  HUD shows live throughput, TLS handshake delta, VPS reachability, and
+  local kernel/`naive` PID health without blocking normal app use.
+- **Rust traffic snapshot events** from the existing connection monitor,
+  reusing the same bounded `lsof` parse that powers anomaly detection.
+
+### Changed
+
+- Error-layer language now matches the operator-facing troubleshooting
+  taxonomy: **ISP**, **VPS**, and **Local Kernel**.
+- Connection start, stop, switch, hot-swap, diagnostics, latency, engine
+  stream end, and error paths now emit deterministic lifecycle records.
+
+### Verified
+
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' build`
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-features`
+- `shellcheck scripts/*.sh`
+
 ## [2.0.32] — 2026-05-09 — Declarative UI State Schema
 
 > **The SwiftUI surface now renders from an explicit, AI-friendly

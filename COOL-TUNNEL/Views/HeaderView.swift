@@ -156,7 +156,7 @@ public struct HeaderView: View {
     /// the banner's red field without needing a second colour
     /// token, and stays inside the banner's vertical metric
     /// (caption font, tight padding). Mirrors the operator's own
-    /// diagnostic vocabulary: *Local* / *Upstream* / *VPS*.
+    /// diagnostic vocabulary: *ISP* / *VPS* / *Local Kernel*.
     private func layerChip(_ layer: ErrorLayer) -> some View {
         Text(layer.diagnosticLabel.uppercased())
             .font(.caption2.weight(.bold))

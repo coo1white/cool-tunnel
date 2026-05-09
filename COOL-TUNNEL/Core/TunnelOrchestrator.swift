@@ -61,13 +61,14 @@ public final class TunnelOrchestrator {
     public private(set) var firewallState: FirewallState = .unknown
     public private(set) var lastDiagnosticReport: DiagnosticReport?
     public private(set) var lastLatencyReport: LatencyReport?
+    public private(set) var developerMetrics: DeveloperMetrics = .idle
     public private(set) var lastError: String?
 
     /// **v2.0.29 (Deterministic Error Reporting):** layer attribution
     /// for the most recent connection failure. Set whenever `recordError`
     /// is called from a connection-failure path; cleared on successful
     /// `start()` / `switchMode()`. Renders as a chip on the
-    /// `HeaderView` error banner — `[Local]` / `[Upstream]` / `[VPS]`.
+    /// `HeaderView` error banner — `[ISP]` / `[VPS]` / `[Local Kernel]`.
     /// `nil` means "no layer attributed" (operational error, or
     /// classification was inconclusive); the banner falls back to the
     /// pre-2.0.29 plain-text rendering.
@@ -82,6 +83,7 @@ public final class TunnelOrchestrator {
     private let settingsStore: SettingsStore
     private let paths: AppSupportPaths
     private let naiveResolver: NaiveBinaryResolver
+    private let telemetry: LifecycleTelemetryLogger
 
     private var eventTask: Task<Void, Never>?
     private var didBootstrap: Bool = false
@@ -112,6 +114,8 @@ public final class TunnelOrchestrator {
     /// duplicate `stop()` tasks racing on `activeMode`.
     private var autoStopTask: Task<Void, Never>?
     private var selfHealTask: Task<Void, Never>?
+    private var vpsHealthTask: Task<Void, Never>?
+    private var lastTrafficSnapshot: TrafficSnapshotState?
     private var pendingLogEntries: [LogEntry] = []
     private var logFlushTask: Task<Void, Never>?
     private let logFlushIntervalNanos: UInt64 = PerformanceProfile.current.logFlushIntervalNanos
@@ -140,7 +144,8 @@ public final class TunnelOrchestrator {
         profileStore: ProfileStore,
         settingsStore: SettingsStore,
         paths: AppSupportPaths,
-        naiveResolver: NaiveBinaryResolver = NaiveBinaryResolver()
+        naiveResolver: NaiveBinaryResolver = NaiveBinaryResolver(),
+        telemetry: LifecycleTelemetryLogger? = nil
     ) {
         self.core = core
         self.proxyController = proxyController
@@ -149,6 +154,13 @@ public final class TunnelOrchestrator {
         self.settingsStore = settingsStore
         self.paths = paths
         self.naiveResolver = naiveResolver
+        self.telemetry = telemetry ?? LifecycleTelemetryLogger(url: paths.lifecycleTelemetryFile)
+        self.telemetry.record(
+            "orchestrator.init",
+            mode: nil,
+            running: false,
+            details: ["telemetry_path": paths.lifecycleTelemetryFile.path]
+        )
     }
 
     /// Builds an orchestrator wired with default dependencies sourced from
@@ -239,6 +251,7 @@ public final class TunnelOrchestrator {
         // re-bootstraps (re-spawns the engine) on the
         // next call rather than short-circuiting.
         guard !didBootstrap else { return }
+        recordTelemetry("bootstrap.begin")
 
         // **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep
         // BEFORE any other startup work. If the previous run
@@ -261,13 +274,15 @@ public final class TunnelOrchestrator {
             // re-attempt the engine spawn instead of permanently
             // short-circuiting on the previous failure.
             didBootstrap = true
+            recordTelemetry("bootstrap.success")
         } catch {
-            // **v2.0.29:** engine spawn failure is local-by-construction
+            // **v2.0.29:** engine spawn failure is local-kernel-by-construction
             // — the Rust core couldn't be exec'd, the JSON-over-stdio
             // pipe never opened, or the orchestrator's own bootstrap
-            // path threw. Hardcoded `.local`; running the classifier
+            // path threw. Hardcoded `.localKernel`; running the classifier
             // would only confirm what we already know.
-            recordError("engine failed to start: \(error)", layer: .local)
+            recordError("engine failed to start: \(error)", layer: .localKernel)
+            recordTelemetry("bootstrap.failure", layer: .localKernel, message: error.localizedDescription)
         }
     }
 
@@ -298,14 +313,14 @@ public final class TunnelOrchestrator {
             do {
                 self.activeNaiveDescriptor = try await self.naiveResolver.resolve(settings: self.settings)
             } catch let error as NaiveResolverError {
-                // **v2.0.29:** naive binary failure is local-by-construction.
-                self.recordError("naive binary unusable: \(error.localizedDescription)", layer: .local)
+                // **v2.0.29:** naive binary failure is local-kernel-by-construction.
+                self.recordError("naive binary unusable: \(error.localizedDescription)", layer: .localKernel)
                 self.activeNaiveDescriptor = nil
             } catch {
-                // **v2.0.29:** naive binary inspection failure is local-by-construction.
+                // **v2.0.29:** naive binary inspection failure is local-kernel-by-construction.
                 self.recordError(
                     "naive binary inspection failed: \(error.localizedDescription)",
-                    layer: .local)
+                    layer: .localKernel)
                 self.activeNaiveDescriptor = nil
             }
         }
@@ -320,9 +335,12 @@ public final class TunnelOrchestrator {
     /// in `subscribeToEvents` knows the upcoming silence is
     /// expected (and not an engine crash).
     public func shutdown() async {
+        recordTelemetry("shutdown.begin")
         isShuttingDown = true
         selfHealTask?.cancel()
         selfHealTask = nil
+        vpsHealthTask?.cancel()
+        vpsHealthTask = nil
         flushPendingLogs()
         // Flush any pending debounced settings write before we go
         // away — without this, a settings edit made <250ms before
@@ -339,6 +357,15 @@ public final class TunnelOrchestrator {
         await core.stop()
         activeMode = .stopped
         isRunning = false
+        developerMetrics = .idle
+        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+            pid: nil,
+            naiveRunning: false,
+            firewallState: firewallState,
+            status: "Stopped"
+        )
+        lastTrafficSnapshot = nil
+        recordTelemetry("shutdown.success")
     }
 
     /// Set true the moment the orchestrator is about to tear the
@@ -696,6 +723,10 @@ public final class TunnelOrchestrator {
     ///     `proxyController` state is recovered by stopQuiet's
     ///     `disableAll()`, then startCore writes the correct config.
     public func switchMode(to newMode: ProxyMode) async throws {
+        recordTelemetry(
+            "switch.request",
+            details: ["target_mode": newMode.rawValue]
+        )
         selfHealTask?.cancel()
         selfHealTask = nil
         // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
@@ -713,6 +744,10 @@ public final class TunnelOrchestrator {
             return
         }
         if isRunning && activeMode == newMode {
+            recordTelemetry(
+                "switch.noop",
+                details: ["target_mode": newMode.rawValue]
+            )
             return
         }
         if isRunning {
@@ -749,6 +784,14 @@ public final class TunnelOrchestrator {
                     // the fallback full-restart path below.
                     try await verifyNaiveLiveAfterHotSwap()
                     appendInfo("switched from \(from.title) to \(newMode.title)")
+                    recordTelemetry(
+                        "switch.success",
+                        details: [
+                            "from_mode": from.rawValue,
+                            "to_mode": newMode.rawValue,
+                            "restart": "false",
+                        ]
+                    )
                     return
                 } catch {
                     // No-restart attempt failed — `proxyController`
@@ -790,9 +833,33 @@ public final class TunnelOrchestrator {
                 // dead engine.
                 activeMode = .stopped
                 isRunning = false
+                developerMetrics = .idle
+                developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+                    pid: nil,
+                    naiveRunning: false,
+                    firewallState: firewallState,
+                    status: "Start failed"
+                )
+                lastTrafficSnapshot = nil
+                recordTelemetry(
+                    "switch.failure",
+                    message: error.localizedDescription,
+                    details: [
+                        "from_mode": from.rawValue,
+                        "to_mode": newMode.rawValue,
+                    ]
+                )
                 throw error
             }
             appendInfo("switched from \(from.title) to \(newMode.title)")
+            recordTelemetry(
+                "switch.success",
+                details: [
+                    "from_mode": from.rawValue,
+                    "to_mode": newMode.rawValue,
+                    "restart": "true",
+                ]
+            )
             return
         }
         try await start(mode: newMode)
@@ -826,6 +893,10 @@ public final class TunnelOrchestrator {
     /// the error by falling through to the full engine restart —
     /// see the `do/catch` around the call site for the rationale.
     private func applyModeWithoutRestart(_ newMode: ProxyMode) async throws {
+        recordTelemetry(
+            "switch.hotswap.begin",
+            details: ["to_mode": newMode.rawValue]
+        )
         // Mirror `startCore`'s optimistic banner clear (line ~582):
         // a successful mode switch should not leave the user
         // staring at a stale failure banner. If the body below
@@ -884,6 +955,11 @@ public final class TunnelOrchestrator {
         // Single observable transition for SwiftUI. `isRunning` is
         // already true and stays true; only the mode chip changes.
         activeMode = newMode
+        updateDeveloperKernelHealth(pid: lastTrafficSnapshot?.pid)
+        recordTelemetry(
+            "switch.hotswap.applied",
+            details: ["to_mode": newMode.rawValue]
+        )
     }
 
     /// Internal stop path used by `switchMode` — same teardown work as
@@ -898,6 +974,10 @@ public final class TunnelOrchestrator {
     /// from `switchMode` so the UI doesn't observe the brief
     /// "stopped" intermediate state during a hot-swap (UX-F#5).
     private func stopQuiet(publishStoppedState: Bool = true) async {
+        recordTelemetry(
+            "stop.quiet.begin",
+            details: ["publish_stopped_state": String(publishStoppedState)]
+        )
         // **Engine-F#P1.2 (v0.2):** mark this stop as user-
         // initiated for the duration of the call so the
         // `stateChanged(false)` event handler doesn't post a
@@ -919,7 +999,19 @@ public final class TunnelOrchestrator {
         if publishStoppedState {
             activeMode = .stopped
             isRunning = false
+            developerMetrics = .idle
+            developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+                pid: nil,
+                naiveRunning: false,
+                firewallState: firewallState,
+                status: "Stopped"
+            )
+            lastTrafficSnapshot = nil
         }
+        recordTelemetry(
+            "stop.quiet.success",
+            details: ["publish_stopped_state": String(publishStoppedState)]
+        )
     }
 
     /// Internal start path mirror of `start(mode:)` that omits the
@@ -1006,6 +1098,10 @@ public final class TunnelOrchestrator {
     /// surface for engine errors too.
     private func startCore(mode: ProxyMode, log: Bool) async throws {
         guard mode != .stopped else { return }
+        recordTelemetry(
+            "start.begin",
+            details: ["target_mode": mode.rawValue]
+        )
         // Clear stale error from any previous failed attempt — a successful
         // start should not leave the user staring at last week's failure.
         // Hoisted above the do/catch so a successful start always begins
@@ -1077,7 +1173,7 @@ public final class TunnelOrchestrator {
                     port: port,
                     monitorIntervalSecs: PerformanceProfile.current.connectionMonitorIntervalSecs
                 ))
-            guard case .started = started else {
+            guard case .started(let naivePID) = started else {
                 throw OrchestratorError.unexpectedResponse
             }
 
@@ -1110,6 +1206,8 @@ public final class TunnelOrchestrator {
 
             activeMode = mode
             isRunning = true
+            updateDeveloperKernelHealth(pid: naivePID)
+            startVPSHealthLoop()
             // **UX-F#3 (v0.1.7.19):** capture which profile the
             // engine started with. The selectedProfile setter
             // compares against this to detect edits to the
@@ -1121,6 +1219,14 @@ public final class TunnelOrchestrator {
             if log {
                 appendInfo("started in \(mode.title)")
             }
+            recordTelemetry(
+                "start.success",
+                details: [
+                    "mode": mode.rawValue,
+                    "local_port": String(port),
+                    "naive_pid": String(naivePID),
+                ]
+            )
         } catch {
             // Build a user-readable message: the typed
             // `OrchestratorError` cases already carry localized
@@ -1133,19 +1239,28 @@ public final class TunnelOrchestrator {
                 (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
             // **v2.0.29 (Deterministic Error Reporting):** classify
-            // the connection failure into Local / Upstream / VPS so
+            // the connection failure into ISP / VPS / Local Kernel so
             // the banner chip pinpoints the broken node. Pre-2.0.29
             // the operator saw a generic "Couldn't start <mode>" with
             // no signal whether to check their wifi, their server, or
             // their app — they had to run `Diag` manually to find out.
             await recordClassifiedError("Couldn't start \(mode.title): \(detail)")
+            recordTelemetry(
+                "start.failure",
+                layer: lastErrorLayer,
+                message: detail,
+                details: ["mode": mode.rawValue]
+            )
             throw error
         }
     }
 
     public func stop() async {
+        recordTelemetry("stop.begin")
         selfHealTask?.cancel()
         selfHealTask = nil
+        vpsHealthTask?.cancel()
+        vpsHealthTask = nil
         // Guard against re-entry when we're already stopped. A
         // user spam-clicking the Stop button would otherwise loop
         // back through `disableAll()` (which iterates every active
@@ -1175,7 +1290,16 @@ public final class TunnelOrchestrator {
         }
         activeMode = .stopped
         isRunning = false
+        developerMetrics = .idle
+        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+            pid: nil,
+            naiveRunning: false,
+            firewallState: firewallState,
+            status: "Stopped"
+        )
+        lastTrafficSnapshot = nil
         appendInfo("stopped")
+        recordTelemetry("stop.success")
     }
 
     /// **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep.
@@ -1395,11 +1519,11 @@ public final class TunnelOrchestrator {
                 // **v2.0.29 (Deterministic Error Reporting):** the
                 // wake-recovery failure is exactly the path where
                 // layer attribution helps most — a wake into a
-                // dead Wi-Fi association reads as `.upstream`, a
+                // dead Wi-Fi association reads as `.isp`, a
                 // wake while travelling to a network that blocks
                 // the operator's VPS reads as `.vps`, and a wake
                 // where naive crashed during sleep reads as
-                // `.local`. The chip on the banner gives the
+                // `.localKernel`. The chip on the banner gives the
                 // operator the right next click — open Wi-Fi
                 // settings, open the server's status page, or
                 // click a mode to respawn naive — without having
@@ -1445,6 +1569,7 @@ public final class TunnelOrchestrator {
     }
 
     public func runDiagnostics() async {
+        recordTelemetry("diagnostics.begin")
         // Wall-clock the whole call client-side so the summary can show
         // total elapsed (engine probes are streamed individually via
         // `diagnosticProgress` events while we await the response).
@@ -1458,6 +1583,10 @@ public final class TunnelOrchestrator {
                 lastDiagnosticReport = report
                 let total = Self.formatElapsed(since: started)
                 appendInfo("diagnostics: \(report.probes.count) probes in \(total)")
+                recordTelemetry(
+                    "diagnostics.success",
+                    details: ["probe_count": String(report.probes.count), "elapsed": total]
+                )
             }
         } catch {
             recordError("diagnostics failed: \(error)")
@@ -1465,12 +1594,17 @@ public final class TunnelOrchestrator {
     }
 
     public func runLatencyTest(mode: ProxyTestMode) async {
+        recordTelemetry(
+            "latency.begin",
+            details: ["test_mode": mode.rawValue]
+        )
         let started = ContinuousClock.now
         appendInfo("latency: starting (\(mode.rawValue))…")
         do {
             let response = try await core.send(.runLatencyTest(mode: mode))
             if case .latency(let report) = response {
                 lastLatencyReport = report
+                updateEncryptionOverhead(from: report)
                 // Per-sample timing breakdown into the live log so the
                 // user can read the DNS / connect / TLS / first-byte
                 // split alongside the total — matches how clash-verge
@@ -1480,6 +1614,14 @@ public final class TunnelOrchestrator {
                 }
                 let total = Self.formatElapsed(since: started)
                 appendInfo("latency: \(report.samples.count) samples in \(total)")
+                recordTelemetry(
+                    "latency.success",
+                    details: [
+                        "test_mode": mode.rawValue,
+                        "sample_count": String(report.samples.count),
+                        "elapsed": total,
+                    ]
+                )
             }
         } catch {
             recordError("latency test failed: \(error)")
@@ -1562,6 +1704,7 @@ public final class TunnelOrchestrator {
     }
 
     private func handleEngineStreamEnded() async {
+        recordTelemetry("engine.stream_ended")
         let modeToRecover = modeBeforeSleep ?? activeMode
         let shouldRecover =
             isRunning
@@ -1574,6 +1717,16 @@ public final class TunnelOrchestrator {
             at: ProxyActiveFlag.path(in: paths.supportDirectory))
         isRunning = false
         activeMode = .stopped
+        developerMetrics = .idle
+        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+            pid: nil,
+            naiveRunning: false,
+            firewallState: firewallState,
+            status: "Engine exited"
+        )
+        lastTrafficSnapshot = nil
+        vpsHealthTask?.cancel()
+        vpsHealthTask = nil
         didBootstrap = false
         if shouldRecover {
             scheduleSelfHeal(
@@ -1582,7 +1735,7 @@ public final class TunnelOrchestrator {
         } else {
             recordError(
                 "Engine subprocess exited unexpectedly — system proxy reverted. Click a mode chip to relaunch the engine and try again.",
-                layer: .local
+                layer: .localKernel
             )
         }
     }
@@ -1619,7 +1772,7 @@ public final class TunnelOrchestrator {
             }
             self.recordError(
                 "Self-healing could not restart \(mode.title). System proxy is reverted; check the log before retrying.",
-                layer: .local
+                layer: .localKernel
             )
         }
     }
@@ -1662,8 +1815,22 @@ public final class TunnelOrchestrator {
             let wasRunning = isRunning
             let modeBeforeStop = activeMode
             isRunning = running
+            recordTelemetry(
+                running ? "engine.state.running" : "engine.state.stopped",
+                details: ["mode_before_event": modeBeforeStop.rawValue]
+            )
             if !running {
                 activeMode = .stopped
+                developerMetrics = .idle
+                developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+                    pid: nil,
+                    naiveRunning: false,
+                    firewallState: firewallState,
+                    status: "Stopped"
+                )
+                lastTrafficSnapshot = nil
+                vpsHealthTask?.cancel()
+                vpsHealthTask = nil
                 // **Engine-F#P1.2 (v0.2):** the recovery branch
                 // is gated on `!userStopInFlight` so an
                 // intentional Stop's own `stateChanged(false)`
@@ -1692,10 +1859,10 @@ public final class TunnelOrchestrator {
             // implementation auto-stopped on; we restore that behaviour
             // here. The other anomalies (count thresholds) stay advisory.
             if reason == .listeningOutsideLoopback {
-                // **v2.0.29:** anomaly auto-stop is local-by-construction
+                // **v2.0.29:** anomaly auto-stop is local-kernel-by-construction
                 // (e.g. naive bound outside loopback, too many established
-                // connections). Hardcoded `.local`.
-                recordError("Critical: \(detail). Auto-stopping.", layer: .local)
+                // connections). Hardcoded `.localKernel`.
+                recordError("Critical: \(detail). Auto-stopping.", layer: .localKernel)
                 // Single-flight the auto-stop. Multiple anomalies
                 // arriving in quick succession would otherwise
                 // queue multiple `stop()` Tasks, each racing on
@@ -1718,6 +1885,13 @@ public final class TunnelOrchestrator {
             } else {
                 appendInfo("\(glyph) \(step) (\(elapsedMs)ms)")
             }
+        case .trafficSnapshot(let pid, let established, let localClients, let remote):
+            updateDeveloperTraffic(
+                pid: pid,
+                established: established,
+                localClients: localClients,
+                remote: remote
+            )
         }
     }
 
@@ -1739,12 +1913,13 @@ public final class TunnelOrchestrator {
     /// [`recordClassifiedError`] which runs the layer probe before
     /// calling this; layer-by-construction paths (engine spawn
     /// failure, naive binary unusable, anomaly auto-stop) hardcode
-    /// `.local` because the classifier would just confirm what the
+    /// `.localKernel` because the classifier would just confirm what the
     /// caller already knows.
     private func recordError(_ message: String, layer: ErrorLayer? = nil) {
         let bounded = boundedLogText(message)
         lastError = bounded
         lastErrorLayer = layer
+        recordTelemetry("error.recorded", layer: layer, message: bounded)
         let prefix = layer.map { "[\($0.diagnosticLabel)] " } ?? ""
         enqueueLog(LogEntry(source: .stderr, text: "[error] \(prefix)\(bounded)"), flushNow: true)
     }
@@ -1798,7 +1973,7 @@ public final class TunnelOrchestrator {
     /// 1. **Apple NCSI endpoint** — Apple's own captive-portal
     ///    detection URL. Unlikely to be blocked by ISPs and
     ///    returns a deterministic body. If the probe fails,
-    ///    general internet is broken → upstream layer.
+    ///    general internet is broken → ISP layer.
     /// 2. **Direct TCP probe to the user's VPS hostname** —
     ///    bypasses the system proxy so the probe sees raw
     ///    network state, not the in-flight broken proxy path.
@@ -1808,13 +1983,13 @@ public final class TunnelOrchestrator {
     ///
     /// |           | Apple ✓     | Apple ✗      |
     /// |-----------|-------------|--------------|
-    /// | **VPS ✓** | `.local`    | `.upstream`* |
-    /// | **VPS ✗** | `.vps`      | `.upstream`  |
+    /// | **VPS ✓** | `.localKernel`    | `.isp`* |
+    /// | **VPS ✗** | `.vps`      | `.isp`  |
     ///
     /// `*` Apple unreachable but VPS reachable is unusual — typically
     /// indicates ISP-level NCSI blocking, DNS hijack, or a captive
     /// portal that lets the user's VPS through (some hotel networks).
-    /// Most actionable verdict for the user is `.upstream`: their
+    /// Most actionable verdict for the user is `.isp`: their
     /// path to the broader internet is constrained even if the
     /// specific path to their VPS happens to work.
     private func classifyConnectionFailure() async -> ErrorLayer? {
@@ -1844,10 +2019,10 @@ public final class TunnelOrchestrator {
         let vps = await vpsReachable
 
         switch (internet, vps) {
-        case (false, false): return .upstream
+        case (false, false): return .isp
         case (true, false): return .vps
-        case (false, true): return .upstream
-        case (true, true): return .local
+        case (false, true): return .isp
+        case (true, true): return .localKernel
         }
     }
 
@@ -1917,6 +2092,155 @@ public final class TunnelOrchestrator {
         if logEntries.count > maxLogEntries {
             logEntries.removeFirst(logEntries.count - maxLogEntries)
         }
+    }
+
+    private func updateDeveloperTraffic(
+        pid: UInt32,
+        established: UInt32,
+        localClients: UInt32,
+        remote: UInt32
+    ) {
+        let now = Date()
+        let snapshot = TrafficSnapshotState(
+            sampledAt: now,
+            pid: pid,
+            established: established,
+            localClients: localClients,
+            remote: remote
+        )
+        let prior = lastTrafficSnapshot
+        lastTrafficSnapshot = snapshot
+
+        let elapsed = prior.map { max(0.001, now.timeIntervalSince($0.sampledAt)) } ?? 0
+        let inboundDelta =
+            prior.map {
+                Int(localClients.saturatingDifference(from: $0.localClients))
+            } ?? 0
+        let outboundDelta =
+            prior.map {
+                Int(remote.saturatingDifference(from: $0.remote))
+            } ?? 0
+        let inboundBps =
+            elapsed > 0 ? Int((Double(inboundDelta) * 64_000.0 / elapsed).rounded()) : 0
+        let outboundBps =
+            elapsed > 0 ? Int((Double(outboundDelta) * 96_000.0 / elapsed).rounded()) : 0
+
+        developerMetrics.sampledAt = now
+        developerMetrics.throughput = DeveloperMetrics.Throughput(
+            inboundBytesPerSecond: inboundBps,
+            outboundBytesPerSecond: outboundBps,
+            status: established == 0 ? "No active flows" : "\(established) TCP flows"
+        )
+        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+            pid: pid,
+            naiveRunning: true,
+            firewallState: firewallState,
+            status: "PID \(pid) supervised"
+        )
+    }
+
+    private func updateDeveloperKernelHealth(pid: UInt32?) {
+        developerMetrics.sampledAt = Date()
+        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
+            pid: pid,
+            naiveRunning: isRunning,
+            firewallState: firewallState,
+            status: isRunning ? (pid.map { "PID \($0) starting" } ?? "Supervisor starting") : "Idle"
+        )
+    }
+
+    private func startVPSHealthLoop() {
+        vpsHealthTask?.cancel()
+        guard isRunning else { return }
+        guard let profile = selectedProfile else {
+            developerMetrics.vps = .idle
+            return
+        }
+
+        let server = profile.server
+        developerMetrics.vps = DeveloperMetrics.VPSHealth(
+            server: server,
+            reachable: nil,
+            dnsMs: nil,
+            tcpMs: nil,
+            status: "Checking",
+            checkedAt: nil
+        )
+
+        vpsHealthTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.vpsHealthTask = nil }
+            while !Task.isCancelled, self.isRunning {
+                await self.refreshVPSHealth(profile: profile)
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+            }
+        }
+    }
+
+    private func refreshVPSHealth(profile: Profile) async {
+        do {
+            let report = try await core.probe(profile: profile, timeoutSecs: 3)
+            developerMetrics.vps = DeveloperMetrics.VPSHealth(
+                server: report.server,
+                reachable: report.reachable,
+                dnsMs: report.dnsResolveMs,
+                tcpMs: report.tcpConnectMs,
+                status: report.reachable ? "Reachable" : (report.error ?? "Unreachable"),
+                checkedAt: Date()
+            )
+        } catch {
+            developerMetrics.vps = DeveloperMetrics.VPSHealth(
+                server: profile.server,
+                reachable: false,
+                dnsMs: nil,
+                tcpMs: nil,
+                status: error.localizedDescription,
+                checkedAt: Date()
+            )
+        }
+    }
+
+    private func updateEncryptionOverhead(from report: LatencyReport) {
+        guard report.samples.count >= 2 else {
+            developerMetrics.encryption = .idle
+            return
+        }
+        let direct = report.samples[0]
+        let proxied = report.samples[1]
+        guard direct.ok || proxied.ok else {
+            developerMetrics.encryption = DeveloperMetrics.EncryptionOverhead(
+                directHandshakeMs: direct.tlsMs,
+                proxiedHandshakeMs: proxied.tlsMs,
+                overheadMs: nil,
+                status: "Handshake probe failed",
+                sampledAt: Date()
+            )
+            return
+        }
+        let overhead = max(0, proxied.tlsMs - direct.tlsMs)
+        developerMetrics.encryption = DeveloperMetrics.EncryptionOverhead(
+            directHandshakeMs: direct.tlsMs,
+            proxiedHandshakeMs: proxied.tlsMs,
+            overheadMs: overhead,
+            status: "\(Self.formatMs(overhead)) TLS delta",
+            sampledAt: Date()
+        )
+    }
+
+    private func recordTelemetry(
+        _ event: String,
+        layer: ErrorLayer? = nil,
+        message: String? = nil,
+        details: [String: String] = [:]
+    ) {
+        telemetry.record(
+            event,
+            mode: activeMode == .stopped ? nil : activeMode,
+            running: isRunning,
+            layer: layer,
+            message: message,
+            details: details
+        )
     }
 
     public func clearLogs() {
@@ -2016,6 +2340,7 @@ public final class TunnelOrchestrator {
                 lastDiagnosticReport: lastDiagnosticReport,
                 lastLatencyReport: lastLatencyReport
             ),
+            developer: CoolTunnelViewState.Developer(metrics: developerMetrics),
             settings: settings,
             resources: CoolTunnelViewState.Resources(
                 activeNaiveDescriptor: activeNaiveDescriptor
@@ -2140,9 +2465,9 @@ public final class TunnelOrchestrator {
 /// pinpoints which node in the connection chain is broken when a
 /// connection-failure path fires. Eliminates the "self-doubt"
 /// failure mode where the user has to run manual diagnostics to
-/// figure out whether the issue is on their Mac, between their
-/// Mac and the public internet, or on the operator's NaiveProxy
-/// server. Classifier ([`TunnelOrchestrator.classifyConnectionFailure`])
+/// figure out whether the issue is the ISP path, the VPS, or the
+/// local macOS kernel/app stack. Classifier
+/// ([`TunnelOrchestrator.classifyConnectionFailure`])
 /// runs two parallel probes (Apple's NCSI endpoint for general
 /// upstream reachability + a direct TCP probe to the user's VPS
 /// hostname bypassing the proxy) with a 3 second budget; both
@@ -2152,12 +2477,12 @@ public enum ErrorLayer: String, Sendable, Codable, Equatable {
     /// The issue is on the user's Mac — `naive` isn't running, the
     /// loopback bind failed, the OS firewall is blocking outbound
     /// traffic, or the app's saved credentials are wrong.
-    case local
+    case localKernel
     /// The issue is between the Mac and the public internet —
     /// the ISP, Wi-Fi association, captive portal, or DNS. The
     /// classifier reaches this verdict when even Apple's NCSI
     /// endpoint is unreachable.
-    case upstream
+    case isp
     /// The issue is the user's NaiveProxy server — DNS for the
     /// configured hostname doesn't resolve, the host is up but
     /// `:443` refuses connections, or the upstream daemon is
@@ -2171,8 +2496,8 @@ public enum ErrorLayer: String, Sendable, Codable, Equatable {
     /// inside the banner's vertical metric.
     public var diagnosticLabel: String {
         switch self {
-        case .local: "Local"
-        case .upstream: "Upstream"
+        case .localKernel: "Local Kernel"
+        case .isp: "ISP"
         case .vps: "VPS"
         }
     }
@@ -2184,18 +2509,18 @@ public enum ErrorLayer: String, Sendable, Codable, Equatable {
     /// the original `lastError` so the message stays scannable.
     public var humanExplanation: String {
         switch self {
-        case .local:
+        case .localKernel:
             return
-                "the issue is on your Mac — `naive` may not be running, "
+                "the issue is in the Local Kernel layer — `naive` may not be running, "
                 + "the saved credentials may be wrong, or the OS firewall "
                 + "may be blocking outbound traffic"
-        case .upstream:
+        case .isp:
             return
-                "the issue is between your Mac and the public internet — "
-                + "your ISP, Wi-Fi, captive portal, or DNS"
+                "the issue is in the ISP layer — Wi-Fi, captive portal, DNS, "
+                + "or the route from this Mac to the public internet"
         case .vps:
             return
-                "the issue is your NaiveProxy server — its hostname may "
+                "the issue is in the VPS layer — its hostname may "
                 + "not resolve, `:443` may refuse connections, or the "
                 + "daemon may be rejecting the handshake"
         }
@@ -2237,6 +2562,20 @@ public enum SleepWakeState: String, Sendable, Codable, Equatable {
     /// `didWakeNotification` fired; the orchestrator is re-spawning
     /// the engine and reapplying the pre-sleep `ProxyMode`.
     case recovering
+}
+
+private struct TrafficSnapshotState: Sendable, Equatable {
+    let sampledAt: Date
+    let pid: UInt32
+    let established: UInt32
+    let localClients: UInt32
+    let remote: UInt32
+}
+
+extension UInt32 {
+    fileprivate func saturatingDifference(from prior: UInt32) -> UInt32 {
+        self >= prior ? self - prior : 0
+    }
 }
 
 /// **Conforms to `LocalizedError`, not just `Error`.** Without

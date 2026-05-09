@@ -16,6 +16,7 @@ public struct ControlPanelView: View {
     public let state: CoolTunnelViewState.ControlPanel
     @Binding public var pendingMode: ProxyMode
     @Binding public var isShowingSettings: Bool
+    @Binding public var isShowingDeveloperOverlay: Bool
     public let onIntent: (TunnelIntent) -> Void
 
     public init(isShowingSettings: Binding<Bool>) {
@@ -27,6 +28,7 @@ public struct ControlPanelView: View {
         )
         self._pendingMode = .constant(.smart)
         self._isShowingSettings = isShowingSettings
+        self._isShowingDeveloperOverlay = .constant(false)
         self.onIntent = { _ in }
     }
 
@@ -41,11 +43,13 @@ public struct ControlPanelView: View {
         state: CoolTunnelViewState.ControlPanel,
         pendingMode: Binding<ProxyMode>,
         isShowingSettings: Binding<Bool>,
+        isShowingDeveloperOverlay: Binding<Bool>,
         onIntent: @escaping (TunnelIntent) -> Void
     ) {
         self.state = state
         self._pendingMode = pendingMode
         self._isShowingSettings = isShowingSettings
+        self._isShowingDeveloperOverlay = isShowingDeveloperOverlay
         self.onIntent = onIntent
     }
 
@@ -55,6 +59,7 @@ public struct ControlPanelView: View {
             primaryButton
             diagnosticsButton
             latencyMenu
+            developerOverlayButton
             settingsButton
         }
         // Keep external mode changes (menu bar, recovery, deep link)
@@ -207,6 +212,21 @@ public struct ControlPanelView: View {
         .keyboardShortcut(",", modifiers: .command)
         .help("Open Settings")
         .accessibilityLabel("Settings")
+    }
+
+    private var developerOverlayButton: some View {
+        Button {
+            isShowingDeveloperOverlay.toggle()
+        } label: {
+            Label("Developer Overlay", systemImage: "waveform.path.ecg")
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .help(isShowingDeveloperOverlay ? "Hide Developer Overlay" : "Show Developer Overlay")
+        .accessibilityLabel(
+            isShowingDeveloperOverlay ? "Hide Developer Overlay" : "Show Developer Overlay"
+        )
     }
 
     /// Project-wide UI logger for the main-window control surface.

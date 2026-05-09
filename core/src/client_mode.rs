@@ -691,6 +691,14 @@ async fn monitor_loop(
         }
         match monitor::run(pid, port).await {
             Ok(snapshot) => {
+                let _ = events
+                    .send(Event::TrafficSnapshot {
+                        pid,
+                        established: snapshot.established,
+                        local_clients: snapshot.local_clients,
+                        remote: snapshot.remote,
+                    })
+                    .await;
                 if let Some(anomaly) = snapshot.anomaly {
                     let reason: AnomalyReason = (&anomaly).into();
                     let admitted = {
