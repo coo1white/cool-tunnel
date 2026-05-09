@@ -111,9 +111,10 @@ struct MenuBarStatusContent: View {
     /// All three converge on the same `switchMode(to:)` call,
     /// so the orchestrator's `transitionInFlight` guard
     /// (Engine-F#P1.3) covers menu-bar / window races.
-    /// Disabled when no profile is available — without one
-    /// the engine can't start, and clicking would surface a
-    /// "no profile selected" error from the new P0 #1 path.
+    /// Disabled while stopped unless the selected profile has a
+    /// startable shape. This is the menu-bar half of the defensive
+    /// input contract: ambiguous settings never reach the engine
+    /// from a secondary control surface.
     @ViewBuilder
     private func modeRow(
         _ mode: ProxyMode,
@@ -136,7 +137,8 @@ struct MenuBarStatusContent: View {
                 Text(label)
             }
         }
-        .disabled(!state.hasSelectedProfile)
+        .disabled(!state.isRunning && !state.selectedProfileCanRequestStart)
+        .help(modeHelp(for: mode, state: state))
     }
 
     /// Emits menu-bar operator intent through the same dispatcher as
@@ -145,6 +147,18 @@ struct MenuBarStatusContent: View {
     /// lifecycle semantics.
     private func send(_ intent: TunnelIntent) {
         Task { await orchestrator.perform(intent) }
+    }
+
+    private func modeHelp(for mode: ProxyMode, state: CoolTunnelViewState.MenuBar) -> String {
+        if state.isRunning {
+            return state.activeMode == mode
+                ? "\(mode.title) is active"
+                : "Switch to \(mode.title)"
+        }
+        if state.selectedProfileCanRequestStart {
+            return "Start in \(mode.title)"
+        }
+        return "Fix the selected profile before starting"
     }
 
     /// **Engine-F#P2.4 (v0.2):** project-wide UI logger. Empty

@@ -24,7 +24,8 @@ public struct ControlPanelView: View {
             isRunning: false,
             activeMode: .stopped,
             hasSelectedProfile: false,
-            selectedProfileIsStartable: false
+            selectedProfileIsStartable: false,
+            selectedProfileCanRequestStart: false
         )
         self._pendingMode = .constant(.smart)
         self._isShowingSettings = isShowingSettings
@@ -142,8 +143,11 @@ public struct ControlPanelView: View {
         guard state.hasSelectedProfile else {
             return "Pick or create a profile first"
         }
+        if !state.selectedProfileCanRequestStart {
+            return "Fix server, username, and local port before starting"
+        }
         if !state.selectedProfileIsStartable {
-            return "Fill in server, username, password, and local port to start"
+            return "Password will be checked when you start"
         }
         return "Start in \(pendingMode.title) mode"
     }
@@ -153,8 +157,11 @@ public struct ControlPanelView: View {
         guard state.hasSelectedProfile else {
             return "Start disabled — pick or create a profile first"
         }
+        if !state.selectedProfileCanRequestStart {
+            return "Start disabled — fix server, username, and local port"
+        }
         if !state.selectedProfileIsStartable {
-            return "Start disabled — fill in server, username, password, and local port"
+            return "Start proxy in \(pendingMode.title) mode; password will be checked first"
         }
         return "Start proxy in \(pendingMode.title) mode"
     }

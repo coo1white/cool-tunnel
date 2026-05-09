@@ -2290,6 +2290,8 @@ public final class TunnelOrchestrator {
             }
         let hasSelectedProfile = selectedProfile != nil
         let selectedProfileIsStartable = selectedProfile?.isStartable ?? false
+        let selectedProfileCanRequestStart =
+            selectedProfile.map(Self.profileCanRequestStart) ?? false
         let connection = CoolTunnelViewState.Connection(
             isRunning: isRunning,
             activeMode: activeMode,
@@ -2301,7 +2303,8 @@ public final class TunnelOrchestrator {
             isRunning: isRunning,
             activeMode: activeMode,
             hasSelectedProfile: hasSelectedProfile,
-            selectedProfileIsStartable: selectedProfileIsStartable
+            selectedProfileIsStartable: selectedProfileIsStartable,
+            selectedProfileCanRequestStart: selectedProfileCanRequestStart
         )
         return CoolTunnelViewState(
             ui: ui,
@@ -2328,7 +2331,8 @@ public final class TunnelOrchestrator {
                 ),
                 isRunning: isRunning,
                 activeMode: activeMode,
-                hasSelectedProfile: hasSelectedProfile
+                hasSelectedProfile: hasSelectedProfile,
+                selectedProfileCanRequestStart: selectedProfileCanRequestStart
             ),
             profiles: CoolTunnelViewState.Profiles(
                 all: profiles,
@@ -2359,6 +2363,7 @@ public final class TunnelOrchestrator {
     public func perform(_ intent: TunnelIntent) async {
         switch intent {
         case .switchMode(let mode):
+            guard mode == .stopped || guardCanRequestStart() else { return }
             do {
                 try await switchMode(to: mode)
             } catch {
@@ -2368,6 +2373,7 @@ public final class TunnelOrchestrator {
             }
         case .toggleRunning(let preferredMode):
             let target: ProxyMode = isRunning ? .stopped : preferredMode
+            guard target == .stopped || guardCanRequestStart() else { return }
             do {
                 try await switchMode(to: target)
             } catch {
@@ -2441,6 +2447,39 @@ public final class TunnelOrchestrator {
     }
 
     private static let uiIntentLogger = Logger.cooltunnel("UI.Intent")
+
+    private static func profileCanRequestStart(_ profile: Profile) -> Bool {
+        profile.serverValidation == .valid
+            && !profile.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && profile.localPortValue != nil
+    }
+
+    /// Final UI-intent gate before any control surface reaches the
+    /// engine. The form performs live validation, but this guard keeps
+    /// the menu bar, keyboard shortcuts, and future surfaces under the
+    /// same "First Scold, Then Do Good" contract.
+    private func guardCanRequestStart() -> Bool {
+        guard var profile = selectedProfile else {
+            recordError("Start rejected: select or create a profile first.", layer: .localKernel)
+            return false
+        }
+        guard Self.profileCanRequestStart(profile) else {
+            recordError(
+                "Start rejected: fix server, username, and local port before launching.",
+                layer: .localKernel
+            )
+            return false
+        }
+        if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let stored = profileStore.password(forProfileID: profile.id)
+            profile.password = stored
+        }
+        guard !profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            recordError("Start rejected: enter a password for the selected profile.", layer: .localKernel)
+            return false
+        }
+        return true
+    }
 
     private func parsePort(_ raw: String) throws -> UInt16 {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
