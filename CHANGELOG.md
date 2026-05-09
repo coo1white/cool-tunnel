@@ -9,6 +9,41 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.34] — 2026-05-09 — Operator Start Gate
+
+> **Every Start path now rejects ambiguous profile settings before
+> the engine is touched.**
+
+Operator-certainty release for the SwiftUI control surfaces. The main
+window and menu bar now share the same startability signal, and the
+orchestrator enforces a final local guard before routing any UI intent
+to the Rust core.
+
+### Changed
+
+- Added `selectedProfileCanRequestStart` to `CoolTunnelViewState` so
+  the main control row and menu-bar mode rows agree on whether a
+  stopped tunnel can request Start.
+- Menu-bar mode rows now stay disabled while stopped until the selected
+  profile has a valid server shape, non-empty username, and valid local
+  port.
+- The primary Start button now distinguishes malformed profile shape
+  from password hydration; stored credentials are still checked only
+  after an explicit Start intent.
+- `TunnelOrchestrator.perform(_:)` now records a local-kernel rejection
+  and returns before the engine sees malformed Start or mode-switch
+  intents.
+
+### Verified
+
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-features`
+- `cargo deny check`
+- `shellcheck scripts/*.sh`
+
 ## [2.0.33] — 2026-05-09 — Observability Certainty
 
 > **The operator can now inspect tunnel lifecycle, throughput,
