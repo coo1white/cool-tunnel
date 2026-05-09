@@ -98,13 +98,14 @@ struct CoolTunnelApp: App {
         // glance the glyph for state, click for mode switch +
         // Start/Stop without focus-stealing the main window. The
         // MenuBarExtra's label closure reads the orchestrator's
-        // observable state, so the glyph swaps automatically on
-        // run-state and error transitions.
+        // declarative view-state schema, so the glyph swaps
+        // automatically on run-state and error transitions without
+        // keeping a second symbol-mapping table in the App scene.
         MenuBarExtra {
             MenuBarStatusContent()
                 .environment(orchestrator)
         } label: {
-            Image(systemName: menuBarSymbol(for: orchestrator))
+            Image(systemName: orchestrator.viewState().menuBar.symbolName)
         }
         .menuBarExtraStyle(.menu)
 
@@ -121,20 +122,6 @@ struct CoolTunnelApp: App {
         .defaultSize(width: 560, height: 560)
         .windowResizability(.contentSize)
     }
-}
-
-/// Maps the orchestrator's observable state to the SF Symbol shown
-/// in the menu bar. **Shape, not just colour** — colour-blind users
-/// should be able to read state at a glance: outline ring (off /
-/// connecting), filled ring (running), warning triangle (error).
-@MainActor
-private func menuBarSymbol(for orchestrator: TunnelOrchestrator) -> String {
-    if orchestrator.lastError != nil {
-        return "exclamationmark.triangle.fill"
-    }
-    return orchestrator.isRunning
-        ? "arrow.up.right.circle.fill"
-        : "arrow.up.right.circle"
 }
 
 /// Centralised window identifiers. Used by `Window(_:id:)` and by

@@ -9,6 +9,47 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.32] — 2026-05-09 — Declarative UI State Schema
+
+> **The SwiftUI surface now renders from an explicit, AI-friendly
+> state schema and emits named operator intents instead of hiding
+> tunnel side effects inside leaf views.**
+
+Architecture release for maintainability on the LTSC line. No engine
+protocol change; the existing connection lifecycle, self-healing, and
+menu-bar controls are preserved behind a clearer state boundary.
+
+### Added
+
+- **`CoolTunnelViewState`** as the structured SwiftUI-facing schema
+  for connection, header, controls, menu-bar, profiles, activity log,
+  diagnostics, settings, and resource descriptor state.
+- **`CoolTunnelUIState`** for local view draft state such as Settings
+  visibility and the pending mode selection.
+- **`TunnelIntent`** as the named UI-to-orchestrator command surface
+  for mode changes, Start/Stop, diagnostics, latency tests, error
+  dismissal, and log clearing.
+
+### Changed
+
+- Main-window header, control panel, menu-bar content, menu-bar glyph,
+  and log-clear action now render from the schema and dispatch intents
+  through `TunnelOrchestrator.perform(_:)`.
+- Inline documentation now links the schema, status pill, error banner,
+  and control panel to the Heng / Silent Operator invariant: views
+  describe state and operator intent; the orchestrator owns recovery,
+  retry, and system side effects.
+
+### Verified
+
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' build`
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-features`
+- `cargo deny check`
+- `shellcheck scripts/*.sh`
+
 ## [2.0.31] — 2026-05-09 — Self-Healing Stability + Log Pressure Hardening
 
 > **The tunnel now recovers itself from core exits, proxy drops,
