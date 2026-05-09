@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use cool_tunnel_core::config::{generate_pac, NaiveConfig};
-use cool_tunnel_core::diagnostics::{run_diagnostics, run_latency};
+use cool_tunnel_core::diagnostics::{run_debug_handshake, run_diagnostics, run_latency};
 use cool_tunnel_core::domain::Profile;
 use cool_tunnel_core::monitor;
 use cool_tunnel_core::preflight;
@@ -542,6 +542,16 @@ async fn dispatch(
             Ok(report) => Ok(ResponsePayload::Probe(report)),
             Err(err) => Err(ErrorPayload::new("probe_failed", err.to_string())),
         },
+        RequestKind::DebugHandshake {
+            binary_path,
+            profile,
+            timeout_secs,
+        } => {
+            let report = run_debug_handshake(&binary_path, &profile, timeout_secs)
+                .await
+                .map_err(|err| ErrorPayload::new("debug_handshake_failed", err.to_string()))?;
+            Ok(ResponsePayload::DebugHandshake(report))
+        }
         // The lib crate defines `RequestKind` with
         // `#[non_exhaustive]`; the binary crate (this file is a
         // submodule of `main.rs`) imports it through the public

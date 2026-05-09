@@ -232,6 +232,17 @@ pub enum RequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
     },
+    /// Spawn a temporary reference `naive` client and drive one
+    /// HTTP CONNECT through it for handshake diagnostics.
+    DebugHandshake {
+        /// Filesystem path to the `naive` executable.
+        binary_path: PathBuf,
+        /// The validated profile to test.
+        profile: Profile,
+        /// Optional end-to-end deadline in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// One frame written by the engine on stdout.
@@ -313,6 +324,8 @@ pub enum ResponsePayload {
     },
     /// `probe_server` reply.
     Probe(ProbeReport),
+    /// `debug_handshake` reply.
+    DebugHandshake(DebugHandshakeReport),
 }
 
 /// Structured failure detail accompanying an [`Outbound::Error`] frame.
@@ -374,6 +387,30 @@ pub struct ProbeReport {
     pub tcp_connect_ms: f64,
     /// Free-form failure detail when `reachable` is `false`. `None`
     /// when the probe succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result of [`RequestKind::DebugHandshake`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DebugHandshakeReport {
+    /// Upstream proxy server under test.
+    pub server: String,
+    /// CONNECT target used to force one proxied stream.
+    pub target: String,
+    /// `true` when the temporary local HTTP proxy returned CONNECT 200.
+    pub ok: bool,
+    /// Wall-clock diagnostic duration in milliseconds.
+    pub elapsed_ms: u64,
+    /// First 1024 bytes written to the temporary local naive listener.
+    pub local_sent_hex: String,
+    /// First 1024 bytes read back from the temporary local naive listener.
+    pub local_received_hex: String,
+    /// Redacted stdout lines captured from the temporary naive child.
+    pub naive_stdout: Vec<String>,
+    /// Redacted stderr lines captured from the temporary naive child.
+    pub naive_stderr: Vec<String>,
+    /// Failure detail when the diagnostic did not complete cleanly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -755,6 +792,62 @@ mod tests {
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: Outbound = serde_json::from_str(&s).unwrap();
+        assert_eq!(out, back);
+    }
+
+    #[test]
+    fn debug_handshake_request_round_trips() {
+        let req = Request {
+            id: 23,
+            kind: RequestKind::DebugHandshake {
+                binary_path: "/usr/local/bin/naive".into(),
+                profile: sample_profile(),
+                timeout_secs: Some(12),
+            },
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["method"], "debug_handshake");
+        assert_eq!(value["params"]["binary_path"], "/usr/local/bin/naive");
+        assert_eq!(value["params"]["profile"]["server"], "naive.example.com");
+        assert_eq!(value["params"]["timeout_secs"], 12);
+        let back: Request = serde_json::from_value(value).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn debug_handshake_response_has_flat_shape_with_optional_error() {
+        let out = Outbound::Response {
+            id: 24,
+            result: ResponsePayload::DebugHandshake(DebugHandshakeReport {
+                server: "naive.example.com:443".to_owned(),
+                target: "www.google.com:443".to_owned(),
+                ok: false,
+                elapsed_ms: 1200,
+                local_sent_hex: "43 4f 4e 4e 45 43 54".to_owned(),
+                local_received_hex: String::new(),
+                naive_stdout: Vec::new(),
+                naive_stderr: vec!["Preamble error: ERR_PROXY_CONNECTION_FAILED".to_owned()],
+                error: Some("debug handshake timed out after 12s".to_owned()),
+            }),
+        };
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["kind"], "response");
+        assert_eq!(value["result"]["type"], "debug_handshake");
+        assert_eq!(value["result"]["server"], "naive.example.com:443");
+        assert_eq!(value["result"]["target"], "www.google.com:443");
+        assert_eq!(value["result"]["ok"], false);
+        assert_eq!(value["result"]["elapsed_ms"], 1200);
+        assert_eq!(value["result"]["local_sent_hex"], "43 4f 4e 4e 45 43 54");
+        assert_eq!(value["result"]["local_received_hex"], "");
+        assert_eq!(
+            value["result"]["naive_stderr"][0],
+            "Preamble error: ERR_PROXY_CONNECTION_FAILED"
+        );
+        assert_eq!(
+            value["result"]["error"],
+            "debug handshake timed out after 12s"
+        );
+        let back: Outbound = serde_json::from_value(value).unwrap();
         assert_eq!(out, back);
     }
 
