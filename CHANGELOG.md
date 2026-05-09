@@ -9,6 +9,42 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.35] — 2026-05-10 — Debug Handshake Probe
+
+> **Operators can now compare the GUI client’s reference-naive
+> handshake path against hardened server suppression logs.**
+
+Handshake-diagnostics release for servers running the aggressive
+stealth and anti-tracking policy. The GUI still delegates public
+TLS/ALPN/header fingerprinting to the bundled reference NaiveProxy
+client; this release adds a dedicated probe path that records
+wire-adjacent first-byte evidence without exposing credentials in
+process arguments.
+
+### Added
+
+- Added a `debug_handshake` Rust RPC that spawns a temporary reference
+  `naive` client, drives one deterministic local CONNECT probe through
+  it, and reports success, elapsed time, first-byte hex, and redacted
+  child-process logs.
+- Added a Debug Handshake control-panel action that validates and
+  hydrates the selected profile, resolves the bundled `naive` binary,
+  and writes the diagnostic report into the live GUI log.
+- Added Swift/Rust protocol models and round-trip coverage for the new
+  debug-handshake request and response payloads.
+
+### Changed
+
+- The diagnostic stores temporary NaiveProxy config in a `0600` file
+  and deletes it on drop, avoiding credential leakage through command
+  arguments while preserving reference-client handshake behavior.
+
+### Verified
+
+- `cargo fmt --check`
+- `cargo test`
+- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+
 ## [2.0.34] — 2026-05-09 — Operator Start Gate
 
 > **Every Start path now rejects ambiguous profile settings before
