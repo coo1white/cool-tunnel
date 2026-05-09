@@ -7,6 +7,7 @@
 //! captured timing metrics are parsed into a [`LatencySample`] and bundled
 //! into a [`LatencyReport`] or [`DiagnosticReport`] for the wire protocol.
 
+mod debug_handshake;
 mod metrics;
 mod probe;
 
@@ -18,6 +19,7 @@ use tokio::sync::mpsc;
 use crate::domain::{Port, ProxyTestMode};
 use crate::protocol::{DiagnosticReport, Event, LatencyReport, Outbound, ProbeResult};
 
+pub use debug_handshake::run_debug_handshake;
 pub use metrics::{parse_write_out, secs_to_ms};
 pub use probe::{run_probe, ProbeOptions};
 

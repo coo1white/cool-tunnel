@@ -356,6 +356,7 @@ public enum CoreResponse: Sendable, Hashable {
     /// report rather than a transport error so the UI can render
     /// timing alongside an unreachable result.
     case probe(ProbeReport)
+    case debugHandshake(DebugHandshakeReport)
 
     private enum Tag: String, Decodable {
         case ack
@@ -369,6 +370,7 @@ public enum CoreResponse: Sendable, Hashable {
         case naiveLiveness = "naive_liveness"
         case helloReply = "hello_reply"
         case probe
+        case debugHandshake = "debug_handshake"
     }
 
     private enum FlatKeys: String, CodingKey {
@@ -417,6 +419,8 @@ extension CoreResponse: Decodable {
             // straight from `decoder` (the same container that
             // already produced the tag) picks them up.
             self = .probe(try ProbeReport(from: decoder))
+        case .debugHandshake:
+            self = .debugHandshake(try DebugHandshakeReport(from: decoder))
         }
     }
 }
@@ -492,6 +496,27 @@ public struct ProbeReport: Sendable, Codable, Hashable {
         case server, reachable, error
         case dnsResolveMs = "dns_resolve_ms"
         case tcpConnectMs = "tcp_connect_ms"
+    }
+}
+
+public struct DebugHandshakeReport: Sendable, Codable, Hashable {
+    public let server: String
+    public let target: String
+    public let ok: Bool
+    public let elapsedMs: UInt64
+    public let localSentHex: String
+    public let localReceivedHex: String
+    public let naiveStdout: [String]
+    public let naiveStderr: [String]
+    public let error: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case server, target, ok, error
+        case elapsedMs = "elapsed_ms"
+        case localSentHex = "local_sent_hex"
+        case localReceivedHex = "local_received_hex"
+        case naiveStdout = "naive_stdout"
+        case naiveStderr = "naive_stderr"
     }
 }
 
@@ -584,6 +609,7 @@ public enum CoreRequest: Sendable, Hashable {
     /// per-step deadline in seconds, clamped server-side to
     /// `[1, 30]`; `nil` defaults to 5.
     case probeServer(profile: Profile, timeoutSecs: UInt64? = nil)
+    case debugHandshake(binaryPath: String, profile: Profile, timeoutSecs: UInt64? = nil)
 
     public var method: String {
         switch self {
@@ -598,6 +624,7 @@ public enum CoreRequest: Sendable, Hashable {
         case .probeNaiveLive: "probe_naive_live"
         case .hello: "hello"
         case .probeServer: "probe_server"
+        case .debugHandshake: "debug_handshake"
         }
     }
 }
@@ -643,6 +670,15 @@ public struct CoreRequestFrame: Sendable, Encodable {
         case .probeServer(let profile, let timeoutSecs):
             try container.encode(
                 ProbeServerParams(profile: profile, timeoutSecs: timeoutSecs),
+                forKey: .params
+            )
+        case .debugHandshake(let binary, let profile, let timeoutSecs):
+            try container.encode(
+                DebugHandshakeParams(
+                    binaryPath: binary,
+                    profile: profile,
+                    timeoutSecs: timeoutSecs
+                ),
                 forKey: .params
             )
         }
@@ -706,6 +742,25 @@ private struct ProbeServerParams: Encodable {
 
     func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(profile, forKey: .profile)
+        try container.encodeIfPresent(timeoutSecs, forKey: .timeoutSecs)
+    }
+}
+
+private struct DebugHandshakeParams: Encodable {
+    let binaryPath: String
+    let profile: Profile
+    let timeoutSecs: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case binaryPath = "binary_path"
+        case profile
+        case timeoutSecs = "timeout_secs"
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(binaryPath, forKey: .binaryPath)
         try container.encode(profile, forKey: .profile)
         try container.encodeIfPresent(timeoutSecs, forKey: .timeoutSecs)
     }

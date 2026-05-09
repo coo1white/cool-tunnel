@@ -40,6 +40,7 @@ public enum TunnelIntent: Sendable, Equatable {
     case toggleRunning(preferredMode: ProxyMode)
     case runDiagnostics
     case runLatencyTest(ProxyTestMode)
+    case runDebugHandshake
     case dismissError
     case clearLogs
 }

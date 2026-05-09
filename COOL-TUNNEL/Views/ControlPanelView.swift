@@ -59,6 +59,7 @@ public struct ControlPanelView: View {
             modePicker
             primaryButton
             diagnosticsButton
+            debugHandshakeButton
             latencyMenu
             developerOverlayButton
             settingsButton
@@ -180,6 +181,20 @@ public struct ControlPanelView: View {
         .disabled(!state.isRunning)
         .help("Run diagnostics through the active proxy connection.")
         .accessibilityLabel("Run diagnostics")
+    }
+
+    private var debugHandshakeButton: some View {
+        Button {
+            onIntent(.runDebugHandshake)
+        } label: {
+            Label("Debug Handshake", systemImage: "network.badge.shield.half.filled")
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .disabled(!state.selectedProfileCanRequestStart)
+        .help("Run a temporary reference-naive handshake probe and log first-byte hex evidence.")
+        .accessibilityLabel("Debug handshake")
     }
 
     private var latencyMenu: some View {

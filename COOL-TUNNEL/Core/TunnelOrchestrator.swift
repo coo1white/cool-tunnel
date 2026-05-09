@@ -1628,6 +1628,60 @@ public final class TunnelOrchestrator {
         }
     }
 
+
+    public func runDebugHandshake() async {
+        recordTelemetry("debug_handshake.begin")
+        let started = ContinuousClock.now
+        appendInfo("debug handshake: starting reference-naive probe…")
+        do {
+            guard var profile = selectedProfile else {
+                throw OrchestratorError.noProfile
+            }
+            if profile.password.isEmpty {
+                let stored = profileStore.password(forProfileID: profile.id)
+                if !stored.isEmpty {
+                    profile.password = stored
+                }
+            }
+            let validation = try await core.send(.validateProfile(profile))
+            guard case .validation(let validationReport) = validation, validationReport.ok else {
+                throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
+            }
+            let descriptor = try await naiveResolver.resolve(settings: settings)
+            activeNaiveDescriptor = descriptor
+            let response = try await core.send(
+                .debugHandshake(
+                    binaryPath: descriptor.url.path,
+                    profile: profile,
+                    timeoutSecs: 12
+                )
+            )
+            guard case .debugHandshake(let report) = response else {
+                throw OrchestratorError.unexpectedResponse
+            }
+            let glyph = report.ok ? "✓" : "✗"
+            appendInfo("debug handshake: \(glyph) server=\(report.server) target=\(report.target) elapsed=\(report.elapsedMs)ms")
+            appendInfo("debug handshake sent[0..1024]=\(report.localSentHex)")
+            appendInfo("debug handshake recv[0..1024]=\(report.localReceivedHex.isEmpty ? "<empty>" : report.localReceivedHex)")
+            for line in report.naiveStdout {
+                appendInfo("debug handshake naive stdout: \(line)")
+            }
+            for line in report.naiveStderr {
+                appendLog(source: .stderr, text: "[debug handshake naive stderr] \(line)")
+            }
+            if let error = report.error, !error.isEmpty {
+                appendLog(source: .stderr, text: "[debug handshake error] \(error)")
+            }
+            let total = Self.formatElapsed(since: started)
+            recordTelemetry(
+                report.ok ? "debug_handshake.success" : "debug_handshake.failure",
+                details: ["elapsed": total, "server": report.server, "target": report.target]
+            )
+        } catch {
+            recordError("debug handshake failed: \(error)", layer: .localKernel)
+        }
+    }
+
     // MARK: - Time formatting helpers
 
     /// Renders a monotonic interval as `Nms` (or `N.NNs` if ≥ 1s) for
@@ -2385,6 +2439,8 @@ public final class TunnelOrchestrator {
             await runDiagnostics()
         case .runLatencyTest(let mode):
             await runLatencyTest(mode: mode)
+        case .runDebugHandshake:
+            await runDebugHandshake()
         case .dismissError:
             dismissLastError()
         case .clearLogs:
