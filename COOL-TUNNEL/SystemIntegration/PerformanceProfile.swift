@@ -75,6 +75,53 @@ public enum PerformanceProfile: Sendable, Equatable {
         }
     }
 
+    /// Engine connection-monitor cadence in seconds. The monitor
+    /// shells out to `lsof`, so keeping it below the historical
+    /// 5-second default on older Macs shows up in Activity Monitor's
+    /// Energy tab. Self-healing still handles natural-death events;
+    /// these values only govern advisory socket/anomaly polling.
+    public var connectionMonitorIntervalSecs: UInt64 {
+        switch self {
+        case .full: 10
+        case .standard: 15
+        case .light: 30
+        }
+    }
+
+    /// MainActor log coalescing window. Engine log lines can arrive
+    /// in bursts; publishing each one individually forces SwiftUI to
+    /// diff and auto-scroll for every line. Batching keeps the UI
+    /// visually live while making the common burst path cheap.
+    public var logFlushIntervalNanos: UInt64 {
+        switch self {
+        case .full: 120_000_000
+        case .standard: 180_000_000
+        case .light: 250_000_000
+        }
+    }
+
+    /// Maximum engine log lines to batch before forcing an immediate
+    /// publish. This bounds transient memory even if the engine is
+    /// chatty enough to outrun the timed flush.
+    public var maxLogBatchEntries: Int {
+        switch self {
+        case .full: 80
+        case .standard: 50
+        case .light: 30
+        }
+    }
+
+    /// Per-line text cap for UI-retained logs. The Rust side caps
+    /// child-process log lines before they cross the stdio boundary;
+    /// this is the Swift-side belt for custom or future engines.
+    public var maxLogLineCharacters: Int {
+        switch self {
+        case .full: 4096
+        case .standard: 3072
+        case .light: 2048
+        }
+    }
+
     private static func pick(from host: HostMachine) -> PerformanceProfile {
         // Apple Silicon at any core count beats Intel at the same
         // count for SwiftUI animation work — the unified memory

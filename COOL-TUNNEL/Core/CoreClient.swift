@@ -101,6 +101,7 @@ public actor CoreClient {
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stderrHandle: FileHandle?
+    private var stdoutHandle: FileHandle?
     private var readerTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
     /// Set true at the entry of `start()` and reset on failure or
@@ -115,6 +116,7 @@ public actor CoreClient {
     private var eventContinuations: [UUID: AsyncStream<CoreEvent>.Continuation] = [:]
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var didPublishEngineExit: Bool = false
 
     public init(executableURL: URL) {
         self.executableURL = executableURL
@@ -167,7 +169,9 @@ public actor CoreClient {
 
         self.process = process
         self.stdinHandle = stdin.fileHandleForWriting
+        self.stdoutHandle = stdout.fileHandleForReading
         self.stderrHandle = stderr.fileHandleForReading
+        self.didPublishEngineExit = false
 
         let reader = stdout.fileHandleForReading
         readerTask = Task { [weak self] in
@@ -422,17 +426,43 @@ public actor CoreClient {
 
     private func readLoop(handle: FileHandle) async {
         do {
-            for try await line in handle.bytes.lines {
-                handleLine(line)
+            var frame = Data()
+            for try await byte in handle.bytes {
+                if Task.isCancelled { break }
+                if byte == Self.newlineByte {
+                    if !frame.isEmpty {
+                        handleFrame(frame)
+                        frame.removeAll(keepingCapacity: true)
+                    }
+                } else if frame.count < Self.maxOutboundFrameBytes {
+                    frame.append(byte)
+                } else {
+                    frame.removeAll(keepingCapacity: true)
+                    Self.logger.error(
+                        "dropping oversized engine frame (> \(Self.maxOutboundFrameBytes, privacy: .public) bytes)"
+                    )
+                }
+            }
+            if !frame.isEmpty {
+                handleFrame(frame)
             }
         } catch {
             // Reader closed; fall through to engine-exit cleanup.
         }
+        try? handle.close()
         await onEngineExit()
     }
 
-    private func handleLine(_ line: String) {
-        guard let data = line.data(using: .utf8) else { return }
+    private static let maxOutboundFrameBytes = 1024 * 1024
+    private static let newlineByte: UInt8 = 0x0A
+
+    private func handleFrame(_ data: Data) {
+        autoreleasepool {
+            decodeAndDispatchFrame(data)
+        }
+    }
+
+    private func decodeAndDispatchFrame(_ data: Data) {
         do {
             let frame = try decoder.decode(CoreOutbound.self, from: data)
             dispatch(frame)
@@ -476,6 +506,8 @@ public actor CoreClient {
     }
 
     private func onEngineExit() async {
+        guard !didPublishEngineExit else { return }
+        didPublishEngineExit = true
         let drain = pending
         pending.removeAll()
         for cont in drain.values {
@@ -486,6 +518,12 @@ public actor CoreClient {
         }
         eventContinuations.removeAll()
         readerTask = nil
+        process = nil
+        stdinHandle = nil
+        stdoutHandle = nil
+        stderrHandle = nil
+        stderrTask?.cancel()
+        stderrTask = nil
     }
 
     private func terminate() async {
@@ -494,6 +532,8 @@ public actor CoreClient {
         }
         try? stdinHandle?.close()
         stdinHandle = nil
+        try? stdoutHandle?.close()
+        stdoutHandle = nil
         // Closing the stderr handle causes the drain loop's
         // pending `read(upToCount:)` to throw a Swift error (or
         // return nil at EOF), so the loop exits cleanly even if
