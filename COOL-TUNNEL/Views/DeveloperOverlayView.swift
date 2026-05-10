@@ -119,12 +119,24 @@ public struct DeveloperOverlayView: View {
     private var vpsValue: String {
         switch metrics.vps.reachable {
         case .some(true): "Reachable"
-        case .some(false): "Blocked"
+        case .some(false):
+            if metrics.vps.dnsMs == nil, metrics.vps.tcpMs == nil {
+                "Probe error"
+            } else {
+                "Blocked"
+            }
         case .none: "Checking"
         }
     }
 
     private var vpsDetail: String {
+        if metrics.vps.reachable == false,
+            metrics.vps.dnsMs == nil,
+            metrics.vps.tcpMs == nil,
+            !metrics.vps.status.isEmpty
+        {
+            return "\(metrics.vps.server) · \(metrics.vps.status)"
+        }
         let dns = metrics.vps.dnsMs.map { "DNS \(formatMs($0))" } ?? "DNS ?"
         let tcp = metrics.vps.tcpMs.map { "TCP \(formatMs($0))" } ?? "TCP ?"
         return "\(metrics.vps.server) · \(dns) · \(tcp)"
