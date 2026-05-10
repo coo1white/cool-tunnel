@@ -2,374 +2,360 @@
 
 # Cool Tunnel
 
-**A non-custodial macOS client for borderless, surveillance-resistant communication.**
-
-*Transparency over profit. Freedom over control.*
+**Industrial macOS proxy control plane: Swift 6 orchestration, Rust supervision, NaiveProxy data path, zero analytics.**
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1c5cdc)](./LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/coo1white/cool-tunnel?label=latest)](https://github.com/coo1white/cool-tunnel/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%20Sonoma%2B-blue)](#compatibility)
 [![CI](https://github.com/coo1white/cool-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/coo1white/cool-tunnel/actions/workflows/ci.yml)
 [![Engine: Rust](https://img.shields.io/badge/engine-Rust-orange)](./core)
-[![Universal binary](https://img.shields.io/badge/Mac-Apple%20Silicon%20%2B%20Intel-success)](#compatibility)
+[![Swift 6](https://img.shields.io/badge/Swift-6-critical)](./COOL-TUNNEL)
 
 </div>
 
 ---
 
-## ⚖️ Manifesto
+## Repository Metadata
 
-Digital borders are policy, not topology. Surveillance is a posture, not an inevitability. Cool Tunnel exists because the right to private, undirected communication is older than the networks that mediate it.
+GitHub description, kept under the 160-character repository limit:
 
-We do not run a service. We publish a tool, sign no certificate of trust, host no user state, and operate no fleet. The user is sovereign. The protocol is the only authority.
+> High-performance macOS proxy control plane: Swift 6 UI, Rust supervisor, NaiveProxy data path, zero analytics.
 
-> **Read this first.** This software has the technical capability to circumvent network restrictions. The [Disclaimer](./Disclaimer.md) covers what it is for, what it is not for, and the rules you should know before installing. By installing, you agree you have read it.
+Recommended topics:
+
+`rust` `swift` `swift6` `macos` `macos-app` `macos-proxy` `proxy` `naiveproxy` `sing-box` `caddy` `frankenphp` `docker` `shell` `high-concurrency` `privacy` `anti-tracking` `agplv3`
+
+---
+
+## Operating Posture
+
+Cool Tunnel is not a hosted proxy service. It is a non-custodial macOS client plus hardened operator tooling. The user supplies the server, credentials, domain, and jurisdictional risk assessment.
+
+| Rule | Enforcement |
+|---|---|
+| **Zero analytics** | No telemetry endpoint, no identity service, no tracking SDK, no event export. |
+| **Zero footprint VPS floor** | Server deployment is expected to run on a 1 GB RAM VPS. Anything heavier must justify itself. |
+| **Immutable ballast** | Code and docs preserve incident history. Regressions are recorded, not cosmetically erased. |
+| **Deterministic release gate** | `scripts/cut_release.sh` runs the local synthetic CI gate before release artifacts leave the tree. |
+| **Non-custodial operation** | The repository ships no public servers and no embedded credentials. |
+
+Read [Disclaimer.md](./Disclaimer.md) before use. The software can be used in legally restricted network environments; compliance is the operator's burden.
 
 ---
 
 ## Architecture Blueprint
 
-The client is three independently-built artefacts cooperating across two trust boundaries. The boundary between Swift and Rust is a **process boundary**, not an FFI; the boundary between Rust and `naive` is the same. Each layer can crash, be replaced, or be re-signed without dragging the others down.
+Cool Tunnel is built as a three-layer defense system. Each layer has one job. The boundary is intentional: Swift is allowed to orchestrate, Rust is allowed to supervise, the proxy engine is allowed to move packets, and shell is allowed to deploy infrastructure.
 
 ```mermaid
 flowchart LR
-    subgraph App["macOS .app — hardened runtime, ad-hoc signed"]
-      UI["Swift 6 UI<br/>SwiftUI · @MainActor · strict concurrency"]
-      ORC["TunnelOrchestrator<br/>@Observable · system proxy via SystemConfiguration<br/>NSWorkspace willSleep / didWake"]
-      UI <--> ORC
+    subgraph Mac["macOS Client"]
+        UI["Swift 6 UI<br/>SwiftUI, @MainActor, strict concurrency"]
+        ORC["TunnelOrchestrator<br/>sleep/wake handlers, state machine, system proxy"]
+        UI <-->|state updates| ORC
     end
 
-    subgraph Engine["Bundled engine — out-of-process, SHA-pinned"]
-      CORE["cool-tunnel-core<br/>Rust 1.80 · forbid(unsafe_code)<br/>JSON-over-stdio supervisor"]
-      NAIVE["naive (NaiveProxy upstream)<br/>universal lipo arm64 + x86_64"]
-      CORE -->|fork / exec / lsof / SIGTERM| NAIVE
+    subgraph Core["Rust Core"]
+        RPC["JSON-over-stdio RPC<br/>typed protocol contract"]
+        SUP["Supervisor<br/>process lifecycle, probes, log redaction"]
+        RPC --> SUP
     end
 
-    ORC <-->|JSON requests + events<br/>stdin / stdout| CORE
-    NAIVE -->|TLS HTTP/2 CONNECT<br/>indistinguishable from Chrome| Internet["Public internet"]
+    subgraph Data["Data Plane"]
+        NP["NaiveProxy / sing-box-class routing boundary<br/>memory-safe wrapper, local-only bind"]
+    end
+
+    subgraph VPS["Operator VPS"]
+        SH["POSIX Shell deployment<br/>idempotent Docker setup"]
+        WEB["FrankenPHP + Caddy<br/>TLS, forward_proxy, fallback site"]
+        SH --> WEB
+    end
+
+    ORC <-->|stdin/stdout JSON| RPC
+    SUP -->|fork/exec, health checks, SIGTERM| NP
+    NP -->|HTTPS CONNECT, TLS camouflage| WEB
+    WEB --> Internet["Public Internet"]
 ```
 
-### Why a process boundary, not an FFI
+### Boundary Contract
 
-| Concern | What the boundary buys |
-|---|---|
-| **Crash isolation** | A panic in `cool-tunnel-core` terminates one subprocess. The orchestrator detects `SIGCHLD`, classifies the failure into one of `.local` / `.upstream` / `.vps`, and offers re-launch. The user's window does not vanish. |
-| **Memory safety, transitively** | `core/` carries `#![forbid(unsafe_code)]` at the crate root and supervises a *separate* `naive` binary. Compromise of the data plane cannot reach into the orchestrator's address space. |
-| **Reproducibility** | Three independently SHA-pinned artefacts: the Swift `.app`, the Rust `cool-tunnel-core`, and the bundled `naive`. Each is rebuildable in isolation; the in-app updater rotates each on its own cadence. |
-| **Determinism on the wire** | The JSON schema *is* the contract. There is no shared memory, no version-coupled struct layout, no `Sendable`-vs-`Send` disagreement to debug across an FFI. Either side can be replaced by a process speaking the same JSON. |
-| **Strict concurrency** | Swift 6 strict-concurrency (`@MainActor` UI, actor-isolated orchestrator) sits cleanly above an asynchronous Tokio supervisor — neither has to model the other's executor. |
-
-The Rust core is a **subprocess supervisor + JSON dispatcher + log redactor + anomaly monitor**. It does not route packets. Packet shaping is `naive`'s job; the supervisor's job is to make sure `naive` is healthy, bound only to `127.0.0.1`, and that its logs do not leak credentials.
-
----
-
-## ⚓ The Covenant — LTSC-Heng License Summary
-
-This software ships under the **GNU Affero General Public License v3, no-or-later qualifier (AGPL-3.0-only)**. Copyright © 2026 coolwhite LLC. The covenant binds three properties simultaneously — long-term-servicing constancy (LTSC), engineering Heng, and the AGPL hard-copyleft floor.
-
-### 1 — Source-availability (AGPL § 13)
-
-| You may | You must |
-|---|---|
-| Use, study, modify, redistribute the source | Preserve the licence and source-availability |
-| Run private modifications without disclosure | (no obligation while the modification stays private) |
-| Operate a modified version as a network service | Publish those modifications under AGPL-3.0 to every user of that service |
-| Sell, package, or vendor the source | Preserve the licence; charge for service, not the gift |
-
-§ 13 is not a fence. It is the guarantee that no future hand can take this code from the commons.
-
-### 2 — Strict no-warranty, strict no-liability (AGPL §§ 15–17)
-
-The software is provided **"AS IS", without warranty of any kind**, express or implied — merchantability, fitness for a particular purpose, non-infringement, and circumvention efficacy are explicitly disclaimed. To the maximum extent permitted by applicable law, in no event will any copyright holder or contributor be liable for damages arising from use, including loss of data, profits, or any consequential damages, even if advised of the possibility.
-
-If you operate this software in a jurisdiction where its capabilities are restricted, **the legal exposure is yours, not ours.** [Disclaimer.md](./Disclaimer.md) is the operator's read-this-first.
-
-### 3 — Anti-commercial-misappropriation
-
-The covenant explicitly admits commercial use, but admits *only* commercial use that respects § 13:
-
-- **Permitted** — consultancy, custom integration, packaging service, audits, support contracts. Anything where the **service** is the product.
-- **Permitted** — redistributing the source under AGPL-3.0-only with full attribution.
-- **Refused** — relicensing under any non-copyleft licence. coolwhite LLC does not grant proprietary forks. There is no CLA, no contributor licence assignment, no rights-aggregation. The repo is a covenant, not an acquisition pipeline.
-- **Refused** — "open core" repackaging that hides modifications behind a closed network service. § 13 is unambiguous on this point.
-
-### Prospective licensing
-
-Every release tagged on or before `v2.0.25` was distributed under Apache-2.0 and remains available under that licence to anyone who downloaded it. AGPL-3.0-only applies prospectively from `v2.0.26`. The licence change is not retroactive.
-
----
-
-## 🛡️ Heng — Constancy over Feature Velocity
-
-Roadmaps invite scope creep. We practise *Heng* — constancy. Releases ship on what we cannot leave in the field, not on what we could demonstrate at a keynote.
-
-| What we ship on | What we do not ship on |
-|---|---|
-| Reproducibility regressions | Marketing dates |
-| Operator-reported defects | Influencer roadmaps |
-| Audit-cycle findings | Feature-velocity targets |
-| Upstream protocol drift | "Innovation theatre" |
-
-Each release is a fix or an architectural correction. Each release is reproducible from public source via `cargo build --locked` + `xcodebuild`. Every prior release remains downloadable and independently buildable.
-
----
-
-## Protocol is Truth
-
-We do not ask for trust. We make trust unnecessary.
-
-| Property | Mechanism |
-|---|---|
-| Indistinguishable transport | NaiveProxy traffic is the wire-shape of Chrome talking to a regular HTTPS site. No fingerprint a network observer can attribute to the proxy class. |
-| No central authority | No telemetry, no identity service, no key registry. The connection is a function of *your* server and *your* credentials. |
-| Reproducible binary | Every release is buildable bit-for-bit from public source. The signed `.app` corresponds to a public commit. |
-| Pinned updates | The in-app updater verifies SHA-256 against a published manifest before adopting any new binary. |
-| Hardened runtime + ad-hoc signature | Library-injection blocked at runtime; the App is signed with our own key (no Apple Developer subscription required for the project to ship). |
-
-The protocol is the contract. The contract is verifiable. We are not asking for your trust; we are showing you our work.
-
----
-
-## ⚡ Quick Start
-
-A non-technical user can finish in one sitting.
-
-### Step 1 — Download the latest `.dmg`
-
-Go to **[github.com/coo1white/cool-tunnel/releases/latest][releases]**. Pick the **`Cool-tunnel-v2.0.x.dmg`** asset.
-
-### Step 2 — Drag into Applications
-
-Double-click the `.dmg`. Drag the Cool Tunnel icon onto the **Applications** folder shortcut.
-
-### Step 3 — First launch (one-time approval)
-
-Open `/Applications`, find **Cool Tunnel**, and **right-click → Open**. Click **Open** in the dialog macOS shows. After that, normal launch every time. Required because the app is signed with our key, not Apple's $99-per-year Developer ID — the right-click gesture is the user-side trust acknowledgement.
-
-### Step 4 — Configure your server
-
-You need a NaiveProxy server somewhere on the internet. Fill in the address, username, and password. Leave **Local Port** at `1080` unless you have a reason. Without a server: spin one up via [`coo1white/cool-tunnel-server`](https://github.com/coo1white/cool-tunnel-server) — Debian + Docker, ~15 minutes.
-
-### Step 5 — Pick a mode
-
-| Mode | When |
-| --- | --- |
-| **Smart** | Most of the time. Routes blocked sites through your server, lets local sites skip the proxy for speed. |
-| **Global** | Maximum privacy — every TCP connection through your server. |
-| **Local** | Listens on `127.0.0.1:1080` without altering system network settings. For pointing one specific app at the proxy. |
-
-Status pill at the top turns pink and pulses; that means it is working.
-
-[releases]: https://github.com/coo1white/cool-tunnel/releases/latest
-
----
-
-## Build From Source — Synthetic CI Gate
-
-The project ships without a paid Apple Developer subscription, which means no Xcode Cloud, no notarisation, no managed CI runners. The `scripts/` shell tooling substitutes for all three: every check the project would otherwise gate behind a cloud build runs locally, deterministically, before a release artefact is allowed to leave the working tree.
-
-### First Scold — strict prerequisites
-
-`scripts/preflight.sh` will refuse to run if any of these are missing or out of band. Install them once; the script will tell you precisely which one is wrong.
-
-| Tool | Required | Install |
+| Boundary | Mechanism | Why it exists |
 |---|---|---|
-| Xcode | 15.0 + (Swift 6 mode) | App Store |
-| Rust toolchain | pinned by `rust-toolchain.toml` (1.80) | `rustup show` fetches the pin automatically |
-| `swift-format` | bundled with Xcode | `xcrun swift-format --version` to verify |
-| `cargo-deny` | latest | `cargo install cargo-deny --locked` |
-| `shellcheck` | any recent | `brew install shellcheck` |
-| `gh` | for release publish (optional) | `brew install gh` |
+| Swift -> Rust | Out-of-process JSON over stdio | A Rust panic terminates a subprocess, not the macOS app. The UI remains state-driven and recoverable. |
+| Rust -> proxy engine | Supervised child process | The data plane can be restarted, replaced, SHA-pinned, or killed without corrupting orchestrator state. |
+| Client -> VPS | HTTPS CONNECT through NaiveProxy-compatible Caddy | Network observers see ordinary TLS traffic to the operator's own domain. |
+| Repo -> release artifact | Shell gate with locked toolchain checks | Local PASS must mean CI PASS: formatter, clippy, tests, ShellCheck, Swift format, binary checks, and release packaging. |
 
-### Then Do Good — one command
+Swift 6 owns lifecycle: window state, menu bar state, system proxy changes, sleep/wake notifications, and strict-concurrency UI updates. Rust owns the hardened control plane: typed protocol handling, process supervision, anomaly detection, local bind enforcement, diagnostics, and credential redaction. The packet router is kept outside the app address space. That separation is the stability model.
+
+There is no FFI bridge. There is no shared memory contract. The JSON schema is the contract; if either side breaks it, tests fail and the process boundary contains the blast radius.
+
+---
+
+## One-Click VPS Installation
+
+### First Scold: Do Not Run This Blind
+
+The server side is infrastructure. Treat it like infrastructure.
+
+| Requirement | Non-negotiable reason |
+|---|---|
+| Debian VPS, 1 GB RAM minimum | The deployment target is deliberately small. Higher memory is acceptable; lower memory is operator negligence. |
+| Root shell or equivalent sudo | The installer owns `/opt/cool-tunnel`, Docker, ports `80` and `443`, and system services. |
+| DNS `A` or `AAAA` record already pointed at the VPS | Caddy cannot issue a valid certificate for a domain that does not resolve to the host. |
+| Ports `80/tcp`, `443/tcp`, `443/udp` open | ACME, HTTPS CONNECT, and HTTP/3 require these paths. |
+| Fresh random credentials | Never reuse examples. Generate with `openssl rand -base64 32`. |
+
+If any prerequisite is false, stop. Fix the host first. A proxy deployed on ambiguous DNS, reused credentials, or a half-open firewall is not a hardened system; it is an incident waiting for a timestamp.
+
+### Then Do Good: Single Operator Command
+
+The checked-in deployment reference is [NaiveProxy_Server_Setup.md](./NaiveProxy_Server_Setup.md). On a fresh VPS, run this as `root` after replacing the domain and email values:
+
+```bash
+export CT_DOMAIN="proxy.example.com"
+export CT_EMAIL="admin@example.com"
+export CT_USER="cool"
+export CT_PASSWORD="$(openssl rand -base64 32)"
+bash -s <<'EOF'
+set -Eeuo pipefail
+: "${CT_DOMAIN:?set CT_DOMAIN}"
+: "${CT_EMAIL:?set CT_EMAIL}"
+: "${CT_USER:?set CT_USER}"
+: "${CT_PASSWORD:?set CT_PASSWORD}"
+
+command -v docker >/dev/null 2>&1 || {
+  curl -fsSL https://get.docker.com | sh
+}
+
+install -d -m 0755 /opt/cool-tunnel/site
+cd /opt/cool-tunnel
+
+cat > Dockerfile <<'DOCKER'
+FROM caddy:builder AS builder
+RUN xcaddy build \
+    --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
+FROM caddy:latest
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+DOCKER
+
+cat > Caddyfile <<CADDY
+{
+    order forward_proxy before file_server
+}
+
+:443, ${CT_DOMAIN} {
+    tls ${CT_EMAIL}
+    forward_proxy {
+        basic_auth ${CT_USER} ${CT_PASSWORD}
+        hide_ip
+        hide_via
+        probe_resistance
+    }
+    root * /srv
+    file_server
+}
+CADDY
+
+cat > docker-compose.yml <<'COMPOSE'
+services:
+  cool-tunnel:
+    build: .
+    container_name: cool-tunnel
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./site:/srv:ro
+      - naive_caddy_data:/data
+      - naive_caddy_config:/config
+
+volumes:
+  naive_caddy_data:
+  naive_caddy_config:
+COMPOSE
+
+printf 'OK\n' > site/index.html
+docker compose build --no-cache
+docker compose up -d
+docker exec cool-tunnel caddy list-modules | grep forward_proxy
+printf 'server=%s\nuser=%s\npassword=%s\n' "$CT_DOMAIN" "$CT_USER" "$CT_PASSWORD"
+EOF
+```
+
+For audit-sensitive operators, the stricter path is:
 
 ```bash
 git clone https://github.com/coo1white/cool-tunnel.git
 cd cool-tunnel
-bash scripts/cut_release.sh 2.0.30
+less NaiveProxy_Server_Setup.md
 ```
 
-That single invocation runs, in order:
+Then execute the setup block manually with the same values. The deployment is designed to be idempotent: re-running the Docker/Caddy setup converges the host to the declared state, not parallel services.
 
-1. **`preflight.sh`** — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo deny check`, `cargo test --locked`, `swift-format lint --strict`, `xcodebuild test`, lipo arch guard, schema sync probe.
-2. **Clean rebuild** — `cargo clean` inside `core/`, `cargo update -p cool-tunnel-core`, `xcodebuild Release` for the universal `.app`.
-3. **`security_check.sh`** — 24 invariants: bundle layout, code-sign verification (deep, strict) on every embedded Mach-O, universal-binary check, NaiveProxy SHA-256 against `naive.upstream.json`, `Info.plist` `CFBundleShortVersionString` match, secret-pattern scan, AGPL/NOTICE/Disclaimer presence, entitlements review, LTSC posture (`Cargo.lock`, `rust-toolchain.toml`, `SUPPORT.md`).
-4. **`package_release.sh`** — writes `dist/Cool-tunnel-vX.Y.Z.{dmg,pkg,zip}`, the universal `cool-tunnel-core-vX.Y.Z-universal` core binary, and `Cool-tunnel-vX.Y.Z.sha256` (the manifest the in-app updater verifies against).
+### Server Verification
 
-The synthetic gate is bit-for-bit equivalent to the GitHub Actions matrix — same `--locked`, `--strict`, and version flags. **Local PASS implies CI PASS.** If `preflight.sh` is green and `security_check.sh` reports `passed: 24`, the release is publishable.
-
-Bypassing preflight requires `SKIP_PREFLIGHT=1` and is reserved for genuine emergencies; CI will reject the resulting tag regardless.
+| Check | Command | Expected |
+|---|---|---|
+| HTTPS fallback | `curl -v https://$CT_DOMAIN` | `OK` from the fallback file server. |
+| Caddy module | `docker exec cool-tunnel caddy list-modules | grep forward` | `forward_proxy` module present. |
+| Proxy path | `curl -v --proxy "https://$CT_USER:$CT_PASSWORD@$CT_DOMAIN:443" https://ipinfo.io` | Public IP resolves through the VPS. |
+| Mac client | `curl -x socks5h://127.0.0.1:1080 -vk --max-time 30 https://www.google.com/generate_204` | `HTTP/2 204` after Cool Tunnel is connected. |
 
 ---
 
-## QA — Heng Reproduction Floor
+## macOS Installation
 
-Three reproductions every release must survive, run by the operator before the binary leaves the working tree. The Heng principle: a release does not ship until each of these is green, manually, on the exact commit the tag will point at.
+1. Download the latest `Cool-tunnel-vX.Y.Z.dmg` from [Releases](https://github.com/coo1white/cool-tunnel/releases/latest).
+2. Drag `Cool Tunnel.app` into `/Applications`.
+3. First launch: right-click -> **Open**. macOS requires this because the project does not depend on Apple's paid Developer ID channel.
+4. Enter the VPS domain, username, password, and local port. Keep `1080` unless there is a conflict.
+5. Choose routing mode.
 
-### 1 — Sleep / wake recovery (v2.0.28 contract)
+| Mode | Use when |
+|---|---|
+| Smart | Blocked destinations should use the tunnel while ordinary local traffic stays direct. |
+| Global | Every TCP connection should route through the configured proxy. |
+| Local | Cool Tunnel should only expose `127.0.0.1:1080` and leave system proxy settings untouched. |
 
-The orchestrator owns a finite state machine: `.idle → .pausing → .paused → .recovering → .idle`. Operator reproduction:
+---
+
+## Quality Assurance: Heng
+
+Heng means constancy. A release does not ship because the UI looks calm; it ships only after the same failure classes have been forced through the same gates again.
+
+### 1. Sleep / Wake Recovery
+
+With Cool Tunnel connected:
 
 ```bash
-# With Cool Tunnel running and the status pill pink-pulsing:
-pmset sleepnow            # immediate sleep
-# wait ~15 seconds, lid back up
+pmset sleepnow
 ```
 
-Expected:
+Wake the Mac after roughly 15 seconds.
 
-| Phase | Where | Source of truth |
+| Phase | Required behavior |
+|---|---|
+| `willSleep` | App receives `NSWorkspace.willSleepNotification` and enters pausing state. |
+| Sleep checkpoint | Proxy state is made explicit before the machine suspends. |
+| `didWake` | App receives `NSWorkspace.didWakeNotification` and begins recovery. |
+| Recovery | Orchestrator restarts or reconciles the supervised process. |
+| Return to idle | UI returns to connected/ready state within the healthy-uplink budget. |
+
+Failure to recover is a release blocker. Sleep/wake is not a cosmetic feature; it is the normal operating environment of a Mac.
+
+### 2. Error Classification
+
+The classifier must distinguish local failure, upstream failure, and VPS failure. Operators verify by injecting each fault.
+
+| Injection | Expected class | Meaning |
 |---|---|---|
-| `willSleep` fires | `AppDelegate.installSleepWakeHandlers` | `NSWorkspace.willSleepNotification` observer |
-| Pill cycles `Pausing` → `Paused` | `HeaderView` reads `sleepWakeState` | `TunnelOrchestrator.handleSystemWillSleep` |
-| `didWake` fires | same | `NSWorkspace.didWakeNotification` observer |
-| Pill cycles `Recovering` → pink pulse | `HeaderView` | `TunnelOrchestrator.handleSystemDidWake` (Path A clean checkpoint, or Path B fallback if `willSleep` was missed) |
-| `sleepWakeState` returns to `.idle` | orchestrator | within ~10 s on healthy uplink |
+| Wrong saved password | Local | Profile, credential, child process, or local firewall defect. |
+| Disable all uplinks | Upstream | Wi-Fi, ISP, DNS, captive portal, or general internet path defect. |
+| Block VPS `:443` while internet is healthy | VPS | The configured server, TLS endpoint, or proxy daemon is unavailable. |
 
-If any phase stalls or the pill never returns to pink, the recovery contract regressed; the release is held.
+Misclassification is a product defect. A diagnostic that points to the wrong layer wastes operator time and hides the incident.
 
-### 2 — Error-layer classification (v2.0.29 contract)
+### 3. Release Reproducibility
 
-`TunnelOrchestrator.classifyConnectionFailure` runs two parallel probes in a 3-second budget — Apple's NCSI captive-portal endpoint *and* a direct TCP probe to the configured VPS hostname — both bypassing the system proxy. Inject failures and verify the chip resolves to the right `ErrorLayer`:
-
-| Inject | Expected chip | `humanExplanation` |
-|---|---|---|
-| Set credentials to a wrong password, click Connect | **Local** | "the issue is on your Mac — `naive` may not be running, the saved credentials may be wrong, or the OS firewall may be blocking outbound traffic" |
-| `sudo ifconfig en0 down && sudo ifconfig en1 down` (kill all uplinks) | **Upstream** | "the issue is between your Mac and the public internet — your ISP, Wi-Fi, captive portal, or DNS" |
-| Uplinks healthy, but the configured VPS `:443` is firewalled (`pfctl` rule, or stop `naive` server-side) | **VPS** | "the issue is your NaiveProxy server — its hostname may not resolve, `:443` may refuse connections, or the daemon may be rejecting the handshake" |
-
-A misclassification means the chip is misleading; the ship is held until the classifier is corrected.
-
-### 3 — Reproducible binary
-
-The release is reproducible from public source via `cargo build --locked` + `xcodebuild Release`. Verify:
+The release gate is the command, not a checklist in someone's memory:
 
 ```bash
-# Compute local hashes of a fresh cut_release.sh run:
-shasum -a 256 dist/Cool-tunnel-v2.0.30.{dmg,pkg,zip} \
-              dist/cool-tunnel-core-v2.0.30-universal \
-  | awk '{print $1}' | sort > /tmp/local.sha256
-
-# Pull the published manifest:
-gh release download v2.0.30 -p 'Cool-tunnel-v2.0.30.sha256' -O - \
-  | awk '{print $1}' | sort > /tmp/published.sha256
-
-diff /tmp/local.sha256 /tmp/published.sha256
+bash scripts/preflight.sh
+bash scripts/cut_release.sh 2.0.36
 ```
 
-Empty diff = the public release corresponds to a public commit. Non-empty diff = halt the release, audit the toolchain. There is no third option.
+`cut_release.sh` verifies version sync, refreshes the bundled proxy engine, runs the strict audit suite, rebuilds the Rust core and Swift app, runs `security_check.sh`, and packages `.dmg`, `.pkg`, `.zip`, the universal core binary, and the SHA-256 manifest.
 
 ---
 
-## How it works
+## Build From Source
 
+### Prerequisites
+
+| Tool | Required |
+|---|---|
+| Xcode | Xcode with Swift 6 support and macOS 14 SDK or newer. |
+| Rust | Toolchain pinned by [core/rust-toolchain.toml](./core/rust-toolchain.toml). |
+| `cargo-deny` | `cargo install cargo-deny --locked` |
+| `shellcheck` | `brew install shellcheck` |
+| `gh` | Optional, only for release publication. |
+
+### Commands
+
+```bash
+git clone https://github.com/coo1white/cool-tunnel.git
+cd cool-tunnel
+bash scripts/preflight.sh
 ```
-┌─────────────────────┐
-│   You + your Mac    │
-│   (Cool Tunnel app) │
-└─────────┬───────────┘
-          │  encrypted HTTPS — looks like a normal Chrome visit
-          ▼
-┌─────────────────────┐
-│  Your NaiveProxy    │
-│  server somewhere   │  ← you run this
-└─────────┬───────────┘
-          │  the actual website request
-          ▼
-┌─────────────────────┐
-│  any-website.com    │
-└─────────────────────┘
+
+For a release build:
+
+```bash
+bash scripts/cut_release.sh 2.0.36
 ```
 
-A network observer between you and your server sees only the top arrow — encrypted traffic indistinguishable from any other HTTPS request.
+---
+
+## Security Posture
+
+| Control | Enforcement |
+|---|---|
+| Credential minimization | Credentials stay local to the user's Mac and selected VPS. |
+| Log redaction | Authorization headers, cookies, JSON passwords, and credential-bearing lines are redacted before UI display. |
+| Local bind guard | The supervised proxy is expected to bind to loopback only. Public bind anomalies are stopped. |
+| SHA-256 update pinning | Updater refuses artifacts whose bytes do not match the manifest. |
+| Trusted-host update guard | Update redirects are constrained to GitHub-controlled hosts. |
+| Hardened runtime | macOS runtime hardening limits injection and tampering against the app process. |
+
+Cool Tunnel cannot protect against a malicious macOS user process, an unlocked stolen machine, a hostile VPS operator, or a global observer with visibility at both tunnel ends. The server is a trust boundary. Own it accordingly.
+
+Full model: [SECURITY.md](./SECURITY.md).
 
 ---
 
-## Security posture
+## License and LTSC-Heng Posture
 
-| Control | What it does |
-| --- | --- |
-| Hardened runtime | macOS blocks library injection and runtime tampering against the app process. |
-| Mode-0600 credentials | NaiveProxy password lives in `~/Library/Application Support/COOL-TUNNEL/credentials.json`, readable only by your user. Not Keychain (intentional — see [SECURITY.md](./SECURITY.md)). |
-| SHA-256 update pinning | The updater downloads a manifest separately and refuses to install if bytes don't match. |
-| Trusted-host redirect guard | All update flows refuse any HTTP redirect that leaves `*.github.com` / `*.githubusercontent.com`. |
-| Hard-link / symlink-escape rejection | A malicious archive cannot plant a hard link to a system file. The extraction walker rejects it. |
-| Anomaly auto-stop | If `naive` ever binds outside `127.0.0.1`, the engine auto-stops the proxy within ≤5 seconds. |
-| Log redaction | Lines touching credentials, `Authorization` / `Cookie` headers, or JSON `password` fields are redacted before reaching the live log. |
+Cool Tunnel is licensed under **AGPL-3.0-only**. The summary below is operational posture, not a replacement for [LICENSE](./LICENSE).
 
-What we cannot defend against: a malicious app running as your macOS user; physical access to an unlocked Mac; a NaiveProxy server *you* picked that decides to log you. Pick a server you trust or run your own.
+| Axis | Position |
+|---|---|
+| Copyleft floor | Network service modifications must remain source-available under AGPL terms. |
+| Warranty | None. The software is provided as-is, without implied fitness, merchantability, non-infringement, availability, or circumvention efficacy. |
+| Liability | Operators carry their own legal, operational, financial, and jurisdictional risk. |
+| Commercial use | Services around the software are tolerated; proprietary capture of the software is not. |
+| Relicensing | No proprietary fork grant, no CLA aggregation, no open-core conversion path. |
+| LTSC-Heng | Maintenance favors long-term corrective releases over feature velocity. Incident history is ballast. |
 
-Full threat model: [SECURITY.md](./SECURITY.md).
-
----
-
-## Updating without reinstalling
-
-Settings (⚙️) shows three **Update** buttons:
-
-| Update | What it does |
-| --- | --- |
-| Cool Tunnel → Update | Downloads the latest app, verifies SHA-256, relaunches. |
-| Naive Binary → Update | Pulls latest NaiveProxy upstream, lipo-merges arm64 + x86_64, ad-hoc signs. |
-| Rust Core → Update | Pulls the latest engine binary from the Cool Tunnel release. |
-
-All three: one click, no terminal, host-validated, size-capped.
-
----
-
-## Where things live
-
-| What | Where |
-| --- | --- |
-| The app | `/Applications/Cool Tunnel.app` |
-| Saved password | `~/Library/Application Support/COOL-TUNNEL/credentials.json` (mode 0600) |
-| Proxy config | `~/Library/Application Support/COOL-TUNNEL/config.json` |
-| Smart-mode rules | `~/Library/Application Support/COOL-TUNNEL/smart-proxy.pac` |
-| Updated `naive` | `~/Library/Application Support/COOL-TUNNEL/naive-managed` |
-| Updated engine | `~/Library/Application Support/COOL-TUNNEL/cool-tunnel-core-managed` |
-
-Uninstall: drag app to Trash, delete `~/Library/Application Support/COOL-TUNNEL/`.
+Commercial support, audits, packaging, and integration work may exist around the project. They do not purchase the right to close the source, hide network-service modifications, or weaken the license.
 
 ---
 
 ## Compatibility
 
 | Need | Detail |
-| --- | --- |
-| Mac model | Any Mac that runs macOS 14 (Apple Silicon, or 2018+ Intel + 2017 iMac Pro) |
-| macOS | 14 (Sonoma) or newer |
-| Disk | About 45 MB installed |
-| Memory | About 30 MB while running |
-| Admin password | Never required |
+|---|---|
+| macOS | 14 Sonoma or newer. |
+| Mac architecture | Apple Silicon and Intel, via universal release artifacts. |
+| Installed size | Approximately 45 MB. |
+| Runtime memory | Approximately 30 MB on the Mac client. |
+| VPS floor | 1 GB RAM Debian host for Docker + Caddy/FrankenPHP-class deployment. |
+| Admin password | Not required for normal macOS client operation. |
 
 ---
 
-## Community
+## Maintenance Files
 
-| Action | How |
-| --- | --- |
-| **Contribute** | Open a PR. CI gates the merge: Rust (build + clippy + test), Swift (format lint --strict), ShellCheck. |
-| **Fork** | AGPL-3.0 grants the right; preserve the licence and source-availability under § 13. |
-| **Audit** | Every release passes a synthetic CI gate (`scripts/preflight.sh` + `scripts/security_check.sh`). The full per-release security audit is recorded in `CHANGELOG.md`. |
+| File | Purpose |
+|---|---|
+| [CHANGELOG.md](./CHANGELOG.md) | Incident and release history. |
+| [SUPPORT.md](./SUPPORT.md) | LTSC support contract. |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Contributor workflow and local checks. |
+| [NaiveProxy_Server_Setup.md](./NaiveProxy_Server_Setup.md) | VPS deployment reference. |
+| [Disclaimer.md](./Disclaimer.md) | Legal/operator disclaimer. |
+| [NOTICE](./NOTICE) | Third-party attribution, including upstream NaiveProxy. |
 
-Architecture, build steps, contribution guide: [CONTRIBUTING.md](./CONTRIBUTING.md). Long-term support contract: [SUPPORT.md](./SUPPORT.md).
-
----
-
-## Enterprise
-
-The code is free. Time and expertise are the premium tier.
-
-| Engagement | Outcome |
-| --- | --- |
-| Architecture review | Formal third-party assessment of your deployment shape, threat model, and operational runbook. |
-| Consultancy | Non-trivial integrations, custom packaging, security-posture review. |
-| Excellence | Durable engineering judgement on demand. |
-
-For commercial inquiries: open an issue tagged `enterprise:` on this repository.
-
----
-
-<sub>**Jurisdiction:** Wyoming, USA · **Posture:** Non-Custodial · **Philosophy:** AGPL-3.0 Hard-Copyleft · **Steward:** coolwhite LLC</sub>
-
-<sub>Cool Tunnel wraps upstream [NaiveProxy](https://github.com/klzgrad/naiveproxy) (BSD-3). Without it there would be nothing to wrap. Per-component attribution: [NOTICE](./NOTICE).</sub>
+<sub>Steward: coolwhite LLC. Posture: non-custodial, hard-copyleft, zero analytics.</sub>
