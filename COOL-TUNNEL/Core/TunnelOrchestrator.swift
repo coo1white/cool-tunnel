@@ -1628,7 +1628,6 @@ public final class TunnelOrchestrator {
         }
     }
 
-
     public func runDebugHandshake() async {
         recordTelemetry("debug_handshake.begin")
         let started = ContinuousClock.now
@@ -1660,9 +1659,13 @@ public final class TunnelOrchestrator {
                 throw OrchestratorError.unexpectedResponse
             }
             let glyph = report.ok ? "✓" : "✗"
-            appendInfo("debug handshake: \(glyph) server=\(report.server) target=\(report.target) elapsed=\(report.elapsedMs)ms")
+            appendInfo(
+                "debug handshake: \(glyph) server=\(report.server) target=\(report.target) elapsed=\(report.elapsedMs)ms"
+            )
             appendInfo("debug handshake sent[0..1024]=\(report.localSentHex)")
-            appendInfo("debug handshake recv[0..1024]=\(report.localReceivedHex.isEmpty ? "<empty>" : report.localReceivedHex)")
+            appendInfo(
+                "debug handshake recv[0..1024]=\(report.localReceivedHex.isEmpty ? "<empty>" : report.localReceivedHex)"
+            )
             for line in report.naiveStdout {
                 appendInfo("debug handshake naive stdout: \(line)")
             }

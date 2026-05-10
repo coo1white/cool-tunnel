@@ -46,7 +46,7 @@ enum DebugHandshakeError {
     ExitedEarly,
 }
 
-#[allow(missing_docs)]
+#[allow(clippy::missing_errors_doc, missing_docs)]
 pub async fn run_debug_handshake(
     binary_path: &Path,
     profile: &Profile,
@@ -86,9 +86,9 @@ async fn run_debug_handshake_inner(
         return Err(DebugHandshakeError::StartupTimeout(STARTUP_TIMEOUT));
     }
 
+    let target = TARGET_AUTHORITY;
     let connect_request = format!(
-        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: cool-tunnel-debug-handshake\r\nProxy-Connection: keep-alive\r\n\r\n",
-        target = TARGET_AUTHORITY,
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: cool-tunnel-debug-handshake\r\nProxy-Connection: keep-alive\r\n\r\n"
     );
     let sent = connect_request.into_bytes();
     let (received, error) = drive_local_connect(port, &sent, deadline).await;
@@ -146,7 +146,7 @@ impl DebugNaiveConfig {
                     file.sync_all()?;
                     return Ok(Self { path });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(err),
             }
         }
@@ -171,8 +171,7 @@ impl Drop for DebugNaiveConfig {
 fn debug_config_path(attempt: u8) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_nanos());
     std::env::temp_dir().join(format!(
         "cool-tunnel-debug-handshake-{}-{nanos}-{attempt}.json",
         std::process::id()
