@@ -9,6 +9,37 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.36] — 2026-05-10 — Post-CONNECT Tunnel Diagnostics
+
+> **Debug Handshake now distinguishes CONNECT acceptance from real
+> tunnel payload forwarding.**
+
+Patch release for the aggressive stealth/anti-tracking investigation.
+The previous Debug Handshake probe could report success after the local
+reference `naive` listener returned `HTTP 200` for CONNECT even if the
+first target payload bytes were reset immediately afterward.
+
+### Changed
+
+- Debug Handshake now sends a deterministic TLS `ClientHello` through
+  the established CONNECT tunnel and only reports `ok=true` after
+  target bytes are received back.
+- The GUI log now prints `connect_ok` and `post_connect_recv` so
+  operators can tell whether failure is at proxy CONNECT acceptance or
+  post-CONNECT forwarding.
+- VPS health overlay now hydrates stored profile credentials before
+  probing and labels credential/probe failures as `Probe error` instead
+  of a false `Blocked · DNS ? · TCP ?`.
+
+### Verified
+
+- `cargo fmt --check`
+- `cargo test --locked --all-features`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+- GitHub Actions CI on `main`
+
 ## [2.0.35] — 2026-05-10 — Debug Handshake Probe
 
 > **Operators can now compare the GUI client’s reference-naive
