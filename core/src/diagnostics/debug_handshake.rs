@@ -27,6 +27,7 @@ const MAX_TIMEOUT_SECS: u64 = 30;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_POLL: Duration = Duration::from_millis(50);
 const HEX_CAPTURE_BYTES: usize = 1024;
+const TARGET_HOST: &str = "www.google.com";
 const TARGET_AUTHORITY: &str = "www.google.com:443";
 const READ_LIMIT_BYTES: usize = HEX_CAPTURE_BYTES;
 const LOG_LINE_LIMIT: usize = 12;
@@ -90,8 +91,13 @@ async fn run_debug_handshake_inner(
     let connect_request = format!(
         "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: cool-tunnel-debug-handshake\r\nProxy-Connection: keep-alive\r\n\r\n"
     );
-    let sent = connect_request.into_bytes();
-    let (received, error) = drive_local_connect(port, &sent, deadline).await;
+    let trace = drive_local_connect(
+        port,
+        connect_request.as_bytes(),
+        &tls_client_hello(TARGET_HOST),
+        deadline,
+    )
+    .await;
 
     let _ = child.start_kill();
     let output = match timeout(Duration::from_secs(2), child.wait_with_output()).await {
@@ -99,9 +105,7 @@ async fn run_debug_handshake_inner(
         Ok(Err(_)) | Err(_) => None,
     };
 
-    let received_text = String::from_utf8_lossy(&received).to_ascii_lowercase();
-    let ok = error.is_none()
-        && (received_text.starts_with("http/1.1 200") || received_text.starts_with("http/1.0 200"));
+    let ok = trace.error.is_none() && trace.connect_ok && trace.post_connect_received_bytes > 0;
 
     let (naive_stdout, naive_stderr) = output.map_or_else(
         || (Vec::new(), Vec::new()),
@@ -112,12 +116,15 @@ async fn run_debug_handshake_inner(
         server: profile.server().to_string(),
         target: TARGET_AUTHORITY.to_owned(),
         ok,
+        connect_ok: trace.connect_ok,
+        post_connect_received_bytes: u64::try_from(trace.post_connect_received_bytes)
+            .unwrap_or(u64::MAX),
         elapsed_ms: ms_to_u64(started.elapsed()),
-        local_sent_hex: first_hex(&sent),
-        local_received_hex: first_hex(&received),
+        local_sent_hex: first_hex(&trace.sent),
+        local_received_hex: first_hex(&trace.received),
         naive_stdout,
         naive_stderr,
-        error,
+        error: trace.error,
     })
 }
 
@@ -200,32 +207,209 @@ async fn wait_for_listener(
     Ok(false)
 }
 
+#[derive(Debug, Default)]
+struct LocalConnectTrace {
+    sent: Vec<u8>,
+    received: Vec<u8>,
+    connect_ok: bool,
+    post_connect_received_bytes: usize,
+    error: Option<String>,
+}
+
 async fn drive_local_connect(
     port: u16,
-    sent: &[u8],
+    connect_request: &[u8],
+    post_connect_payload: &[u8],
     deadline: Duration,
-) -> (Vec<u8>, Option<String>) {
-    match timeout(deadline, drive_local_connect_inner(port, sent)).await {
-        Ok(Ok(received)) => (received, None),
-        Ok(Err(err)) => (Vec::new(), Some(err.to_string())),
-        Err(_) => (
-            Vec::new(),
-            Some(format!(
+) -> LocalConnectTrace {
+    match timeout(
+        deadline,
+        drive_local_connect_inner(port, connect_request, post_connect_payload),
+    )
+    .await
+    {
+        Ok(trace) => trace,
+        Err(_) => LocalConnectTrace {
+            error: Some(format!(
                 "debug handshake timed out after {}s",
                 deadline.as_secs()
             )),
-        ),
+            ..LocalConnectTrace::default()
+        },
     }
 }
 
-async fn drive_local_connect_inner(port: u16, sent: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
-    stream.write_all(sent).await?;
-    stream.flush().await?;
-    let mut received = vec![0_u8; READ_LIMIT_BYTES];
-    let n = stream.read(&mut received).await?;
-    received.truncate(n);
-    Ok(received)
+async fn drive_local_connect_inner(
+    port: u16,
+    connect_request: &[u8],
+    post_connect_payload: &[u8],
+) -> LocalConnectTrace {
+    let mut trace = LocalConnectTrace::default();
+    let mut stream = match TcpStream::connect(("127.0.0.1", port)).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            trace.error = Some(format!("failed to connect to temporary listener: {err}"));
+            return trace;
+        }
+    };
+
+    if let Err(err) = stream.write_all(connect_request).await {
+        trace.error = Some(format!("failed to write CONNECT request: {err}"));
+        return trace;
+    }
+    trace.sent.extend_from_slice(connect_request);
+    if let Err(err) = stream.flush().await {
+        trace.error = Some(format!("failed to flush CONNECT request: {err}"));
+        return trace;
+    }
+
+    if let Err(err) = read_until_connect_response(&mut stream, &mut trace.received).await {
+        trace.error = Some(format!("failed to read CONNECT response: {err}"));
+        return trace;
+    }
+    let received_text = String::from_utf8_lossy(&trace.received).to_ascii_lowercase();
+    trace.connect_ok =
+        received_text.starts_with("http/1.1 200") || received_text.starts_with("http/1.0 200");
+    if !trace.connect_ok {
+        trace.error = Some("CONNECT did not return HTTP 200".to_owned());
+        return trace;
+    }
+
+    if let Err(err) = stream.write_all(post_connect_payload).await {
+        trace.error = Some(format!("failed to write post-CONNECT TLS probe: {err}"));
+        return trace;
+    }
+    trace.sent.extend_from_slice(post_connect_payload);
+    if let Err(err) = stream.flush().await {
+        trace.error = Some(format!("failed to flush post-CONNECT TLS probe: {err}"));
+        return trace;
+    }
+
+    let mut buffer = [0_u8; 512];
+    match stream.read(&mut buffer).await {
+        Ok(0) => {
+            trace.error = Some("post-CONNECT tunnel closed before target replied".to_owned());
+        }
+        Ok(n) => {
+            trace.post_connect_received_bytes = n;
+            append_capture(&mut trace.received, &buffer[..n]);
+        }
+        Err(err) => {
+            trace.error = Some(format!("post-CONNECT read failed: {err}"));
+        }
+    }
+
+    trace
+}
+
+async fn read_until_connect_response(
+    stream: &mut TcpStream,
+    received: &mut Vec<u8>,
+) -> Result<(), std::io::Error> {
+    let mut buffer = [0_u8; 512];
+    while !has_header_terminator(received) && received.len() < READ_LIMIT_BYTES {
+        let n = stream.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        append_capture(received, &buffer[..n]);
+    }
+    Ok(())
+}
+
+fn append_capture(out: &mut Vec<u8>, bytes: &[u8]) {
+    let remaining = READ_LIMIT_BYTES.saturating_sub(out.len());
+    out.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+}
+
+fn has_header_terminator(bytes: &[u8]) -> bool {
+    bytes.windows(4).any(|window| window == b"\r\n\r\n")
+}
+
+fn tls_client_hello(host: &str) -> Vec<u8> {
+    let host = host.as_bytes();
+    let mut extensions = Vec::new();
+
+    let mut sni_data = Vec::new();
+    push_u16(&mut sni_data, u16_saturating(1 + 2 + host.len()));
+    sni_data.push(0);
+    push_u16(&mut sni_data, u16_saturating(host.len()));
+    sni_data.extend_from_slice(host);
+    push_extension(&mut extensions, 0x0000, &sni_data);
+
+    let mut supported_groups = Vec::new();
+    push_u16(&mut supported_groups, 6);
+    supported_groups.extend_from_slice(&[0x00, 0x1d, 0x00, 0x17, 0x00, 0x18]);
+    push_extension(&mut extensions, 0x000a, &supported_groups);
+
+    push_extension(&mut extensions, 0x000b, &[0x01, 0x00]);
+
+    let mut signature_algorithms = Vec::new();
+    push_u16(&mut signature_algorithms, 10);
+    signature_algorithms
+        .extend_from_slice(&[0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x03, 0x05, 0x01]);
+    push_extension(&mut extensions, 0x000d, &signature_algorithms);
+
+    let mut alpn = Vec::new();
+    push_u16(&mut alpn, 9);
+    alpn.push(8);
+    alpn.extend_from_slice(b"http/1.1");
+    push_extension(&mut extensions, 0x0010, &alpn);
+
+    push_extension(&mut extensions, 0x002b, &[0x02, 0x03, 0x03]);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[
+        0x43, 0x4f, 0x4f, 0x4c, 0x2d, 0x54, 0x55, 0x4e, 0x4e, 0x45, 0x4c, 0x2d, 0x44, 0x45, 0x42,
+        0x55, 0x47, 0x2d, 0x48, 0x41, 0x4e, 0x44, 0x53, 0x48, 0x41, 0x4b, 0x45, 0x2d, 0x30, 0x30,
+        0x30, 0x31,
+    ]);
+    body.push(0);
+
+    let cipher_suites = [
+        0xc0, 0x2f, 0xc0, 0x2b, 0xcc, 0xa9, 0xcc, 0xa8, 0xc0, 0x30, 0xc0, 0x2c, 0x00, 0x9e, 0x00,
+        0x9c, 0x00, 0x2f, 0x00, 0x35,
+    ];
+    push_u16(&mut body, u16_saturating(cipher_suites.len()));
+    body.extend_from_slice(&cipher_suites);
+    body.extend_from_slice(&[0x01, 0x00]);
+    push_u16(&mut body, u16_saturating(extensions.len()));
+    body.extend_from_slice(&extensions);
+
+    let mut handshake = Vec::new();
+    handshake.push(0x01);
+    push_u24(&mut handshake, u32_saturating(body.len()));
+    handshake.extend_from_slice(&body);
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&[0x16, 0x03, 0x01]);
+    push_u16(&mut record, u16_saturating(handshake.len()));
+    record.extend_from_slice(&handshake);
+    record
+}
+
+fn push_extension(out: &mut Vec<u8>, ty: u16, data: &[u8]) {
+    push_u16(out, ty);
+    push_u16(out, u16_saturating(data.len()));
+    out.extend_from_slice(data);
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_u24(out: &mut Vec<u8>, value: u32) {
+    let bytes = value.to_be_bytes();
+    out.extend_from_slice(&bytes[1..]);
+}
+
+fn u16_saturating(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn first_hex(bytes: &[u8]) -> String {
@@ -287,5 +471,21 @@ mod tests {
         let lines = sanitize_lines(b"proxy https://user:secret@example.com\n");
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].contains("secret"));
+    }
+
+    #[test]
+    fn tls_client_hello_contains_sni_and_alpn() {
+        let hello = tls_client_hello("www.google.com");
+        assert_eq!(&hello[0..3], &[0x16, 0x03, 0x01]);
+        assert!(hello
+            .windows(b"www.google.com".len())
+            .any(|w| w == b"www.google.com"));
+        assert!(hello.windows(b"http/1.1".len()).any(|w| w == b"http/1.1"));
+    }
+
+    #[test]
+    fn header_terminator_detects_complete_response() {
+        assert!(!has_header_terminator(b"HTTP/1.1 200 OK\r\n"));
+        assert!(has_header_terminator(b"HTTP/1.1 200 OK\r\n\r\n"));
     }
 }

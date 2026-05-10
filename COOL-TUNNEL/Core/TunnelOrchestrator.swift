@@ -1644,7 +1644,7 @@ public final class TunnelOrchestrator {
             }
             let glyph = report.ok ? "✓" : "✗"
             appendInfo(
-                "debug handshake: \(glyph) server=\(report.server) target=\(report.target) elapsed=\(report.elapsedMs)ms"
+                "debug handshake: \(glyph) server=\(report.server) target=\(report.target) connect_ok=\(report.connectOk) post_connect_recv=\(report.postConnectReceivedBytes)B elapsed=\(report.elapsedMs)ms"
             )
             appendInfo("debug handshake sent[0..1024]=\(report.localSentHex)")
             appendInfo(

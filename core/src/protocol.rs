@@ -398,8 +398,13 @@ pub struct DebugHandshakeReport {
     pub server: String,
     /// CONNECT target used to force one proxied stream.
     pub target: String,
-    /// `true` when the temporary local HTTP proxy returned CONNECT 200.
+    /// `true` when CONNECT returned 200 and post-CONNECT bytes came back.
     pub ok: bool,
+    /// `true` when the temporary local HTTP proxy returned CONNECT 200.
+    pub connect_ok: bool,
+    /// Number of bytes read from the target after the diagnostic sent a
+    /// TLS `ClientHello` through the established CONNECT tunnel.
+    pub post_connect_received_bytes: u64,
     /// Wall-clock diagnostic duration in milliseconds.
     pub elapsed_ms: u64,
     /// First 1024 bytes written to the temporary local naive listener.
@@ -822,6 +827,8 @@ mod tests {
                 server: "naive.example.com:443".to_owned(),
                 target: "www.google.com:443".to_owned(),
                 ok: false,
+                connect_ok: true,
+                post_connect_received_bytes: 0,
                 elapsed_ms: 1200,
                 local_sent_hex: "43 4f 4e 4e 45 43 54".to_owned(),
                 local_received_hex: String::new(),
@@ -836,6 +843,8 @@ mod tests {
         assert_eq!(value["result"]["server"], "naive.example.com:443");
         assert_eq!(value["result"]["target"], "www.google.com:443");
         assert_eq!(value["result"]["ok"], false);
+        assert_eq!(value["result"]["connect_ok"], true);
+        assert_eq!(value["result"]["post_connect_received_bytes"], 0);
         assert_eq!(value["result"]["elapsed_ms"], 1200);
         assert_eq!(value["result"]["local_sent_hex"], "43 4f 4e 4e 45 43 54");
         assert_eq!(value["result"]["local_received_hex"], "");
