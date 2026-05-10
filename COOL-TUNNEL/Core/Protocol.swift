@@ -503,6 +503,8 @@ public struct DebugHandshakeReport: Sendable, Codable, Hashable {
     public let server: String
     public let target: String
     public let ok: Bool
+    public let connectOk: Bool
+    public let postConnectReceivedBytes: UInt64
     public let elapsedMs: UInt64
     public let localSentHex: String
     public let localReceivedHex: String
@@ -512,6 +514,8 @@ public struct DebugHandshakeReport: Sendable, Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case server, target, ok, error
+        case connectOk = "connect_ok"
+        case postConnectReceivedBytes = "post_connect_received_bytes"
         case elapsedMs = "elapsed_ms"
         case localSentHex = "local_sent_hex"
         case localReceivedHex = "local_received_hex"
