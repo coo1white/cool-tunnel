@@ -1115,18 +1115,7 @@ public final class TunnelOrchestrator {
                 throw OrchestratorError.noProfile
             }
 
-            // Hydrate the password from the credential store on demand.
-            // `loadProfiles()` deliberately leaves passwords empty so app
-            // launch never triggers a credential-store access; we pull
-            // here, after the user has already committed to starting,
-            // which is the contextually-sensible place for any prompt the
-            // migrating store may surface for upgraders.
-            if profile.password.isEmpty {
-                let stored = profileStore.password(forProfileID: profile.id)
-                if !stored.isEmpty {
-                    profile.password = stored
-                }
-            }
+            hydratePasswordIfNeeded(&profile)
 
             // Validate via engine. The engine's `Profile` deserializer enforces
             // every rule the Swift form previously did inline.
@@ -1636,12 +1625,7 @@ public final class TunnelOrchestrator {
             guard var profile = selectedProfile else {
                 throw OrchestratorError.noProfile
             }
-            if profile.password.isEmpty {
-                let stored = profileStore.password(forProfileID: profile.id)
-                if !stored.isEmpty {
-                    profile.password = stored
-                }
-            }
+            hydratePasswordIfNeeded(&profile)
             let validation = try await core.send(.validateProfile(profile))
             guard case .validation(let validationReport) = validation, validationReport.ok else {
                 throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
@@ -2209,10 +2193,11 @@ public final class TunnelOrchestrator {
     private func startVPSHealthLoop() {
         vpsHealthTask?.cancel()
         guard isRunning else { return }
-        guard let profile = selectedProfile else {
+        guard var profile = selectedProfile else {
             developerMetrics.vps = .idle
             return
         }
+        hydratePasswordIfNeeded(&profile)
 
         let server = profile.server
         developerMetrics.vps = DeveloperMetrics.VPSHealth(
@@ -2254,6 +2239,15 @@ public final class TunnelOrchestrator {
                 status: error.localizedDescription,
                 checkedAt: Date()
             )
+        }
+    }
+
+    private func hydratePasswordIfNeeded(_ profile: inout Profile) {
+        if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let stored = profileStore.password(forProfileID: profile.id)
+            if !stored.isEmpty {
+                profile.password = stored
+            }
         }
     }
 
