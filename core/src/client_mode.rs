@@ -549,7 +549,7 @@ async fn dispatch(
         } => {
             let report = run_debug_handshake(&binary_path, &profile, timeout_secs)
                 .await
-                .map_err(|err| ErrorPayload::new("debug_handshake_failed", err.to_string()))?;
+                .map_err(|err| ErrorPayload::new("debug_handshake_failed", err.clone()))?;
             Ok(ResponsePayload::DebugHandshake(report))
         }
         // The lib crate defines `RequestKind` with
