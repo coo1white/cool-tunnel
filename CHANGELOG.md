@@ -9,6 +9,133 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.38] — 2026-05-11 — Robustness Review Pass (H1 + H2 + H3 + M2 — M8 + L1 + L2)
+
+> **Senior-engineer-grade robustness review landed in five focused PRs:
+> supply-chain pin enforcement, credential-store error plumbing,
+> Swift-side I/O hygiene, self-heal classifier, and a redaction +
+> defense-in-depth pass.**
+
+No protocol changes. No data-format changes. Bundled `naive` and
+profile-store schema unchanged from v2.0.37. The release is
+substantively user-visible (every fix has a "what the user used to
+see vs sees now" story), but is wire- and disk-compatible with
+v2.0.37 in both directions.
+
+### Fixed — supply-chain (H1, #53)
+
+- `scripts/fetch_naive.sh` no longer auto-pins to whatever upstream
+  served at release-cut time. The committed `naive.upstream.json` is
+  now the authoritative pin. Three explicit modes:
+  - **default (verify, no network)** — SHA-256 of the bundled
+    binary vs `merged_universal_sha256` in the manifest. `< 100 ms`.
+    `cut_release.sh` now calls this; pin drift at release time is a
+    release blocker.
+  - **`--check-only` (audit)** — re-downloads at the *pinned* tag
+    and verifies every SHA still reproduces. Drift here is a
+    supply-chain signal. Wired up to a daily `naive-pin-audit.yml`
+    workflow.
+  - **`--repin [TAG]` (operator-explicit)** — requires
+    `CT_REPIN_CONFIRM=1`. Prints OLD → NEW SHA diff. Rolls the pin
+    as a single audited commit.
+- New `naive-pin` job in `ci.yml` runs the default verify on every
+  PR — catches binary/manifest drift introduced by a botched merge.
+
+### Fixed — credential storage (H2 + H3, #54)
+
+- `ProfileStore.loadProfiles()` no longer silently destroys legacy
+  passwords when the credential-store migration write fails. The
+  failed-migration ids are tracked, and the UserDefaults rewrite
+  preserves the legacy password for those profiles until the
+  underlying store is reachable again.
+- `ProfileStore.save()` does the same for credential-write failures
+  — the password stays in UserDefaults until the next save succeeds,
+  rather than being unconditionally stripped after a `try?`-swallowed
+  failure.
+- `ProfileStore.password(forProfileID:)` now throws instead of
+  collapsing every error to `""`. Item-not-found still returns `""`
+  per the `CredentialStore` contract; backend failures propagate.
+- New `OrchestratorError.credentialReadFailed(reason:)`. Three
+  call sites (Start, Debug Handshake, VPS Health overlay) and the
+  start-intent gate now distinguish "keychain locked" from "no
+  password set" and surface "Unlock the Keychain and try again."
+  instead of misrouting the user into re-typing a password against
+  a still-locked keychain.
+
+### Fixed — I/O & network hygiene (M2 + M3 + M4 + M5 + M8, #55)
+
+- **M2** — `CoreClient` engine stderr chunk decode switched from
+  `String(data:encoding: .utf8)` (returns nil on a multi-byte
+  sequence split across the 4 KiB read boundary, silently drops
+  the chunk) to `String(decoding:as: UTF8.self)` (lossy at the
+  byte-pair level, never nil). Localized engine errors (CJK,
+  Cyrillic, emoji) no longer disappear at glyph boundaries.
+- **M3** — `SubscriptionClient` body read pre-allocates the full
+  `maxBytes` (1 MB) capacity so per-byte appends never trigger
+  `Data`'s geometric realloc. Cap enforcement switched from
+  inside-loop count check to `bytes.prefix(maxBytes + 1)` +
+  post-loop check — same guarantees, deterministic termination.
+- **M4** — `AppUpdater`'s ditto-failed user error string no longer
+  interpolates raw subprocess stderr (which can include absolute
+  paths or hostile-archive text). Logged privately; generic UI
+  message.
+- **M5** — `AppUpdater` size cap is now fail-closed: the previous
+  `if let attrs = try? …, let size = …` short-circuited silently
+  to no-action when `attributesOfItem` threw or `.size` was
+  missing. Any failure to read the downloaded file's size now
+  refuses the install.
+- **M8** — `SubscriptionClient.parseURL` rejects hostless URLs
+  (`https://`, `https:///path`) at parse time instead of letting
+  the fetch fail with an opaque transport error that mistrained
+  the user into thinking the panel was unreachable.
+
+### Fixed — self-heal classifier (M7, #56)
+
+- `scheduleSelfHeal` no longer retries Start three times for
+  permanent failures (bad profile shape, missing naive binary,
+  wire-protocol drift). A new `isPermanentStartFailure(_:)`
+  classifier aborts the retry loop with a distinct
+  "permanent failure — not retrying" log line and the real
+  cause in `lastError`. Transient failures (engine race, network
+  blip, pending keychain unlock) still retry as before.
+
+### Fixed — redaction & defense-in-depth (M6 + L1 + L2, #57)
+
+- **M6** — credential-redaction split into two passes. The new
+  strict-JSON quoted-value matcher runs first and consumes any
+  non-quote char or any escaped pair until the closing quote, so a
+  password with embedded spaces (`Tr0ub4dor 3 cat-pic`) inside a
+  `naive` JSON dump is now fully redacted instead of leaking
+  everything past the first space. The existing bare-token matcher
+  runs second for `k=v` / `k: v` plain text shapes.
+- **L2** — userinfo regex changed from `[^@\s/]+@` to `[^/\s]+@` so
+  a password containing `@` (`user:p@ssword@host`) is redacted in
+  full instead of stopping at the first `@`.
+- **L1** — curl probe inserts `--` before the URL so a future
+  user-set probe target whose URL begins with `-` can't be
+  interpreted by curl as a flag.
+- Seven new tests in `redaction.rs` cover the regression paths.
+
+### Deferred
+
+- **M1** — 53 `try?` sites without logging across persistence and
+  system-integration. Sweeping mechanical pass; doesn't fit a
+  single focused PR. Tracking for a dedicated `do/catch` +
+  `Logger.warning` sweep with a `scripts/audit.sh` ratchet.
+- **L3** — id-wrap collision after 2^64 requests. Hypothetical.
+- **L4** — PAC `shExpMatch` redundancy with `dnsDomainIs`. Style.
+
+### Verified
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-features` — 142 passed, including 7
+  new redaction tests
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild Debug` — `** BUILD SUCCEEDED **`
+- GitHub Actions CI on `main` (`8c5231a`) — 4/4 jobs green
+  (Rust, Swift, ShellCheck, NaiveProxy pin verification)
+
 ## [2.0.37] — 2026-05-11 — README Refresh + Bundled NaiveProxy Bump
 
 > **README surfaces v2.0.36 features that were already shipped but not
