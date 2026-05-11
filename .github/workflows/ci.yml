@@ -4,11 +4,15 @@
 # checks the release script runs locally. If a regression slips
 # through, CI catches it before it reaches a release tag.
 #
-# Three jobs run in parallel on every event:
+# Four jobs run in parallel on every event:
 #
 #   - rust:       fmt, clippy --pedantic -D warnings, tests
 #   - swift:      swift-format --lint
 #   - shellcheck: every script under scripts/
+#   - naive-pin:  bundled NaiveProxy binary matches naive.upstream.json
+#                 (no network — just a SHA-256 compare; supply-chain
+#                 audit against the moving upstream tag is the
+#                 separate `naive-pin-audit.yml` workflow).
 #
 # Macs are expensive on Actions, so we only build the universal
 # binary on push to main and on tag pushes — PRs get a host-arch
@@ -154,3 +158,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck scripts/*.sh
         run: shellcheck scripts/*.sh
+
+  naive-pin:
+    name: NaiveProxy pin verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+      # Default mode is verify-only: no network, no lipo, no codesign.
+      # Just SHA-256 of COOL-TUNNEL/naive vs `merged_universal_sha256`
+      # in COOL-TUNNEL/naive.upstream.json. Catches:
+      #   - a PR that edits the binary without updating the pin,
+      #   - a PR that edits the pin without rolling the binary, or
+      #   - any drift introduced by a botched merge.
+      # The cross-check against the actual upstream tag lives in
+      # naive-pin-audit.yml (scheduled, macOS, needs lipo + codesign).
+      - name: Verify bundled naive matches naive.upstream.json
+        run: bash scripts/fetch_naive.sh
