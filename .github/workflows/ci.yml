@@ -4,15 +4,18 @@
 # checks the release script runs locally. If a regression slips
 # through, CI catches it before it reaches a release tag.
 #
-# Five jobs run in parallel on every event:
+# Six jobs run in parallel on every event:
 #
-#   - rust:       fmt, clippy --pedantic -D warnings, tests
-#   - swift:      swift-format --lint
-#   - shellcheck: every script under scripts/
-#   - naive-pin:  bundled NaiveProxy binary matches naive.upstream.json
-#                 (no network — just a SHA-256 compare; supply-chain
-#                 audit against the moving upstream tag is the
-#                 separate `naive-pin-audit.yml` workflow).
+#   - rust:        fmt, clippy --pedantic -D warnings, tests
+#   - swift:       swift-format --lint
+#   - swift-tests: xcodebuild test against the COOL-TUNNEL scheme.
+#                  Exercises the COOL-TUNNELTests target (regression
+#                  coverage for H2/H3/M1 and future Swift unit tests).
+#   - shellcheck:  every script under scripts/
+#   - naive-pin:   bundled NaiveProxy binary matches naive.upstream.json
+#                  (no network — just a SHA-256 compare; supply-chain
+#                  audit against the moving upstream tag is the
+#                  separate `naive-pin-audit.yml` workflow).
 #   - try-ratchet: count of `try?` sites in the Swift production tree
 #                  matches the committed cap (M1 robustness-review).
 #                  Fast, no toolchain needed; runs on ubuntu.
@@ -148,7 +151,55 @@ jobs:
         # silently every run since the `--lint` step landed.
         # `xcrun` is the canonical macOS shim that resolves to
         # the active toolchain.
-        run: xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
+        #
+        # Lints both the app sources (`COOL-TUNNEL/`) and the test
+        # sources (`COOL-TUNNELTests/`) so the unit-test target stays
+        # under the same style discipline.
+        run: |
+          xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL
+          xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNELTests
+
+  swift-tests:
+    name: Swift (xcodebuild test)
+    # `macos-latest` rather than the `macos-14` the other Mac jobs
+    # use: the project's `objectVersion = 77` (Xcode 16.3+) cannot
+    # be opened by the Xcode shipped on macos-14. The other Mac
+    # jobs work on macos-14 because they don't open the .xcodeproj
+    # — they invoke `cargo`, `xcrun swift-format`, or `swift test`
+    # directly. Only `xcodebuild test` actually parses pbxproj.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        # xcodebuild test triggers the COOL-TUNNEL target's
+        # `Build Rust core` script phase, which shells out to
+        # `cargo build`. Same toolchain pin as the rust job below.
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Cache cargo registry + build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-swift-tests-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-swift-tests-
+            ${{ runner.os }}-cargo-
+      - name: xcodebuild test
+        run: |
+          xcodebuild test \
+            -project COOL-TUNNEL.xcodeproj \
+            -scheme COOL-TUNNEL \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet
 
   shellcheck:
     name: ShellCheck

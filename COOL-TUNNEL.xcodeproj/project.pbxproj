@@ -6,19 +6,51 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		4696829D512929F5A3126A81 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5F45E8C0B5FB7722D873F9E3 /* Cocoa.framework */; };
+		512CB2601AD2B633029FC63B /* MockCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D104EEEFCE8A5369DB7ED758 /* MockCredentialStore.swift */; };
+		DAD8A56F67CAE0F7B36E07A6 /* ProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7878B4D53EF20E097C673880 /* ProfileStoreTests.swift */; };
+		E8D5C4DF5B6260BE72160372 /* MigratingCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 554B53A6069678081A10DC49 /* MigratingCredentialStoreTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		9C62C1C5D22A1E0418D5E9FD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B1D0731F2FA598AD00E952AE /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B1D073262FA598AD00E952AE;
+			remoteInfo = "COOL-TUNNEL";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		554B53A6069678081A10DC49 /* MigratingCredentialStoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MigratingCredentialStoreTests.swift; sourceTree = "<group>"; };
+		5F45E8C0B5FB7722D873F9E3 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		7878B4D53EF20E097C673880 /* ProfileStoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProfileStoreTests.swift; sourceTree = "<group>"; };
+		9160D66E7D48ADFF3F143B72 /* COOL-TUNNELTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "COOL-TUNNELTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1D073272FA598AD00E952AE /* naive.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = naive.app; path = "Cool tunnel.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		D104EEEFCE8A5369DB7ED758 /* MockCredentialStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockCredentialStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		B1D073292FA598AD00E952AE /* COOL-TUNNEL */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = "COOL-TUNNEL";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		7F37B57C6D1DB9601223DF3D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4696829D512929F5A3126A81 /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B1D073242FA598AD00E952AE /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -29,11 +61,40 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		2E6B4FA7ED1EA751A3C174E5 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				5F45E8C0B5FB7722D873F9E3 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		4088230B2058C04FEBB3B74F /* COOL-TUNNELTests */ = {
+			isa = PBXGroup;
+			children = (
+				554B53A6069678081A10DC49 /* MigratingCredentialStoreTests.swift */,
+				D104EEEFCE8A5369DB7ED758 /* MockCredentialStore.swift */,
+				7878B4D53EF20E097C673880 /* ProfileStoreTests.swift */,
+			);
+			name = "COOL-TUNNELTests";
+			path = "COOL-TUNNELTests";
+			sourceTree = "<group>";
+		};
+		A1338E1752D8B4563AB565FD /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				2E6B4FA7ED1EA751A3C174E5 /* OS X */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		B1D0731E2FA598AD00E952AE = {
 			isa = PBXGroup;
 			children = (
 				B1D073292FA598AD00E952AE /* COOL-TUNNEL */,
 				B1D073282FA598AD00E952AE /* Products */,
+				A1338E1752D8B4563AB565FD /* Frameworks */,
+				4088230B2058C04FEBB3B74F /* COOL-TUNNELTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -41,6 +102,7 @@
 			isa = PBXGroup;
 			children = (
 				B1D073272FA598AD00E952AE /* naive.app */,
+				9160D66E7D48ADFF3F143B72 /* COOL-TUNNELTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,6 +110,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		2544C7BF0DAB60409DFB7C8C /* COOL-TUNNELTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7271779DC167898F372E4A99 /* Build configuration list for PBXNativeTarget "COOL-TUNNELTests" */;
+			buildPhases = (
+				FB48185689DAD52AECE0E92C /* Sources */,
+				7F37B57C6D1DB9601223DF3D /* Frameworks */,
+				31D63FD1DC7D51AE44B771A4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E260442E578BF1E88AED349A /* PBXTargetDependency */,
+			);
+			name = "COOL-TUNNELTests";
+			productName = "COOL-TUNNELTests";
+			productReference = 9160D66E7D48ADFF3F143B72 /* COOL-TUNNELTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		B1D073262FA598AD00E952AE /* COOL-TUNNEL */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = B1D073322FA598AE00E952AE /* Build configuration list for PBXNativeTarget "COOL-TUNNEL" */;
@@ -65,8 +145,6 @@
 				B1D073292FA598AD00E952AE /* COOL-TUNNEL */,
 			);
 			name = "COOL-TUNNEL";
-			packageProductDependencies = (
-			);
 			productName = "COOL-TUNNEL";
 			productReference = B1D073272FA598AD00E952AE /* naive.app */;
 			productType = "com.apple.product-type.application";
@@ -101,11 +179,19 @@
 			projectRoot = "";
 			targets = (
 				B1D073262FA598AD00E952AE /* COOL-TUNNEL */,
+				2544C7BF0DAB60409DFB7C8C /* COOL-TUNNELTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		31D63FD1DC7D51AE44B771A4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B1D073252FA598AD00E952AE /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -149,7 +235,26 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FB48185689DAD52AECE0E92C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E8D5C4DF5B6260BE72160372 /* MigratingCredentialStoreTests.swift in Sources */,
+				512CB2601AD2B633029FC63B /* MockCredentialStore.swift in Sources */,
+				DAD8A56F67CAE0F7B36E07A6 /* ProfileStoreTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E260442E578BF1E88AED349A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "COOL-TUNNEL";
+			target = B1D073262FA598AD00E952AE /* COOL-TUNNEL */;
+			targetProxy = 9C62C1C5D22A1E0418D5E9FD /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		B1D073302FA598AE00E952AE /* Debug */ = {
@@ -278,7 +383,6 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
-				OTHER_CODE_SIGN_FLAGS = "--options runtime";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Cool Tunnel";
@@ -297,6 +401,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 2.0.39;
+				OTHER_CODE_SIGN_FLAGS = "--options runtime";
 				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive;
 				PRODUCT_NAME = "Cool Tunnel";
 				REGISTER_APP_GROUPS = YES;
@@ -324,7 +429,6 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
-				OTHER_CODE_SIGN_FLAGS = "--options runtime";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Cool Tunnel";
@@ -343,6 +447,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 2.0.39;
+				OTHER_CODE_SIGN_FLAGS = "--options runtime";
 				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive;
 				PRODUCT_NAME = "Cool Tunnel";
 				REGISTER_APP_GROUPS = YES;
@@ -360,9 +465,60 @@
 			};
 			name = Release;
 		};
+		EA33351048371F77D0196005 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive.Tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cool Tunnel.app/Contents/MacOS/Cool Tunnel";
+			};
+			name = Release;
+		};
+		FC770F191EFAF5944550EA63 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.coolwhite.naive.Tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cool Tunnel.app/Contents/MacOS/Cool Tunnel";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		7271779DC167898F372E4A99 /* Build configuration list for PBXNativeTarget "COOL-TUNNELTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EA33351048371F77D0196005 /* Release */,
+				FC770F191EFAF5944550EA63 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		B1D073222FA598AD00E952AE /* Build configuration list for PBXProject "COOL-TUNNEL" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
