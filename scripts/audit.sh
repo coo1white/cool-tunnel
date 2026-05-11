@@ -167,11 +167,20 @@ fi
 # the gate. A test action that exists and fails is still a hard STATUS=1.
 if require_or_skip xcodebuild "xcodebuild"; then
     log "xcodebuild test (Debug)"
+    # `CODE_SIGNING_ALLOWED=NO`: the ad-hoc-signed test host can fail
+    # to bootstrap on systems without a Developer ID identity ("Test
+    # crashed with signal abrt before establishing connection").
+    # The CI workflow's swift-tests job passes the same flag — release
+    # builds also disable code signing — so this just keeps the local
+    # audit path in lockstep. Latent until PR #61 wired up an actual
+    # test action; without that, the scheme took the SKIP branch
+    # below and the missing flag was invisible.
     XCB_OUT="$(xcodebuild test \
             -project "${REPO_ROOT}/COOL-TUNNEL.xcodeproj" \
             -scheme COOL-TUNNEL \
             -configuration Debug \
             -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
             -quiet 2>&1 || true)"
     echo "${XCB_OUT}" | tail -50
     if echo "${XCB_OUT}" | grep -q "is not currently configured for the test action"; then
