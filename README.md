@@ -62,7 +62,7 @@ flowchart LR
     end
 
     subgraph Data["Data Plane"]
-        NP["NaiveProxy / sing-box-class routing boundary<br/>memory-safe wrapper, local-only bind"]
+        NP["Bundled NaiveProxy client<br/>supervised child process, loopback bind"]
     end
 
     subgraph VPS["Operator VPS"]
@@ -212,14 +212,29 @@ Then execute the setup block manually with the same values. The deployment is de
 1. Download the latest `Cool-tunnel-vX.Y.Z.dmg` from [Releases](https://github.com/coo1white/cool-tunnel/releases/latest).
 2. Drag `Cool Tunnel.app` into `/Applications`.
 3. First launch: right-click -> **Open**. macOS requires this because the project does not depend on Apple's paid Developer ID channel.
-4. Enter the VPS domain, username, password, and local port. Keep `1080` unless there is a conflict.
+4. Provide a profile. Either enter the VPS domain, username, password, and local port manually, or paste a `https://…/api/v1/subscription/<token>` URL from a `cool-tunnel-server` panel and import. Keep the local port at `1080` unless there is a conflict.
 5. Choose routing mode.
 
-| Mode | Use when |
-|---|---|
-| Smart | Blocked destinations should use the tunnel while ordinary local traffic stays direct. |
-| Global | Every TCP connection should route through the configured proxy. |
-| Local | Cool Tunnel should only expose `127.0.0.1:1080` and leave system proxy settings untouched. |
+| Mode | Use when | Mechanism |
+|---|---|---|
+| Smart | Blocked destinations should use the tunnel while ordinary local traffic stays direct. | System proxy points at a generated PAC file. Loopback, RFC 1918 ranges, and the user's direct-domain list resolve `DIRECT`; everything else is sent through the local SOCKS listener. |
+| Global | Every TCP connection should route through the configured proxy. | System SOCKS proxy points at `127.0.0.1:<localPort>`. |
+| Local | Cool Tunnel should only expose `127.0.0.1:1080` and leave system proxy settings untouched. | No system-wide proxy changes; only the local listener runs. |
+
+---
+
+## Operator Diagnostics
+
+The control panel exposes four wire-adjacent probes for triaging an incident without leaving the app. Each writes a redacted report into the live log and never includes credentials in process arguments.
+
+| Action | What it does | Use when |
+|---|---|---|
+| Run Diagnostics | Drives a CONNECT through the active tunnel and reports DNS, TCP, TLS, and end-to-end timings. | The tunnel is running but a destination is slow or failing. |
+| Debug Handshake | Spawns a temporary reference `naive` client, performs one deterministic CONNECT, sends a TLS `ClientHello` through it, and reports `connect_ok`, `post_connect_recv`, elapsed time, and first-byte hex. | Comparing the bundled client's handshake against hardened-server suppression logs; isolating CONNECT acceptance from post-CONNECT payload drops. |
+| Latency | Issues a small batch of probes through the local listener and surfaces per-sample timing. | Quantifying jitter or comparing two VPS hosts. |
+| VPS Health overlay | Hydrates the selected profile and runs an out-of-band reachability probe (DNS, TCP, TLS) against the VPS without routing user traffic. Probe failures are labelled `Probe error` rather than masquerading as `Blocked`. | Deciding whether a connection failure is a local profile defect, an upstream uplink defect, or the VPS itself being down or blocked. |
+
+Reports are also visible to the operator via the optional Developer Overlay (`DeveloperOverlayView`), which surfaces tunnel lifecycle, throughput, encryption overhead, and error-layer attribution without external telemetry.
 
 ---
 
