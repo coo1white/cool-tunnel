@@ -58,9 +58,7 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     // k=v / k: v shapes — keep the bare-token fast path while
     // closing the embedded-space leak for the JSON shape that
     // naive actually emits.
-    if let Cow::Owned(s) =
-        JSON_KV_QUOTED_REGEX.replace_all(&current, "${prefix}***${suffix}")
-    {
+    if let Cow::Owned(s) = JSON_KV_QUOTED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
         current = Cow::Owned(s);
     }
     if let Cow::Owned(s) = JSON_KV_CRED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
@@ -378,13 +376,16 @@ mod tests {
     fn redacts_quoted_password_with_embedded_space() {
         let line = r#"config error: {"password":"Tr0ub4dor 3 cat-pic","other":"ok"}"#;
         let out = redact(line);
-        assert!(
-            !out.contains("Tr0ub4dor"),
-            "password head leaked: {out}"
-        );
+        assert!(!out.contains("Tr0ub4dor"), "password head leaked: {out}");
         assert!(!out.contains("cat-pic"), "password tail leaked: {out}");
-        assert!(out.contains(r#""password":"***""#), "redaction shape wrong: {out}");
-        assert!(out.contains(r#""other":"ok""#), "non-credential field clobbered: {out}");
+        assert!(
+            out.contains(r#""password":"***""#),
+            "redaction shape wrong: {out}"
+        );
+        assert!(
+            out.contains(r#""other":"ok""#),
+            "non-credential field clobbered: {out}"
+        );
     }
 
     /// **M6 regression test.** Same shape with embedded comma.
@@ -393,8 +394,14 @@ mod tests {
         let line = r#"{"password":"foo,bar","u":"v"}"#;
         let out = redact(line);
         assert!(!out.contains("foo,bar"), "password leaked: {out}");
-        assert!(out.contains(r#""password":"***""#), "redaction shape wrong: {out}");
-        assert!(out.contains(r#""u":"v""#), "non-credential field clobbered: {out}");
+        assert!(
+            out.contains(r#""password":"***""#),
+            "redaction shape wrong: {out}"
+        );
+        assert!(
+            out.contains(r#""u":"v""#),
+            "non-credential field clobbered: {out}"
+        );
     }
 
     /// **M6 regression test.** Quoted value containing an escaped
@@ -404,7 +411,10 @@ mod tests {
         let line = r#"{"password":"a\"b"}"#;
         let out = redact(line);
         assert!(!out.contains("a\\\"b"), "password leaked: {out}");
-        assert!(out.contains(r#""password":"***""#), "redaction shape wrong: {out}");
+        assert!(
+            out.contains(r#""password":"***""#),
+            "redaction shape wrong: {out}"
+        );
     }
 
     /// **M6 sanity.** Existing bare-token path still works for the
@@ -426,7 +436,10 @@ mod tests {
         let line = "https://user:p@ssword@host.example.com/path";
         let out = redact(line);
         assert!(!out.contains("p@ssword"), "password leaked: {out}");
-        assert!(out.starts_with("https://***:***@host.example.com"), "redaction shape wrong: {out}");
+        assert!(
+            out.starts_with("https://***:***@host.example.com"),
+            "redaction shape wrong: {out}"
+        );
     }
 
     /// **L2 sanity.** Two URLs on one line each redact independently
