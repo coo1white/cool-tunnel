@@ -213,15 +213,15 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
         do {
             attrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
         } catch {
-            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)  // try-ok: temp file cleanup before throw
             throw OversizeDownloadError(actual: -1, cap: maxBytes)
         }
         guard let size = attrs[.size] as? NSNumber else {
-            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)  // try-ok: temp file cleanup before throw
             throw OversizeDownloadError(actual: -1, cap: maxBytes)
         }
         if size.int64Value > maxBytes {
-            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)  // try-ok: temp file cleanup before throw
             throw OversizeDownloadError(actual: size.int64Value, cap: maxBytes)
         }
         try FileManager.default.moveItem(at: tempURL, to: destination)

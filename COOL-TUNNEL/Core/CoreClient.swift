@@ -319,6 +319,7 @@ public actor CoreClient {
     /// Sends a `shutdown` and tears the subprocess down.
     public func stop() async {
         if process != nil {
+            // try-ok: best-effort graceful shutdown; terminate() runs next
             _ = try? await sendUnchecked(.shutdown)
         }
         await terminate()
@@ -386,7 +387,7 @@ public actor CoreClient {
         // a late dispatch doesn't double-resume). The Task is
         // cancelled in `defer` if the response arrives in time.
         let timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.requestTimeoutNanos)
+            try? await Task.sleep(nanoseconds: Self.requestTimeoutNanos)  // try-ok: sleep cancellation
             guard !Task.isCancelled else { return }
             await self?.expirePending(id: id)
         }
@@ -462,7 +463,7 @@ public actor CoreClient {
         } catch {
             // Reader closed; fall through to engine-exit cleanup.
         }
-        try? handle.close()
+        try? handle.close()  // try-ok: best-effort close on reader exit
         await onEngineExit()
     }
 
@@ -543,9 +544,9 @@ public actor CoreClient {
         if let process, process.isRunning {
             process.terminate()
         }
-        try? stdinHandle?.close()
+        try? stdinHandle?.close()  // try-ok: handle teardown on terminate
         stdinHandle = nil
-        try? stdoutHandle?.close()
+        try? stdoutHandle?.close()  // try-ok: handle teardown on terminate
         stdoutHandle = nil
         // Closing the stderr handle causes the drain loop's
         // pending `read(upToCount:)` to throw a Swift error (or
@@ -553,7 +554,7 @@ public actor CoreClient {
         // cancellation hasn't been observed yet. Closing first,
         // then cancelling, mirrors how `readerTask` is wound down
         // via stdout EOF + cancel.
-        try? stderrHandle?.close()
+        try? stderrHandle?.close()  // try-ok: handle teardown on terminate
         stderrHandle = nil
         process = nil
         readerTask?.cancel()

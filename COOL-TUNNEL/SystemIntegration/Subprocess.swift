@@ -150,6 +150,7 @@ public enum Subprocess {
                 return false  // did not time out
             }
             group.addTask {
+                // try-ok: sleep cancellation
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 if process.isRunning {
                     // **Subproc-F#1 (v0.1.7.19):** simplified
@@ -162,7 +163,7 @@ public enum Subprocess {
                     // time on no escalation; now SIGTERM gets a
                     // longer 1s grace before SIGKILL takes over.
                     process.terminate()
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // try-ok: sleep cancellation
                     if process.isRunning {
                         kill(process.processIdentifier, SIGKILL)
                     }

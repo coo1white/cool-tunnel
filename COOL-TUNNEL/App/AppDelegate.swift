@@ -152,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             replied.fire()
         }
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            try? await Task.sleep(nanoseconds: 5_000_000_000)  // try-ok: sleep cancellation
             shutdownTask.cancel()
             replied.fire()
         }
