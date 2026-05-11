@@ -200,10 +200,27 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
-            let size = attrs[.size] as? NSNumber,
-            size.int64Value > maxBytes
-        {
+        // **M1 / M5-equivalent (v2.0.38):** fail-closed if the size
+        // can't be read. The previous `if let attrs = …, let size = …,
+        // size > cap` short-circuited silently to no-action when
+        // `attributesOfItem` threw OR when the `.size` key was
+        // missing — bypassing the cap entirely. A sandbox stat
+        // failure or a compromised mirror serving a multi-GB payload
+        // would have slipped past. Mirrors the AppUpdater fix landed
+        // in PR #55. Sentinel `actual = -1` distinguishes
+        // "unreadable" from "too large" in the thrown error.
+        let attrs: [FileAttributeKey: Any]
+        do {
+            attrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw OversizeDownloadError(actual: -1, cap: maxBytes)
+        }
+        guard let size = attrs[.size] as? NSNumber else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw OversizeDownloadError(actual: -1, cap: maxBytes)
+        }
+        if size.int64Value > maxBytes {
             try? FileManager.default.removeItem(at: tempURL)
             throw OversizeDownloadError(actual: size.int64Value, cap: maxBytes)
         }
