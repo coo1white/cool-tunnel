@@ -33,7 +33,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # **The cap.** Lower this number when a PR converts `try?` sites
 # to logging `do/catch`. The audit.sh + CI step that calls this
 # script fails if the actual count diverges in either direction.
-TRY_QUESTION_CAP=59
+TRY_QUESTION_CAP=54
 
 ACTUAL=$(grep -rEo '\btry\?' "${REPO_ROOT}/COOL-TUNNEL" --include='*.swift' | wc -l | tr -d ' ')
 if [[ -z "${ACTUAL}" ]]; then

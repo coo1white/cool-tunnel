@@ -27,6 +27,7 @@
 // time the user clicks Start.
 
 import Foundation
+import os
 
 /// Per-profile password backend. Implementations must be safe to
 /// call from any actor — the orchestrator hits them on its main
@@ -97,7 +98,19 @@ public struct MigratingCredentialStore: CredentialStore {
             promoted = false
         }
         if promoted {
-            try? legacy.deletePassword(forProfileID: id)
+            // **M1 (v2.0.38):** log on legacy-cleanup failure. Strictly
+            // best-effort (primary already has the value, so a missed
+            // delete doesn't lose data), but operators investigating
+            // keychain bloat or unexplained Keychain prompts on
+            // subsequent launches need to see drift between the two
+            // backends.
+            do {
+                try legacy.deletePassword(forProfileID: id)
+            } catch {
+                Self.logger.info(
+                    "legacy keychain cleanup after migration failed for profile \(id, privacy: .public): \(error.localizedDescription, privacy: .public); primary already holds the value"
+                )
+            }
         }
         return legacyValue
     }
@@ -107,13 +120,30 @@ public struct MigratingCredentialStore: CredentialStore {
         // Also clear the legacy entry on a fresh write — keeps the
         // two backends from drifting if the user changes a password
         // through the UI before the migration read fires.
-        try? legacy.deletePassword(forProfileID: id)
+        //
+        // **M1 (v2.0.38):** log on failure (same justification as above).
+        do {
+            try legacy.deletePassword(forProfileID: id)
+        } catch {
+            Self.logger.info(
+                "legacy keychain cleanup after setPassword failed for profile \(id, privacy: .public): \(error.localizedDescription, privacy: .public); primary holds the new value"
+            )
+        }
     }
 
     public func deletePassword(forProfileID id: String) throws {
         try primary.deletePassword(forProfileID: id)
-        try? legacy.deletePassword(forProfileID: id)
+        // **M1 (v2.0.38):** log on legacy-cleanup failure.
+        do {
+            try legacy.deletePassword(forProfileID: id)
+        } catch {
+            Self.logger.info(
+                "legacy keychain cleanup after deletePassword failed for profile \(id, privacy: .public): \(error.localizedDescription, privacy: .public); primary already deleted"
+            )
+        }
     }
+
+    private static let logger = Logger.cooltunnel("CredentialStore.Migrating")
 }
 
 // `KeychainStore`'s `CredentialStore` conformance lives in

@@ -240,7 +240,19 @@ public struct ProfileStore: @unchecked Sendable {
     /// Removes the credential entry for a profile that's been deleted
     /// from the list.
     public func deletePassword(forProfileID id: String) {
-        try? credentials.deletePassword(forProfileID: id)
+        // **M1 (v2.0.38):** log on failure instead of silently
+        // swallowing. The caller has already removed the profile id
+        // from the in-memory list; a credential-delete failure here
+        // means the entry lingers in the keychain / file store with
+        // no UI to clean it up. Surfacing the line lets an operator
+        // notice the orphan when diagnosing keychain bloat.
+        do {
+            try credentials.deletePassword(forProfileID: id)
+        } catch {
+            Logger.cooltunnel("ProfileStore").warning(
+                "credential delete failed for profile \(id, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     // MARK: - Private
@@ -266,7 +278,22 @@ public struct ProfileStore: @unchecked Sendable {
             }
             return p
         }
-        guard let data = try? JSONEncoder().encode(stripped) else { return }
+        // **M1 (v2.0.38):** log on encode failure. `[Profile]` has no
+        // custom Codable + no NaN floats, so this realistically can't
+        // fail — but if it does, silently abandoning the save would
+        // mean the user's profile edit doesn't persist with no
+        // diagnostic. The optional-coalesce the previous
+        // implementation used hid exactly that class of
+        // "shouldn't happen" failure.
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(stripped)
+        } catch {
+            Logger.cooltunnel("ProfileStore").error(
+                "profiles blob encode failed: \(error.localizedDescription, privacy: .public); UserDefaults not updated"
+            )
+            return
+        }
         defaults.set(data, forKey: Keys.profiles)
     }
 }
