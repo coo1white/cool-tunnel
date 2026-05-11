@@ -254,6 +254,16 @@ else
     fi
 fi
 
+# --- 8. try? ratchet (M1 robustness-review followup) -----------------------
+# Delegates to scripts/try_question_ratchet.sh so the same cap is
+# enforced from CI's lightweight ratchet job (no need for the full
+# audit suite) and from the audit suite locally.
+log "try? ratchet"
+if ! bash "${REPO_ROOT}/scripts/try_question_ratchet.sh"; then
+    fail "try? ratchet failed — see message above"
+    STATUS=1
+fi
+
 # --- Summary ---------------------------------------------------------------
 echo
 if (( STATUS == 0 )); then

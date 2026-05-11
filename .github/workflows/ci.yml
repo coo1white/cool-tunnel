@@ -4,7 +4,7 @@
 # checks the release script runs locally. If a regression slips
 # through, CI catches it before it reaches a release tag.
 #
-# Four jobs run in parallel on every event:
+# Five jobs run in parallel on every event:
 #
 #   - rust:       fmt, clippy --pedantic -D warnings, tests
 #   - swift:      swift-format --lint
@@ -13,6 +13,9 @@
 #                 (no network — just a SHA-256 compare; supply-chain
 #                 audit against the moving upstream tag is the
 #                 separate `naive-pin-audit.yml` workflow).
+#   - try-ratchet: count of `try?` sites in the Swift production tree
+#                  matches the committed cap (M1 robustness-review).
+#                  Fast, no toolchain needed; runs on ubuntu.
 #
 # Macs are expensive on Actions, so we only build the universal
 # binary on push to main and on tag pushes — PRs get a host-arch
@@ -176,3 +179,20 @@ jobs:
       # naive-pin-audit.yml (scheduled, macOS, needs lipo + codesign).
       - name: Verify bundled naive matches naive.upstream.json
         run: bash scripts/fetch_naive.sh
+
+  try-ratchet:
+    name: try? ratchet (M1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+      # `try?` swallows the underlying error without logging — for
+      # credential stores and persistence paths that costs operators
+      # the diagnostic signal needed to debug an incident (cf. H2/H3
+      # in the 2026-05-11 robustness review). The standalone script
+      # caps the count at a committed baseline and fails if it
+      # drifts in either direction; the standalone form keeps the
+      # CI step lightweight (no Swift toolchain, no Rust toolchain).
+      - name: Enforce try? cap
+        run: bash scripts/try_question_ratchet.sh
