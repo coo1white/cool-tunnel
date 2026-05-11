@@ -9,6 +9,78 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.39] — 2026-05-11 — M1 Ratchet + Sweep + GitHubTrust Fail-Closed
+
+> **CI guardrail against silent `try?` regressions, first sweep
+> converting seven swallowed-error sites to logging do/catch, and
+> a fail-closed fix on the auto-updater download size cap.**
+
+Continues the robustness pass that produced v2.0.38. No protocol or
+data-format changes. Bundled `naive` unchanged. Wire- and disk-
+compatible with v2.0.38 in both directions.
+
+### Added — try? ratchet (M1, #58)
+
+- `scripts/try_question_ratchet.sh` — standalone, no Swift / Rust
+  toolchain dependency. Counts `\btry\?` in
+  `COOL-TUNNEL/**/*.swift` via `grep -rEo` and compares against
+  `TRY_QUESTION_CAP`. Hard-fails on any drift; on drop, the
+  failure message names the new value to write. The ratchet is
+  intentionally bi-directional — converting a `try?` site to
+  logging `do/catch` forces the same commit to lower the cap,
+  so wins land atomically.
+- New `try-ratchet` job in `.github/workflows/ci.yml` runs the
+  standalone on every push and PR. Lightweight; runs on
+  `ubuntu-latest`, no toolchain install.
+- `scripts/audit.sh` section 8 delegates to the standalone so
+  the local audit suite enforces the same cap.
+
+### Fixed — silent-error conversions (M1 sweep, #59)
+
+Seven `try?` sites that swallowed real (not cleanup-path) errors
+now propagate through `do { try ... } catch { Logger.warning(...) }`:
+
+- `ProfileStore.deletePassword(forProfileID:)` — credential
+  delete failure logs the profile id (was: silent → orphan
+  keychain entry on profile removal).
+- `ProfileStore.persistStripped` JSON encode — logs on failure
+  (was: silent abandon of the profile-list save).
+- `MigratingCredentialStore` × 3 — every legacy-keychain cleanup
+  (after promote, after `setPassword`, after `deletePassword`)
+  logs at info level so drift between primary and legacy
+  backends is visible to a support session.
+- `AppSupportPaths.init` — `setResourceValues(.isExcludedFromBackup)`
+  failure warns. Credentials ending up in Time Machine snapshots
+  was the silent worst case.
+
+Cap dropped from 59 to **54**. The residual is intentional
+cleanup-path `try?` (close FileHandle, sleep cancellation,
+disable system proxy on shutdown, `defer { try? FileManager.…
+removeItem(at: tempRoot) }`, etc.).
+
+### Fixed — GitHubTrust size cap bypass (M5-equivalent, #59)
+
+- `GitHubTrust.download` now fails closed when
+  `attributesOfItem` throws or the `.size` key is missing.
+  Mirrors the AppUpdater fix landed in PR #55 (v2.0.38). A
+  sandbox stat failure or a compromised mirror serving a
+  multi-GB payload would have bypassed the cap entirely under
+  the previous `if let attrs = try? …, let size = …` chain. The
+  thrown `OversizeDownloadError` carries sentinel `actual = -1`
+  on the "unreadable" path so callers can distinguish it from
+  "too large".
+
+### Verified
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-features`
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild Debug` — `** BUILD SUCCEEDED **`
+- `scripts/try_question_ratchet.sh` — `try? ratchet: 54 == cap ✓`
+- GitHub Actions CI on `main` (`688eb8f`) — 5/5 jobs green
+  (Rust, Swift, ShellCheck, NaiveProxy pin verification, try? ratchet)
+
 ## [2.0.38] — 2026-05-11 — Robustness Review Pass (H1 + H2 + H3 + M2 — M8 + L1 + L2)
 
 > **Senior-engineer-grade robustness review landed in five focused PRs:
