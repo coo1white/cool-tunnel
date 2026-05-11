@@ -23,7 +23,7 @@ public enum SHAVerifier {
     /// hashing a 100 MB .zip.
     public static func sha256(of fileURL: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
+        defer { try? handle.close() }  // try-ok: defer-block handle teardown
         var hasher = SHA256()
         while true {
             let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()

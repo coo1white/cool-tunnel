@@ -211,6 +211,7 @@ final class RustCoreUpdater {
 
             state = .downloading(progress: 0.0)
             let tempRoot = try Self.makeTempDirectory()
+            // try-ok: defer-block tempdir teardown
             defer { try? FileManager.default.removeItem(at: tempRoot) }
             // **Sw#C4 partial (v0.1.7.18):** download both the
             // engine binary AND the SHA-256 manifest. Refuse to

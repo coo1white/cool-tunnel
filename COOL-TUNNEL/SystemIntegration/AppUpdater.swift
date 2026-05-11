@@ -199,7 +199,7 @@ final class AppUpdater {
             // slower hardware — users on Intel Macs often
             // never saw the state transition before the
             // window vanished.
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            try? await Task.sleep(nanoseconds: 1_200_000_000)  // try-ok: sleep cancellation
             // **v2.0.7 (relaunch-stuck-fix):** belt-and-braces
             // hard-exit fallback. v2.0.6 users reported the UI
             // sticking on "Relaunching… The app will close in a
@@ -230,7 +230,7 @@ final class AppUpdater {
             // applicationShouldTerminate watchdog, so the clean
             // path still has every chance to win.
             Task.detached {
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                try? await Task.sleep(nanoseconds: 8_000_000_000)  // try-ok: sleep cancellation
                 Darwin.exit(0)
             }
             await MainActor.run { NSApp.terminate(nil) }
@@ -480,6 +480,7 @@ final class AppUpdater {
         do {
             try await runPipeline(release: release, tempRoot: tempRoot, report: report)
         } catch {
+            // try-ok: cleanup of mkdtemp'd dir on pipeline error
             try? FileManager.default.removeItem(at: tempRoot)
             throw error
         }
@@ -608,8 +609,8 @@ final class AppUpdater {
         // (manifests are ~250 bytes) and the .zip at 100 MB.
         //
         // **M5 (v2.0.38):** fail-closed if we can't read the size at
-        // all. The previous `if let attrs = try? …, let size = …,
-        // size > cap` short-circuited silently to no-action when
+        // all. The previous optional-coalesce form `if let attrs = …,
+        // let size = …, size > cap` short-circuited silently to no-action when
         // `attributesOfItem` threw OR when the `.size` key was
         // missing — bypassing the cap entirely. A compromised mirror
         // serving a multi-GB payload on a sandbox where attribute
@@ -623,7 +624,7 @@ final class AppUpdater {
         do {
             attrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
         } catch {
-            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)  // try-ok: temp file cleanup before throw
             appUpdaterLogger.info(
                 "could not stat downloaded \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
@@ -632,13 +633,13 @@ final class AppUpdater {
             )
         }
         guard let sizeNumber = attrs[.size] as? NSNumber else {
-            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)  // try-ok: temp file cleanup before throw
             throw UpdaterError.message(
                 "Downloaded \(url.lastPathComponent) has no readable size; refusing to install."
             )
         }
         if sizeNumber.int64Value > cap {
-            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)  // try-ok: temp file cleanup before throw
             throw UpdaterError.message(
                 "\(url.lastPathComponent) exceeded the \(cap / (1024 * 1024)) MB size limit; refusing to install."
             )
@@ -856,6 +857,7 @@ final class AppUpdater {
             // extraction. A legitimate freshly-extracted bundle
             // will have `nlinks == 1` for every regular file.
             if resources.isRegularFile == true && !isSymlink {
+                // try-ok: defensive lookup; nil → skip the nlinks check
                 let attrs = try? FileManager.default.attributesOfItem(
                     atPath: item.path
                 )
@@ -934,9 +936,8 @@ final class AppUpdater {
         )
         let apps = items.filter { url in
             guard url.pathExtension == "app" else { return false }
-            let isDir =
-                (try? url.resourceValues(forKeys: [.isDirectoryKey])
-                    .isDirectory) ?? false
+            // try-ok: defensive dir check; nil → treat as non-app
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             return isDir
         }
         guard apps.count == 1 else {
@@ -1784,6 +1785,7 @@ final class AppUpdater {
         // diagnostic), defeating the whole point of Q-F#2.
         // If the path exists and is anything other than a
         // regular file, unlink it so bash creates a fresh one.
+        // try-ok: defensive lookup; nil → leave the file alone
         let resources = try? logURL.resourceValues(forKeys: [
             .isSymbolicLinkKey, .isRegularFileKey,
         ])
@@ -1793,6 +1795,7 @@ final class AppUpdater {
             appUpdaterLogger.info(
                 "removing non-regular relaunch.log at \(logURL.path, privacy: .public)"
             )
+            // try-ok: best-effort unlink of non-regular relaunch log
             try? FileManager.default.removeItem(at: logURL)
         }
         return logURL

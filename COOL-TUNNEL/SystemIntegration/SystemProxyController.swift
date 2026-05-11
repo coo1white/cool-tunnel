@@ -38,6 +38,7 @@ public struct SystemProxyController: Sendable {
     public func enableGlobalSOCKS(port: UInt16) async throws {
         for service in try await activeServices() {
             // Clear PAC first so smart-mode leftovers don't override.
+            // try-ok: clear stale PAC; mode hop is the real intent
             _ = try? await run(["-setautoproxystate", service, "off"])
             try await run(["-setsocksfirewallproxy", service, "127.0.0.1", String(port)])
             try await run(["-setsocksfirewallproxystate", service, "on"])
@@ -53,6 +54,7 @@ public struct SystemProxyController: Sendable {
     public func enableSmartPAC(pacURL: URL) async throws {
         for service in try await activeServices() {
             // Clear global SOCKS first so global-mode leftovers don't override.
+            // try-ok: clear stale SOCKS; mode hop is the real intent
             _ = try? await run(["-setsocksfirewallproxystate", service, "off"])
             try await run(["-setautoproxyurl", service, pacURL.absoluteString])
             try await run(["-setautoproxystate", service, "on"])
@@ -62,7 +64,9 @@ public struct SystemProxyController: Sendable {
     /// Disables both SOCKS and PAC proxies on every active network service.
     public func disableAll() async throws {
         for service in try await activeServices() {
+            // try-ok: best-effort revert; service may already be off
             _ = try? await run(["-setsocksfirewallproxystate", service, "off"])
+            // try-ok: best-effort revert; service may already be off
             _ = try? await run(["-setautoproxystate", service, "off"])
         }
     }
