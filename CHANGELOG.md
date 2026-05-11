@@ -9,6 +9,49 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.37] — 2026-05-11 — README Refresh (Diagnostics + Subscription Import)
+
+> **Documentation-only release. No code or asset changes from v2.0.36.**
+
+Aligns the repository README with code that already shipped in v2.0.36
+but was not surfaced in the operator-facing prose. The macOS bundle,
+Rust core binary, and bundled `naive` are byte-for-byte identical to
+v2.0.36; only `README.md` and version-pinning files changed.
+
+### Changed
+
+- Architecture diagram now labels the macOS client data plane as the
+  bundled NaiveProxy client. Removed the misleading `sing-box-class`
+  wording — the only `sing-box` mention in the tree is a comment in
+  `core/src/preflight.rs` describing the *server-side* topology of the
+  separate `cool-tunnel-server` repo, which does not belong on the
+  client diagram.
+- macOS Installation step 4 surfaces subscription-URL profile import
+  alongside manual entry, matching the import flow in
+  `COOL-TUNNEL/Views/ConnectionFormView.swift` and
+  `COOL-TUNNEL/Core/SubscriptionClient.swift`.
+- Routing modes table adds a `Mechanism` column: Smart = PAC plus the
+  user's direct-domain list (`core/src/config/pac.rs`), Global = SOCKS
+  loopback, Local = no system-wide proxy changes.
+
+### Added
+
+- New `## Operator Diagnostics` README section documents the four
+  control-panel probes wired in
+  `COOL-TUNNEL/Views/ControlPanelView.swift` and backed by
+  `RunDiagnostics`, `DebugHandshake`, `RunLatencyTest`, and
+  `ProbeServer` in `core/src/protocol.rs`. Adds a pointer to the
+  optional `DeveloperOverlayView` HUD.
+
+### Verified
+
+- `cargo fmt --check`
+- `cargo test --locked --all-features`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
+- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+- GitHub Actions CI on `main` (`fdb8ea0`)
+
 ## [2.0.36] — 2026-05-10 — Post-CONNECT Tunnel Diagnostics
 
 > **Debug Handshake now distinguishes CONNECT acceptance from real
