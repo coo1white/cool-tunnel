@@ -215,9 +215,22 @@ public actor CoreClient {
                     else {
                         break  // EOF or handle gone
                     }
-                    if let line = String(data: chunk, encoding: .utf8),
-                        !line.isEmpty
-                    {
+                    // **M2 (v2.0.38):** decode lossily so a multi-byte
+                    // UTF-8 sequence split across the 4096-byte read
+                    // boundary doesn't drop the whole chunk. The
+                    // previous `String(data:encoding: .utf8)` returned
+                    // `nil` on any invalid byte, and the `if let line
+                    // = …` silently swallowed the chunk — engine
+                    // stderr from localized (CJK, Cyrillic, emoji)
+                    // error paths disappeared whenever a glyph
+                    // straddled 4 KiB. `String(decoding:as:)` replaces
+                    // invalid sequences with U+FFFD instead, which
+                    // costs at most one replacement glyph per chunk
+                    // boundary in exchange for never losing a line.
+                    // Mirrors the Rust supervisor's
+                    // `String::from_utf8_lossy` at supervisor/mod.rs.
+                    let line = String(decoding: chunk, as: UTF8.self)
+                    if !line.isEmpty {
                         Self.engineStderrLogger.warning(
                             "engine stderr: \(line, privacy: .private)"
                         )

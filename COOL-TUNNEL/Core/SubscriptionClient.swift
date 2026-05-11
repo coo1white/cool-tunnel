@@ -264,21 +264,30 @@ public actor SubscriptionClient {
         // The decoder will reject non-JSON bytes anyway.
 
         // Stream the body into a `Data` buffer with a strict per-byte
-        // cap. The cap fires inside the for-await loop *before* the
-        // append, so peak memory tops out at exactly `maxBytes`
-        // regardless of how fast the upstream is pushing bytes —
-        // critical for hostile-MITM threat model where the panel
-        // could serve gigabit. `URLError(.cancelled)` from the
-        // delegate (no-redirect refusal) lands in this catch path
-        // as a `transportFailed`.
+        // cap. The bound is enforced by `prefix(maxBytes + 1)` on the
+        // AsyncBytes sequence — iteration terminates deterministically
+        // once that many bytes are seen, so a hostile gigabit upstream
+        // cannot run our loop indefinitely. The single post-loop
+        // count check distinguishes "legitimately small body"
+        // (count <= maxBytes) from "we stopped at the cap"
+        // (count == maxBytes + 1).
+        //
+        // **M3 (v2.0.38):** pre-allocate the full cap so the per-byte
+        // appends never trigger Data's geometric realloc — the prior
+        // `reserveCapacity(8 * 1024)` meant a 1 MB body grew through
+        // roughly a dozen reallocations on the way to the cap. The
+        // append cost is still O(N) bytes but with zero realloc
+        // churn the constant factor drops materially. A `Data` of
+        // `maxBytes` (1 MB today) costs the same VMA either way —
+        // we'd commit those pages on the path to the cap anyway.
         var data = Data()
-        data.reserveCapacity(8 * 1024)
+        data.reserveCapacity(Self.maxBytes)
         do {
-            for try await byte in bytes {
-                if data.count >= Self.maxBytes {
-                    throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
-                }
+            for try await byte in bytes.prefix(Self.maxBytes + 1) {
                 data.append(byte)
+            }
+            if data.count > Self.maxBytes {
+                throw SubscriptionClientError.oversizeBody(cap: Self.maxBytes)
             }
         } catch let error as SubscriptionClientError {
             throw error
@@ -330,6 +339,16 @@ public actor SubscriptionClient {
         // we strictly enforce.
         guard url.scheme?.lowercased() == "https" else {
             throw SubscriptionClientError.nonHTTPSURL(url.scheme ?? "")
+        }
+        // **M8 (v2.0.38):** `URL(string:)` is permissive and accepts
+        // hostless inputs like `https://` or `https:///path`. Without
+        // this guard the subsequent fetch fails with an opaque
+        // transport error and the user sees "URL didn't reach the
+        // panel" — leaving them debugging connectivity when the real
+        // problem is the URL has no host to reach. Reject before
+        // the network call so the UI surfaces "malformed URL" cleanly.
+        guard let host = url.host, !host.isEmpty else {
+            throw SubscriptionClientError.malformedURL(trimmed)
         }
         return url
     }
