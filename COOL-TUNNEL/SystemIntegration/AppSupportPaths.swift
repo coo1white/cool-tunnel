@@ -8,6 +8,7 @@
 
 import Darwin
 import Foundation
+import os
 
 /// Filesystem locations the app uses.
 public struct AppSupportPaths: Sendable {
@@ -56,7 +57,19 @@ public struct AppSupportPaths: Sendable {
         var supportMutable = support
         var resources = URLResourceValues()
         resources.isExcludedFromBackup = true
-        try? supportMutable.setResourceValues(resources)
+        // **M1 (v2.0.38):** log on failure. Excluding the support
+        // directory from Time Machine is best-effort — a failure
+        // here doesn't break the app, but it does leave credentials
+        // potentially backed up to TM snapshots accessible to a
+        // future administrator. Operators auditing backup hygiene
+        // need to see this signal.
+        do {
+            try supportMutable.setResourceValues(resources)
+        } catch {
+            Logger.cooltunnel("AppSupportPaths").warning(
+                "could not exclude support directory from Time Machine: \(error.localizedDescription, privacy: .public); credentials may be present in TM snapshots"
+            )
+        }
         self.supportDirectory = support
         self.configFile = support.appendingPathComponent("config.json", isDirectory: false)
         self.pacFile = support.appendingPathComponent("smart-proxy.pac", isDirectory: false)
