@@ -125,11 +125,135 @@ linker leaves a stub signature that the build script's
 - **Don't introduce dependencies** lightly. Every new crate or
   Swift package adds binary size and surface area. Justify in the
   PR description.
-- **Don't break the audit gates.** All four green checks
-  (Rust + Swift + shell + security) are required.
+- **Don't break the audit gates.** All six green CI jobs
+  (Rust, Swift format lint, Swift xcodebuild test, ShellCheck,
+  NaiveProxy pin verification, `try?` ratchet) are required. See
+  "CI gates and invariants" below for what each enforces and why.
 - **Don't commit secrets.** The `security_check.sh` secret scan
   will catch obvious patterns (AWS keys, GitHub PATs, the pinned
   historical leak), but be careful with anything new.
+
+## CI gates and invariants
+
+The CI workflow at `.github/workflows/ci.yml` runs six jobs in
+parallel on every push and pull request. A separate
+`naive-pin-audit.yml` workflow runs daily on a schedule. Each gate
+exists because some past PR broke the invariant it now enforces.
+
+### `try?` ratchet — the "Zero `try?`" rule
+
+`try?` silently discards the underlying error. In a credential
+store or persistence path that's data loss the operator never
+sees; H2 and H3 in the 2026-05-11 robustness review were both
+this exact bug class.
+
+**Every `try?` in the Swift production tree (`COOL-TUNNEL/`) must
+be either:**
+
+1. **Converted** to logging `do/catch`:
+
+   ```swift
+   do {
+       try credentials.deletePassword(forProfileID: id)
+   } catch {
+       Logger.cooltunnel("ProfileStore").warning(
+           "credential delete failed for \(id, privacy: .public): "
+           + "\(error.localizedDescription, privacy: .public)"
+       )
+   }
+   ```
+
+2. **Annotated** as legitimate cleanup with a one-line rationale:
+
+   ```swift
+   try? handle.close()  // try-ok: handle teardown on terminate
+   ```
+
+   The annotation goes on the same line as the `try?` token, OR
+   on the immediately preceding line (used when the inline form
+   would exceed the 110-column `EndOfLineComment` lint rule).
+
+Legitimate cleanup is roughly: closing a `FileHandle` whose
+error doesn't matter, `defer { try? FileManager.…removeItem(at:
+tempRoot) }`, sleep cancellation (`try? await Task.sleep(...)`),
+best-effort proxy revert on shutdown, defensive resource-value
+lookups whose `nil` flows to a sane default. Anything that
+swallows a *real* error — disk full, decode failure, keychain
+lock, credential write rejection — is not cleanup and must be
+converted.
+
+`scripts/try_question_ratchet.sh` enforces this in CI. It counts
+unannotated `\btry\?` occurrences and fails on any drift from
+the committed `TRY_QUESTION_CAP` (currently 0). Drift in either
+direction fails — converting a site lowers the count, so the
+same commit must update the cap. `bash scripts/try_question_ratchet.sh
+--list` prints every unannotated site for "what's left" review.
+
+### `xcodebuild test` — H2/H3/M1 regression coverage
+
+`COOL-TUNNELTests/` is the XCTest target. Currently 16 tests
+across `ProfileStoreTests` + `MigratingCredentialStoreTests`,
+each pinning a specific failure mode from the robustness review:
+
+- H2: credential-store write failure must NOT strip the password
+  from `UserDefaults` (both on load-time migration and on save).
+- H3: credential-store read failure must propagate via the
+  `ProfileStore.password(forProfileID:) throws` API, NOT
+  collapse to `""`.
+- M1: best-effort cleanup paths (`legacy.deletePassword` after
+  successful primary write) must log and continue, never bubble.
+
+When you change `ProfileStore`, `MigratingCredentialStore`,
+`KeychainStore`, or `FileCredentialStore`, run the suite
+locally first:
+
+```sh
+xcodebuild test \
+    -project COOL-TUNNEL.xcodeproj \
+    -scheme COOL-TUNNEL \
+    -destination 'platform=macOS' \
+    CODE_SIGNING_ALLOWED=NO
+```
+
+`CODE_SIGNING_ALLOWED=NO` is required on systems without an
+Apple Developer ID identity — the ad-hoc-signed test host
+otherwise crashes during bootstrap with a misleading "Early
+unexpected exit" error.
+
+When you add a new credential / persistence regression test:
+
+1. Drop the `*.swift` file into `COOL-TUNNELTests/`.
+2. Run `ruby scripts/add_test_target.rb` (requires
+   `gem install --user-install xcodeproj`) to add it to the
+   target. The script is idempotent — re-running just picks up
+   the new file.
+
+### NaiveProxy pin verification — the supply-chain anchor
+
+`COOL-TUNNEL/naive.upstream.json` is the authoritative pin for
+the bundled `naive` binary. It records the upstream tag this
+repo claims to ship and the SHA-256 of every artifact in the
+build chain. `scripts/fetch_naive.sh` has three modes:
+
+- (default, no flag) — verify the bundled binary's SHA matches
+  the manifest. No network. Run by `cut_release.sh` and the
+  PR-time `naive-pin` CI job.
+- `--check-only` — re-download at the pinned tag, verify every
+  SHA still reproduces. Run daily by `naive-pin-audit.yml`.
+- `--repin [TAG]` — operator-explicit rollover. Requires
+  `CT_REPIN_CONFIRM=1`. Lands as a single audited commit.
+
+Never let `cut_release.sh` "auto-pin" again — that path was the
+H1 supply-chain finding from the robustness review.
+
+### Other gates
+
+- **Rust** — `cargo fmt --check`, `cargo clippy --pedantic
+  -D warnings`, `cargo test`, `cargo deny check`. On push (not
+  PR) also builds the universal `cool-tunnel-core` binary.
+- **Swift format lint** — `xcrun swift-format lint -r --strict`
+  on both `COOL-TUNNEL/` and `COOL-TUNNELTests/`.
+- **ShellCheck** — every `*.sh` in `scripts/`.
 
 ## Code style
 
