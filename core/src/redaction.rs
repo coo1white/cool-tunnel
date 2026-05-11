@@ -47,6 +47,20 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     // `naive` config-load errors dump partial JSON like
     // `"password":"..."`; curl -v emits `password: hunter2`.
     // Without this, both forms reach the UI verbatim.
+    //
+    // **M6 (v2.0.38):** the strict-JSON-quoted-string pass runs
+    // FIRST. The bare-token pass that historically handled both
+    // forms stops at the first space, comma, or quote in the
+    // value, which leaks the tail of any password with embedded
+    // whitespace or punctuation (the realistic case: human-typed
+    // passwords like "Tr0ub4dor 3 cat-pic"). Two passes —
+    // strict-quoted first, then bare for the remaining
+    // k=v / k: v shapes — keep the bare-token fast path while
+    // closing the embedded-space leak for the JSON shape that
+    // naive actually emits.
+    if let Cow::Owned(s) = JSON_KV_QUOTED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
+        current = Cow::Owned(s);
+    }
     if let Cow::Owned(s) = JSON_KV_CRED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
         current = Cow::Owned(s);
     }
@@ -73,13 +87,21 @@ pub fn redact(line: &str) -> Cow<'_, str> {
 // response to a constant regex that won't compile.
 
 /// `scheme://userinfo@` matcher. Schemes are case-insensitive
-/// (curl occasionally upper-cases them in error output). The
-/// userinfo class `[^@\s/]+` stops at the first `@`, whitespace,
-/// or `/` so a path containing `@` cannot be mistaken for
-/// credentials.
+/// (curl occasionally upper-cases them in error output).
+///
+/// **L2 (v2.0.38):** the userinfo class is `[^/\s]+`, greedy-up-to-
+/// path-or-whitespace, with a literal `@` after. The previous class
+/// `[^@\s/]+` stopped at the *first* `@`, so a password containing
+/// an `@` (`user:p@ssword@host`) was only partially redacted —
+/// `user:p` got `***:***@` but `ssword@host` reached the log
+/// verbatim. The greedy form backtracks to the last `@` before the
+/// path-or-whitespace boundary, redacting the full userinfo run.
+/// Trade-off: a URL fragment like `https://x.com#a@b` now matches
+/// and redacts to `https://***:***@b`, but that shape doesn't
+/// appear in the `naive` / curl log surface this module guards.
 #[allow(clippy::expect_used)]
 static USERINFO_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^@\s/]+@")
+    Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^/\s]+@")
         .expect("userinfo redaction regex must compile")
 });
 
@@ -108,6 +130,33 @@ static COOKIE_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Cookie redaction regex must compile")
 });
 
+/// **M6 (v2.0.38):** strict-JSON-quoted-value matcher. Runs first,
+/// before the bare-token matcher below. The value `(?:[^"\\]|\\.)*`
+/// consumes any non-`"` character or any escaped pair, terminating
+/// only at the literal closing quote — so a password with embedded
+/// spaces, commas, or punctuation is fully redacted instead of
+/// leaking everything past the first delimiter. The previous
+/// single-regex design used `[^"\s,}\r\n]+` for both quoted and
+/// bare values; the realistic case (operator picks
+/// `Tr0ub4dor 3 cat-pic` and `naive` emits a JSON dump on a
+/// config-load error) was leaking everything from the first space
+/// onwards.
+#[allow(clippy::expect_used)]
+static JSON_KV_QUOTED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        (?P<prefix>
+            "(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token)"
+            \s* : \s*
+            "
+        )
+        (?:[^"\\]|\\.)*
+        (?P<suffix>")
+        "#,
+    )
+    .expect("JSON KV quoted-value credential redaction regex must compile")
+});
+
 /// **Diag-F#1 (v0.1.7.17):** matches credential-bearing JSON
 /// fields and `key=value` / `key: value` plain text dumps.
 /// Covers `password`, `passwd`, `secret`, `token`, `api_key`,
@@ -116,6 +165,14 @@ static COOKIE_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// quotes on the value. The trailing-quote `suffix` capture
 /// preserves the closing quote on JSON so the redacted output
 /// remains parse-able.
+///
+/// **M6 (v2.0.38):** this matcher now runs **after**
+/// `JSON_KV_QUOTED_REGEX`, which handles the strict-JSON case
+/// (the leak surface for human-typed passwords with spaces). This
+/// remaining matcher exclusively handles the bare-token shapes
+/// (`password=hunter2`, `password: hunter2`) which never had the
+/// embedded-space problem because those formats are
+/// space-delimited by definition.
 #[allow(clippy::expect_used)]
 static JSON_KV_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -307,5 +364,96 @@ mod tests {
         let _ = USERINFO_REGEX.replace_all("", "");
         let _ = AUTH_HEADER_REGEX.replace_all("", "");
         let _ = COOKIE_HEADER_REGEX.replace_all("", "");
+        let _ = JSON_KV_QUOTED_REGEX.replace_all("", "");
+        let _ = JSON_KV_CRED_REGEX.replace_all("", "");
+    }
+
+    /// **M6 regression test.** Strict-JSON quoted value with an
+    /// embedded space must be redacted in full. Previously the
+    /// single-regex design stopped the value match at the first
+    /// space, leaving the rest of the password in the log line.
+    #[test]
+    fn redacts_quoted_password_with_embedded_space() {
+        let line = r#"config error: {"password":"Tr0ub4dor 3 cat-pic","other":"ok"}"#;
+        let out = redact(line);
+        assert!(!out.contains("Tr0ub4dor"), "password head leaked: {out}");
+        assert!(!out.contains("cat-pic"), "password tail leaked: {out}");
+        assert!(
+            out.contains(r#""password":"***""#),
+            "redaction shape wrong: {out}"
+        );
+        assert!(
+            out.contains(r#""other":"ok""#),
+            "non-credential field clobbered: {out}"
+        );
+    }
+
+    /// **M6 regression test.** Same shape with embedded comma.
+    #[test]
+    fn redacts_quoted_password_with_embedded_comma() {
+        let line = r#"{"password":"foo,bar","u":"v"}"#;
+        let out = redact(line);
+        assert!(!out.contains("foo,bar"), "password leaked: {out}");
+        assert!(
+            out.contains(r#""password":"***""#),
+            "redaction shape wrong: {out}"
+        );
+        assert!(
+            out.contains(r#""u":"v""#),
+            "non-credential field clobbered: {out}"
+        );
+    }
+
+    /// **M6 regression test.** Quoted value containing an escaped
+    /// quote (`\"`) must be redacted including the escape pair.
+    #[test]
+    fn redacts_quoted_password_with_escaped_quote() {
+        let line = r#"{"password":"a\"b"}"#;
+        let out = redact(line);
+        assert!(!out.contains("a\\\"b"), "password leaked: {out}");
+        assert!(
+            out.contains(r#""password":"***""#),
+            "redaction shape wrong: {out}"
+        );
+    }
+
+    /// **M6 sanity.** Existing bare-token path still works for the
+    /// `k=v` and `k: v` shapes the previous single-regex handled.
+    #[test]
+    fn redacts_bare_password_assignment() {
+        for line in ["password=hunter2", "password: hunter2", "PASSWORD=hunter2"] {
+            let out = redact(line);
+            assert!(!out.contains("hunter2"), "bare value leaked: {out}");
+            assert!(out.contains("***"), "redaction marker missing: {out}");
+        }
+    }
+
+    /// **L2 regression test.** Userinfo containing an embedded `@`
+    /// is fully redacted; the previous `[^@\s/]+@` stopped at the
+    /// first `@` and leaked the password tail.
+    #[test]
+    fn redacts_userinfo_with_embedded_at_sign() {
+        let line = "https://user:p@ssword@host.example.com/path";
+        let out = redact(line);
+        assert!(!out.contains("p@ssword"), "password leaked: {out}");
+        assert!(
+            out.starts_with("https://***:***@host.example.com"),
+            "redaction shape wrong: {out}"
+        );
+    }
+
+    /// **L2 sanity.** Two URLs on one line each redact independently
+    /// — the greedy class is bounded by `\s`, not `@`, so the
+    /// second URL's userinfo is matched as its own run.
+    #[test]
+    fn redacts_two_urls_with_at_signs_independently() {
+        let line = "from https://a:b@host1 to https://c:d@host2";
+        let out = redact(line);
+        assert!(!out.contains("a:b"), "first creds leaked: {out}");
+        assert!(!out.contains("c:d"), "second creds leaked: {out}");
+        assert!(
+            out == "from https://***:***@host1 to https://***:***@host2",
+            "redaction shape wrong: {out}"
+        );
     }
 }
