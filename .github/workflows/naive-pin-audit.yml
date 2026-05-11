@@ -1,0 +1,45 @@
+# .github/workflows/naive-pin-audit.yml
+#
+# Daily supply-chain audit for the bundled NaiveProxy binary.
+#
+# `scripts/fetch_naive.sh --check-only` re-downloads the upstream
+# tarballs at the **pinned** tag and verifies that the tarball SHAs
+# AND the lipo-merged universal SHA still match the committed pin
+# in COOL-TUNNEL/naive.upstream.json. A failure here means one of:
+#
+#   - upstream re-published the tag with different bytes (account
+#     compromise, malicious release re-tag, registry replay), or
+#   - GitHub's release mirror started serving different bytes for
+#     the same tag (CDN cache poisoning, regional shadow ban), or
+#   - our own lipo / codesign chain stopped reproducing the
+#     committed sha (rare; usually only triggers if Xcode CLT
+#     versions drift on the runner).
+#
+# Any of these is investigation-worthy before the next release cut.
+# The job runs on macos-14 because the --check-only path needs lipo
+# and codesign; the PR-time verify job in ci.yml runs on Linux and
+# is content with shasum alone.
+
+name: NaiveProxy pin audit
+
+on:
+  schedule:
+    # Daily at 07:13 UTC. Off the top of the hour to avoid the
+    # GitHub Actions cron stampede.
+    - cron: "13 7 * * *"
+  workflow_dispatch:
+
+# This workflow only reads the repo and only writes to stdout.
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit upstream against committed pin
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+      - name: scripts/fetch_naive.sh --check-only
+        run: bash scripts/fetch_naive.sh --check-only
