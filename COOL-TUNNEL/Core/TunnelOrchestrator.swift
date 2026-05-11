@@ -1115,7 +1115,7 @@ public final class TunnelOrchestrator {
                 throw OrchestratorError.noProfile
             }
 
-            hydratePasswordIfNeeded(&profile)
+            try hydratePasswordIfNeeded(&profile)
 
             // Validate via engine. The engine's `Profile` deserializer enforces
             // every rule the Swift form previously did inline.
@@ -1625,7 +1625,7 @@ public final class TunnelOrchestrator {
             guard var profile = selectedProfile else {
                 throw OrchestratorError.noProfile
             }
-            hydratePasswordIfNeeded(&profile)
+            try hydratePasswordIfNeeded(&profile)
             let validation = try await core.send(.validateProfile(profile))
             guard case .validation(let validationReport) = validation, validationReport.ok else {
                 throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
@@ -2197,7 +2197,28 @@ public final class TunnelOrchestrator {
             developerMetrics.vps = .idle
             return
         }
-        hydratePasswordIfNeeded(&profile)
+        // **H3 (v2.0.38):** hydration can now throw on credential-store
+        // failure. Distinguish that from "no password set": the
+        // latter falls through with profile.password == "" and the
+        // probe runs against the user's server with an empty
+        // password (which the server will reject — that's the
+        // diagnostic we want); the former skips the probe and
+        // labels the metric so the operator sees the real cause
+        // instead of an empty-password rejection that misroutes
+        // them into the wrong fix.
+        do {
+            try hydratePasswordIfNeeded(&profile)
+        } catch {
+            developerMetrics.vps = DeveloperMetrics.VPSHealth(
+                server: profile.server,
+                reachable: nil,
+                dnsMs: nil,
+                tcpMs: nil,
+                status: "Credential read failed: \(error.localizedDescription)",
+                checkedAt: Date()
+            )
+            return
+        }
 
         let server = profile.server
         developerMetrics.vps = DeveloperMetrics.VPSHealth(
@@ -2242,9 +2263,28 @@ public final class TunnelOrchestrator {
         }
     }
 
-    private func hydratePasswordIfNeeded(_ profile: inout Profile) {
+    /// Fills in the profile's password from the credential store
+    /// when the in-memory copy is empty.
+    ///
+    /// **H3 (v2.0.38):** now throws `OrchestratorError.credentialReadFailed`
+    /// on a credential-store error so callers can distinguish "the
+    /// keychain is locked" from "no password was ever set." The
+    /// previous implementation collapsed both into the empty-string
+    /// path, which then surfaced a misleading "please enter a
+    /// password" banner. An item-not-found returns `""` per the
+    /// `CredentialStore` contract and falls through to the original
+    /// no-password UX — the orchestrator's validation gate
+    /// handles the empty-string case.
+    private func hydratePasswordIfNeeded(_ profile: inout Profile) throws {
         if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let stored = profileStore.password(forProfileID: profile.id)
+            let stored: String
+            do {
+                stored = try profileStore.password(forProfileID: profile.id)
+            } catch {
+                throw OrchestratorError.credentialReadFailed(
+                    reason: error.localizedDescription
+                )
+            }
             if !stored.isEmpty {
                 profile.password = stored
             }
@@ -2524,8 +2564,21 @@ public final class TunnelOrchestrator {
             return false
         }
         if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let stored = profileStore.password(forProfileID: profile.id)
-            profile.password = stored
+            // **H3 (v2.0.38):** distinguish credential-store failure
+            // from "no password set" so the rejection banner tells
+            // the user the right thing to fix. The previous
+            // implementation collapsed both into the empty-string
+            // path and emitted "Start rejected: enter a password"
+            // even when the keychain was locked.
+            do {
+                profile.password = try profileStore.password(forProfileID: profile.id)
+            } catch {
+                recordError(
+                    "Start rejected: couldn't read stored password (\(error.localizedDescription)). Unlock the Keychain and try again.",
+                    layer: .localKernel
+                )
+                return false
+            }
         }
         guard !profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             recordError("Start rejected: enter a password for the selected profile.", layer: .localKernel)
@@ -2685,6 +2738,16 @@ public enum OrchestratorError: LocalizedError, Sendable, Equatable {
     /// code signature. The wrapped [`NaiveResolverError`] tells the user
     /// which one — and what to do about it.
     case naiveBinaryUnusable(NaiveResolverError)
+    /// **H3 (v2.0.38):** the credential store could not be read.
+    /// Distinct from "no password set" (which is not an error; the
+    /// validation gate handles it). Typical causes: keychain
+    /// locked, user dismissed the keychain access prompt, the file
+    /// backend hit an IO error, or a corrupted entry failed to
+    /// decode. The orchestrator's existing local-kernel layer maps
+    /// these to actionable user copy ("Unlock the Keychain and try
+    /// again") instead of the misleading "enter a password" banner
+    /// the previous `try?`-collapse produced.
+    case credentialReadFailed(reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -2693,6 +2756,8 @@ public enum OrchestratorError: LocalizedError, Sendable, Equatable {
         case .unexpectedResponse: "Engine returned an unexpected response."
         case .naiveBinaryUnusable(let err):
             "naive binary cannot be used: \(err.errorDescription ?? "unknown error")"
+        case .credentialReadFailed(let reason):
+            "Couldn't read stored password: \(reason). Unlock the Keychain and try again."
         }
     }
 }
