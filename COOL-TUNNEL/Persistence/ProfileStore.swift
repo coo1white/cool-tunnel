@@ -93,6 +93,16 @@ public struct ProfileStore: @unchecked Sendable {
         var hydrated: [Profile] = []
         var seenIDs: Set<String> = []
         var needsRewrite = false
+        // **H2 (v2.0.38):** track per-profile credential-store migration
+        // success. The previous implementation used `try?` and
+        // unconditionally stripped `profile.password` to `""`, so a
+        // failed migration (keychain locked, disk full, dismissed
+        // prompt) followed by the rewrite below silently destroyed
+        // the user's legacy password — it was now gone from BOTH
+        // backends. We now keep the legacy password in the in-memory
+        // profile when migration fails, and skip the UserDefaults
+        // rewrite for that profile (the password stays where it was).
+        var migrationFailedIDs: Set<String> = []
         for var profile in stored {
             // Defensive: drop entries with empty id and dedupe by id.
             // A corrupted UserDefaults plist (TimeMachine restore
@@ -113,14 +123,29 @@ public struct ProfileStore: @unchecked Sendable {
                 // Promote it into the credential store now (no prompt
                 // for the file backend; for the migrating wrapper
                 // this is a free write since the file primary is
-                // local-only) and strip it from UserDefaults.
-                try? credentials.setPassword(storedSecret, forProfileID: profile.id)
-                needsRewrite = true
+                // local-only). The strip-from-UserDefaults below is
+                // conditional on the migration succeeding.
+                do {
+                    try credentials.setPassword(storedSecret, forProfileID: profile.id)
+                    needsRewrite = true
+                    profile.password = ""
+                } catch {
+                    Logger.cooltunnel("ProfileStore").error(
+                        "credential migration failed for profile \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public); preserving legacy password in UserDefaults until next attempt"
+                    )
+                    migrationFailedIDs.insert(profile.id)
+                    // Intentionally DO NOT clear `profile.password` —
+                    // the orchestrator's `password(forProfileID:)`
+                    // path will fail the same way the migration just
+                    // did, but the in-memory profile this load
+                    // returns still carries the password so the
+                    // user can start the tunnel.
+                }
+            } else {
+                // Already migrated (or never had a legacy password).
+                // The empty-string assignment is a no-op semantically.
+                profile.password = ""
             }
-            // Always return profiles with empty passwords — the
-            // orchestrator hydrates from the credential store at
-            // start time.
-            profile.password = ""
             // Trim whitespace at the persistence boundary so a
             // user pasting `alice ` from a chat app doesn't end up
             // failing engine validation with no obvious cause.
@@ -138,7 +163,10 @@ public struct ProfileStore: @unchecked Sendable {
         }
 
         if needsRewrite {
-            persistStripped(profiles: hydrated)
+            // **H2 (v2.0.38):** preserve legacy passwords for profiles
+            // whose migration failed; the rewrite would otherwise
+            // overwrite the only remaining copy with `""`.
+            persistStripped(profiles: hydrated, preservePasswordIDs: migrationFailedIDs)
         }
         return hydrated
     }
@@ -146,17 +174,32 @@ public struct ProfileStore: @unchecked Sendable {
     /// Persists the profile list. Each non-empty password is written
     /// to the credential store; the `UserDefaults` blob stores
     /// everything *except* the password.
+    ///
+    /// **H2 (v2.0.38):** profiles whose credential-store write fails
+    /// retain their password in the `UserDefaults` blob — the strip
+    /// is conditional on the write succeeding. The previous
+    /// implementation `try?`-discarded the credential failure and
+    /// then unconditionally stripped, so a transient keychain
+    /// failure during save permanently lost the new password.
     public func save(profiles: [Profile]) {
+        var credentialWriteFailedIDs: Set<String> = []
         for profile in profiles {
             // Only write when there's something to save — empty means
             // "no change since load" because the orchestrator never
             // round-trips the password through the in-memory profile
             // unless the user actually edited it.
             if !profile.password.isEmpty {
-                try? credentials.setPassword(profile.password, forProfileID: profile.id)
+                do {
+                    try credentials.setPassword(profile.password, forProfileID: profile.id)
+                } catch {
+                    Logger.cooltunnel("ProfileStore").error(
+                        "credential write failed for profile \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public); preserving password in UserDefaults until next save"
+                    )
+                    credentialWriteFailedIDs.insert(profile.id)
+                }
             }
         }
-        persistStripped(profiles: profiles)
+        persistStripped(profiles: profiles, preservePasswordIDs: credentialWriteFailedIDs)
     }
 
     /// Returns the currently selected profile id, or `nil` if none
@@ -179,8 +222,19 @@ public struct ProfileStore: @unchecked Sendable {
     /// credential-store access (and any OS prompt the migrating
     /// wrapper may surface) happens after the user has already
     /// committed to launching — never at app boot.
-    public func password(forProfileID id: String) -> String {
-        (try? credentials.password(forProfileID: id)) ?? ""
+    ///
+    /// **H3 (v2.0.38):** propagates the underlying credential-store
+    /// error instead of collapsing it to `""`. The previous
+    /// `(try? ...) ?? ""` made a keychain lock indistinguishable
+    /// from "no password ever set" — the orchestrator surfaced
+    /// "enter a password" to the user, who re-typed it and
+    /// triggered the H2 save path against the same locked
+    /// keychain. The throw forces the caller to make the
+    /// "no password" vs "store unreachable" choice explicitly.
+    /// Backend implementations still treat "item not found" as
+    /// `""` (not an error), per the `CredentialStore` contract.
+    public func password(forProfileID id: String) throws -> String {
+        try credentials.password(forProfileID: id)
     }
 
     /// Removes the credential entry for a profile that's been deleted
@@ -194,10 +248,22 @@ public struct ProfileStore: @unchecked Sendable {
     /// Persists profiles to `UserDefaults` with passwords stripped.
     /// The credential store is responsible for the secrets; this
     /// helper only handles the low-sensitivity blob.
-    private func persistStripped(profiles: [Profile]) {
+    ///
+    /// **H2 (v2.0.38):** `preservePasswordIDs` names profile ids
+    /// whose credential-store write or migration just failed.
+    /// For those, the password is left intact in the `UserDefaults`
+    /// blob — it is the only remaining copy and dropping it would
+    /// be silent data loss. Once the underlying credential store
+    /// is reachable again, the next save will migrate them through.
+    private func persistStripped(
+        profiles: [Profile],
+        preservePasswordIDs: Set<String> = []
+    ) {
         let stripped = profiles.map { profile -> Profile in
             var p = profile
-            p.password = ""
+            if !preservePasswordIDs.contains(p.id) {
+                p.password = ""
+            }
             return p
         }
         guard let data = try? JSONEncoder().encode(stripped) else { return }
