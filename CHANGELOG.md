@@ -9,14 +9,25 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
-## [2.0.37] — 2026-05-11 — README Refresh (Diagnostics + Subscription Import)
+## [2.0.37] — 2026-05-11 — README Refresh + Bundled NaiveProxy Bump
 
-> **Documentation-only release. No code or asset changes from v2.0.36.**
+> **README surfaces v2.0.36 features that were already shipped but not
+> documented. Release-cut also refreshed the bundled `naive` from
+> upstream `v148.0.7778.96-2` to `v148.0.7778.96-5`.**
 
 Aligns the repository README with code that already shipped in v2.0.36
-but was not surfaced in the operator-facing prose. The macOS bundle,
-Rust core binary, and bundled `naive` are byte-for-byte identical to
-v2.0.36; only `README.md` and version-pinning files changed.
+but was not surfaced in the operator-facing prose. The Rust core source
+is unchanged from v2.0.36; the macOS bundle and `cool-tunnel-core`
+binary differ only because `cargo update -p cool-tunnel-core` rolled
+the version stamp from `2.0.36` to `2.0.37` and `fetch_naive.sh`
+pulled the newer upstream naive.
+
+### Bundled
+
+- `naive` upstream tag bumped from `v148.0.7778.96-2` (fetched
+  2026-05-05) to `v148.0.7778.96-5` (fetched 2026-05-11). Universal
+  sha256 pinned at `8e07a0f5ec8ccfbe15f90aeedf0c4151e56decdfe2c848f5a1372f336638aa5c`
+  in `COOL-TUNNEL/naive.upstream.json`.
 
 ### Changed
 
