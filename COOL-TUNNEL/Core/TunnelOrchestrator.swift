@@ -348,7 +348,7 @@ public final class TunnelOrchestrator {
         flushSettings()
         eventTask?.cancel()
         eventTask = nil
-        try? await proxyController.disableAll()
+        try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
         // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel after
         // clean disable so next launch's recovery scan doesn't
         // fire spuriously.
@@ -522,7 +522,7 @@ public final class TunnelOrchestrator {
     public func persistSettings() {
         persistSettingsTask?.cancel()
         persistSettingsTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)  // try-ok: sleep cancellation
             guard !Task.isCancelled, let self else { return }
             self.settingsStore.save(self.settings)
         }
@@ -986,7 +986,7 @@ public final class TunnelOrchestrator {
         userStopInFlight = true
         defer { userStopInFlight = false }
 
-        try? await proxyController.disableAll()
+        try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
         // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
         // clean stop. Same reasoning as `shutdown()`.
         ProxyActiveFlag.clear(
@@ -1267,7 +1267,7 @@ public final class TunnelOrchestrator {
         userStopInFlight = true
         defer { userStopInFlight = false }
 
-        try? await proxyController.disableAll()
+        try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
         // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
         // user-initiated stop.
         ProxyActiveFlag.clear(
@@ -1317,7 +1317,7 @@ public final class TunnelOrchestrator {
             "previous run crashed with system proxy enabled" + (payload.map { " (mode=\($0.mode))" } ?? "")
                 + " — reverting"
         )
-        try? await proxyController.disableAll()
+        try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
         ProxyActiveFlag.clear(at: flagURL)
 
         await sweepOrphanNaiveIfAny()
@@ -1392,7 +1392,7 @@ public final class TunnelOrchestrator {
         for pid in orphans {
             _ = kill(pid, SIGTERM)
         }
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)  // try-ok: sleep cancellation
         for pid in orphans where kill(pid, 0) == 0 {
             // Still alive after SIGTERM grace — escalate.
             _ = kill(pid, SIGKILL)
@@ -1496,7 +1496,7 @@ public final class TunnelOrchestrator {
             sleepWakeState = .recovering
             appendInfo("system woke — recovering engine in \(mode.title) mode")
             // 500 ms cooldown for the network stack to settle.
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: 500_000_000)  // try-ok: sleep cancellation
             do {
                 try await switchMode(to: mode)
                 sleepWakeState = .idle
@@ -1535,7 +1535,7 @@ public final class TunnelOrchestrator {
             try await verifyRunningProxyHealthy(profile: profile)
             _ = try await core.send(.validateProfile(profile))
         } catch {
-            try? await proxyController.disableAll()
+            try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
             ProxyActiveFlag.clear(
                 at: ProxyActiveFlag.path(in: paths.supportDirectory))
             isRunning = false
@@ -1753,7 +1753,7 @@ public final class TunnelOrchestrator {
             && sleepWakeState != .pausing
             && sleepWakeState != .recovering
 
-        try? await proxyController.disableAll()
+        try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
         ProxyActiveFlag.clear(
             at: ProxyActiveFlag.path(in: paths.supportDirectory))
         isRunning = false
@@ -1796,7 +1796,7 @@ public final class TunnelOrchestrator {
                 5_000_000_000,
             ]
             for (index, delay) in delays.enumerated() {
-                try? await Task.sleep(nanoseconds: delay)
+                try? await Task.sleep(nanoseconds: delay)  // try-ok: sleep cancellation
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 await self.bootstrapIfNeeded()
                 do {
@@ -1932,7 +1932,7 @@ public final class TunnelOrchestrator {
                 if wasRunning && !isShuttingDown && !userStopInFlight {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        try? await self.proxyController.disableAll()
+                        try? await self.proxyController.disableAll()  // try-ok: best-effort proxy revert
                         ProxyActiveFlag.clear(
                             at: ProxyActiveFlag.path(in: self.paths.supportDirectory))
                         self.scheduleSelfHeal(
@@ -2023,7 +2023,7 @@ public final class TunnelOrchestrator {
         guard logFlushTask == nil else { return }
         logFlushTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: self.logFlushIntervalNanos)
+            try? await Task.sleep(nanoseconds: self.logFlushIntervalNanos)  // try-ok: sleep cancellation
             guard !Task.isCancelled else { return }
             self.flushPendingLogs()
         }
@@ -2284,7 +2284,7 @@ public final class TunnelOrchestrator {
             defer { self.vpsHealthTask = nil }
             while !Task.isCancelled, self.isRunning {
                 await self.refreshVPSHealth(profile: profile)
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                try? await Task.sleep(nanoseconds: 15_000_000_000)  // try-ok: sleep cancellation
             }
         }
     }
@@ -2795,7 +2795,7 @@ public enum OrchestratorError: LocalizedError, Sendable, Equatable {
     /// decode. The orchestrator's existing local-kernel layer maps
     /// these to actionable user copy ("Unlock the Keychain and try
     /// again") instead of the misleading "enter a password" banner
-    /// the previous `try?`-collapse produced.
+    /// the previous optional-coalesce produced.
     case credentialReadFailed(reason: String)
 
     public var errorDescription: String? {

@@ -64,9 +64,9 @@ public struct ProfileStore: @unchecked Sendable {
             // First launch — no key set. Return default.
             return [.default]
         }
-        // **Pers-F#10 (v0.1.7.17):** previously
-        // `try? JSONDecoder().decode(...)` swallowed decode
-        // errors and returned `[.default]`. Next `save(profiles:)`
+        // **Pers-F#10 (v0.1.7.17):** previously the JSON decode used an
+        // optional-coalesce that swallowed decode errors and returned
+        // `[.default]`. Next `save(profiles:)`
         // would then overwrite the corrupted-but-recoverable
         // blob with the default profile, silently destroying
         // the user's profile list. Now: on decode failure, copy
@@ -94,8 +94,9 @@ public struct ProfileStore: @unchecked Sendable {
         var seenIDs: Set<String> = []
         var needsRewrite = false
         // **H2 (v2.0.38):** track per-profile credential-store migration
-        // success. The previous implementation used `try?` and
-        // unconditionally stripped `profile.password` to `""`, so a
+        // success. The previous implementation silently discarded the
+        // setPassword error and unconditionally stripped
+        // `profile.password` to `""`, so a
         // failed migration (keychain locked, disk full, dismissed
         // prompt) followed by the rewrite below silently destroyed
         // the user's legacy password — it was now gone from BOTH
@@ -178,7 +179,7 @@ public struct ProfileStore: @unchecked Sendable {
     /// **H2 (v2.0.38):** profiles whose credential-store write fails
     /// retain their password in the `UserDefaults` blob — the strip
     /// is conditional on the write succeeding. The previous
-    /// implementation `try?`-discarded the credential failure and
+    /// implementation silently discarded the credential failure and
     /// then unconditionally stripped, so a transient keychain
     /// failure during save permanently lost the new password.
     public func save(profiles: [Profile]) {
@@ -225,7 +226,7 @@ public struct ProfileStore: @unchecked Sendable {
     ///
     /// **H3 (v2.0.38):** propagates the underlying credential-store
     /// error instead of collapsing it to `""`. The previous
-    /// `(try? ...) ?? ""` made a keychain lock indistinguishable
+    /// optional-coalesce form `(... ) ?? ""` made a keychain lock indistinguishable
     /// from "no password ever set" — the orchestrator surfaced
     /// "enter a password" to the user, who re-typed it and
     /// triggered the H2 save path against the same locked

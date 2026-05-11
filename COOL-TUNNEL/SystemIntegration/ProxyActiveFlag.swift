@@ -117,8 +117,8 @@ public enum ProxyActiveFlag {
     /// (e.g. to log "previous run crashed in mode=Smart at
     /// timestamp X"). Returns nil on missing/unreadable file.
     public static func readPayload(at path: URL) -> (mode: String, enabledAt: Date)? {
-        guard let data = try? Data(contentsOf: path),
-            let payload = try? JSONDecoder().decode(Payload.self, from: data)
+        guard let data = try? Data(contentsOf: path),  // try-ok: sentinel may not exist
+            let payload = try? JSONDecoder().decode(Payload.self, from: data)  // try-ok: corrupt sentinel
         else {
             return nil
         }

@@ -80,6 +80,7 @@ public struct SettingsView: View {
     @State private var inspection: NaiveBinaryDescriptor?
     @State private var isInspecting: Bool = false
     @State private var updater = NaiveUpdater(
+        // try-ok: init throws only when home dir lookup fails; fall back to /tmp
         supportDirectory: (try? AppSupportPaths())?.supportDirectory
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
     )
@@ -89,6 +90,7 @@ public struct SettingsView: View {
     @State private var isRustInspecting: Bool = false
     @State private var rustPickerError: String?
     @State private var rustUpdater = RustCoreUpdater(
+        // try-ok: init throws only when home dir lookup fails; fall back to /tmp
         supportDirectory: (try? AppSupportPaths())?.supportDirectory
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
     )

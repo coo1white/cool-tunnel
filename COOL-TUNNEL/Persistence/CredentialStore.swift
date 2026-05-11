@@ -76,6 +76,7 @@ public struct MigratingCredentialStore: CredentialStore {
         // the Keychain access (and the OS prompt, if any) happens —
         // and only because the caller actively asked for the
         // password (e.g. user clicked Start).
+        // try-ok: keychain locked / dismissed prompt → re-prompt user, no data loss
         let legacyValue = (try? legacy.password(forProfileID: id)) ?? ""
         if legacyValue.isEmpty {
             return ""
@@ -83,8 +84,8 @@ public struct MigratingCredentialStore: CredentialStore {
         // Promote into primary so the next launch finds the value
         // in the file store and skips the legacy backend forever.
         // CRITICAL: only delete from legacy if primary write
-        // SUCCEEDED. The previous implementation `try?`-discarded
-        // both calls independently, so a failed primary write
+        // SUCCEEDED. The previous implementation silently discarded
+        // both call errors independently, so a failed primary write
         // (disk full, permission denied) followed by a successful
         // legacy delete would lose the password entirely. Now if
         // the promotion fails, the legacy copy stays put and the

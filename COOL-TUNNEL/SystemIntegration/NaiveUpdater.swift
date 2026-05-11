@@ -250,6 +250,7 @@ final class NaiveUpdater {
             }
 
             let tempRoot = try Self.makeTempDirectory()
+            // try-ok: defer-block tempdir teardown
             defer { try? FileManager.default.removeItem(at: tempRoot) }
 
             // Download both arches in parallel (network-bound, no CPU
