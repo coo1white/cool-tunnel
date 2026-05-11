@@ -17,8 +17,11 @@
 #   2.  Verify   COOL-TUNNEL.xcodeproj's MARKETING_VERSION matches
 #                argv[1]. Both Debug and Release configurations
 #                must agree (we grep both occurrences).
-#   3.  Refresh  bundled `naive` from upstream NaiveProxy releases
-#                (fetch_naive.sh) and re-pin naive.upstream.json.
+#   3.  Verify   bundled `naive` matches the committed pin in
+#                naive.upstream.json (fetch_naive.sh default mode).
+#                Drift here is a release blocker — re-pinning is an
+#                explicit, audited operation (`fetch_naive.sh --repin`)
+#                that does NOT belong inside a release cut.
 #   4.  Run      scripts/audit.sh --strict  (cargo fmt / clippy /
 #                test, swift format lint, xcodebuild test, naive
 #                arch guard, schema sync probe). Any failure aborts.
@@ -110,9 +113,9 @@ log "Xcode MARKETING_VERSION: ${VERSION} ✓ (all configurations agree)"
 # ---------------------------------------------------------------------------
 # PRE-FLIGHT 3: refresh bundled naive from upstream
 # ---------------------------------------------------------------------------
-log "Refreshing bundled naive from upstream NaiveProxy releases…"
+log "Verifying bundled naive matches the committed upstream pin…"
 if ! bash "${REPO_ROOT}/scripts/fetch_naive.sh"; then
-    die "fetch_naive.sh failed — bundled naive may be stale; aborting" 2
+    die "fetch_naive.sh pin verification failed — refusing to cut a release whose bundled naive does not match naive.upstream.json. Roll the pin explicitly with: scripts/fetch_naive.sh --repin" 2
 fi
 
 # ---------------------------------------------------------------------------

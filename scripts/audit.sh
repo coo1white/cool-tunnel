@@ -201,7 +201,7 @@ if [[ -f "${NAIVE_PATH}" ]]; then
         STATUS=1
     fi
 else
-    warn "no naive at ${NAIVE_PATH} — run scripts/fetch_naive.sh first"
+    warn "no naive at ${NAIVE_PATH} — bootstrap the pin with CT_REPIN_CONFIRM=1 scripts/fetch_naive.sh --repin"
     if (( STRICT )); then
         fail "naive missing (--strict)"
         STATUS=1
