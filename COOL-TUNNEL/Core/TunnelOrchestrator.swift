@@ -1806,6 +1806,24 @@ public final class TunnelOrchestrator {
                     )
                     return
                 } catch {
+                    // **M7 (v2.0.38):** classify the failure so a
+                    // permanent error (bad profile shape, missing
+                    // naive binary, wire-protocol drift) doesn't
+                    // burn the full retry budget and three confused
+                    // log lines before the operator sees the real
+                    // cause. Transient failures (engine race,
+                    // keychain unlock pending, network blip) still
+                    // retry as before.
+                    if Self.isPermanentStartFailure(error) {
+                        self.appendInfo(
+                            "self-healing aborted on attempt \(index + 1): \(error.localizedDescription) (permanent failure — not retrying)"
+                        )
+                        self.recordError(
+                            "Self-healing aborted: \(error.localizedDescription)",
+                            layer: .localKernel
+                        )
+                        return
+                    }
                     self.appendInfo(
                         "self-healing attempt \(index + 1) failed: \(error.localizedDescription)"
                     )
@@ -1816,6 +1834,37 @@ public final class TunnelOrchestrator {
                 layer: .localKernel
             )
         }
+    }
+
+    /// Returns true for failures that retrying `start(mode:)` will not
+    /// recover. Used by `scheduleSelfHeal` to short-circuit the retry
+    /// budget when the cause is unambiguously configuration / shape
+    /// rather than a transient race.
+    ///
+    /// Conservatively false-by-default: when in doubt, retry. The
+    /// retry budget (3 attempts over ~7.5 s total) is cheap enough
+    /// that a wrong "permanent" classification is more harmful than
+    /// a wrong "transient" one. Specifically, `credentialReadFailed`
+    /// is treated as transient — the keychain can unlock between
+    /// attempts.
+    private static func isPermanentStartFailure(_ error: Error) -> Bool {
+        switch error {
+        case OrchestratorError.noProfile,
+            OrchestratorError.invalidProfile,
+            OrchestratorError.naiveBinaryUnusable:
+            return true
+        default:
+            break
+        }
+        // Wire-protocol error codes the engine emits for malformed /
+        // unknown requests are bugs in the Swift caller, not transient
+        // — retrying produces the same frame and the same rejection.
+        if let payload = error as? ErrorPayload,
+            payload.code == "invalid_request" || payload.code == "malformed_request"
+        {
+            return true
+        }
+        return false
     }
 
     private func handle(event: CoreEvent) {
