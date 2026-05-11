@@ -161,7 +161,13 @@ jobs:
 
   swift-tests:
     name: Swift (xcodebuild test)
-    runs-on: macos-14
+    # `macos-latest` rather than the `macos-14` the other Mac jobs
+    # use: the project's `objectVersion = 77` (Xcode 16.3+) cannot
+    # be opened by the Xcode shipped on macos-14. The other Mac
+    # jobs work on macos-14 because they don't open the .xcodeproj
+    # — they invoke `cargo`, `xcrun swift-format`, or `swift test`
+    # directly. Only `xcodebuild test` actually parses pbxproj.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
