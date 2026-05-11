@@ -606,14 +606,38 @@ final class AppUpdater {
         // streaming-cancel needs `URLSessionDownloadDelegate`,
         // deferred to v0.2.) Reject the manifest at 1 MB
         // (manifests are ~250 bytes) and the .zip at 100 MB.
+        //
+        // **M5 (v2.0.38):** fail-closed if we can't read the size at
+        // all. The previous `if let attrs = try? …, let size = …,
+        // size > cap` short-circuited silently to no-action when
+        // `attributesOfItem` threw OR when the `.size` key was
+        // missing — bypassing the cap entirely. A compromised mirror
+        // serving a multi-GB payload on a sandbox where attribute
+        // reads fail would have slipped past. Treat any failure to
+        // read the size as a refusal.
         let cap: Int64 =
             url.pathExtension == "sha256"
             ? 1 * 1024 * 1024
             : Self.maxDownloadBytes
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
-            let size = attrs[.size] as? NSNumber,
-            size.int64Value > cap
-        {
+        let attrs: [FileAttributeKey: Any]
+        do {
+            attrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            appUpdaterLogger.info(
+                "could not stat downloaded \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            throw UpdaterError.message(
+                "Couldn't inspect the downloaded update; refusing to install."
+            )
+        }
+        guard let sizeNumber = attrs[.size] as? NSNumber else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw UpdaterError.message(
+                "Downloaded \(url.lastPathComponent) has no readable size; refusing to install."
+            )
+        }
+        if sizeNumber.int64Value > cap {
             try? FileManager.default.removeItem(at: tempURL)
             throw UpdaterError.message(
                 "\(url.lastPathComponent) exceeded the \(cap / (1024 * 1024)) MB size limit; refusing to install."
@@ -734,9 +758,20 @@ final class AppUpdater {
             )
         }
         guard result.success else {
+            // **M4 (v2.0.38):** the previous error interpolated raw
+            // `ditto` stderr into the UI string. ditto's stderr can
+            // include absolute paths (revealing the operator's home
+            // directory and bundle layout) and arbitrary text from a
+            // hostile archive's entry names. Log it privately and
+            // show the user a generic message — same pattern the
+            // download non-200 path already uses at the call site
+            // above.
             let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            appUpdaterLogger.info(
+                "ditto extract failed: \(stderr, privacy: .private)"
+            )
             throw UpdaterError.message(
-                "ditto failed to extract update: \(stderr)"
+                "Couldn't extract the update archive. Check the diagnostic log for details."
             )
         }
         // **v0.1.7.10 (Sw-H4):** post-extraction symlink-escape
