@@ -19,7 +19,10 @@ final class ProfileStoreTests: XCTestCase {
     /// Builds a fresh `ProfileStore` against an isolated `UserDefaults`
     /// suite (so test ordering can't leak state) and a fresh mock
     /// `CredentialStore`. The credential mock is returned alongside so
-    /// individual tests can drive its failure injection knobs.
+    /// individual tests can drive its failure injection knobs. The
+    /// `suiteName` defaults to a fresh UUID per call, so suite names
+    /// never collide between tests and the resulting suite is
+    /// guaranteed empty.
     private func makeStore(
         suiteName: String = UUID().uuidString
     )
@@ -27,13 +30,6 @@ final class ProfileStoreTests: XCTestCase {
     {
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             fatalError("could not create UserDefaults suite \(suiteName)")
-        }
-        // Belt-and-braces clean. `UserDefaults(suiteName:)` should give
-        // us a blank suite, but on Apple Silicon test runs we've seen
-        // leftover state from a previous crashed test occasionally
-        // survive — explicit wipe keeps each test deterministic.
-        for key in defaults.dictionaryRepresentation().keys {
-            defaults.removeObject(forKey: key)
         }
         let credentials = MockCredentialStore()
         let store = ProfileStore(defaults: defaults, credentials: credentials)
@@ -44,7 +40,7 @@ final class ProfileStoreTests: XCTestCase {
     /// would, so `loadProfiles` reads it back via the same path a
     /// real-app launch would take. Used by the H2 migration tests
     /// to plant a "legacy plaintext password" in UserDefaults.
-    private func planRawProfilesBlob(_ profiles: [Profile], in defaults: UserDefaults) throws {
+    private func plantRawProfilesBlob(_ profiles: [Profile], in defaults: UserDefaults) throws {
         let data = try JSONEncoder().encode(profiles)
         defaults.set(data, forKey: "profiles")
     }
@@ -69,7 +65,7 @@ final class ProfileStoreTests: XCTestCase {
         let (store, defaults, credentials) = makeStore()
 
         // Plant a profile with a legacy plaintext password.
-        try planRawProfilesBlob([legacyProfile(password: "hunter2")], in: defaults)
+        try plantRawProfilesBlob([legacyProfile(password: "hunter2")], in: defaults)
 
         // Make the credential store reject the promotion write.
         credentials.failWritesWith(.backendLocked)
@@ -98,7 +94,7 @@ final class ProfileStoreTests: XCTestCase {
     /// .plist forever.
     func testLoadStripsLegacyPasswordOnSuccessfulMigration() throws {
         let (store, defaults, credentials) = makeStore()
-        try planRawProfilesBlob([legacyProfile(password: "hunter2")], in: defaults)
+        try plantRawProfilesBlob([legacyProfile(password: "hunter2")], in: defaults)
 
         // No injected error — write succeeds.
         let loaded = store.loadProfiles()
@@ -178,5 +174,39 @@ final class ProfileStoreTests: XCTestCase {
     func testPasswordReadReturnsEmptyWhenNotStored() throws {
         let (store, _, _) = makeStore()
         XCTAssertEqual(try store.password(forProfileID: "p-never-set"), "")
+    }
+
+    // MARK: - M1 regression — deletePassword swallows backend failure
+
+    /// M1: `ProfileStore.deletePassword(forProfileID:)` is the
+    /// `void`-returning public API the orchestrator calls when the
+    /// user removes a profile. The credential-store delete is
+    /// best-effort — a backend failure must NOT propagate (the
+    /// caller has already removed the profile id from the in-memory
+    /// list, so throwing here would split the UI from the persisted
+    /// state). The M1 sweep added the `do/catch + Logger.warning`
+    /// shape; this test pins that the no-throw contract holds.
+    func testDeletePasswordSwallowsCredentialStoreFailure() throws {
+        let (store, _, credentials) = makeStore()
+        try credentials.setPassword("v", forProfileID: "p1")
+        credentials.failDeletesWith(.backendIO("read-only fs"))
+
+        // Must not throw — the H2/M1 contract for the void-returning
+        // delete API. The os_log warning is emitted as a side effect;
+        // we assert the observable behavior (no throw, void return).
+        XCTAssertNoThrow(store.deletePassword(forProfileID: "p1"))
+    }
+
+    /// Sanity: when the credential store accepts the delete, the
+    /// entry actually goes away. Locks in the happy path against a
+    /// regression where the do/catch shape might accidentally swallow
+    /// the successful call.
+    func testDeletePasswordRemovesEntryOnSuccess() throws {
+        let (store, _, credentials) = makeStore()
+        try credentials.setPassword("v", forProfileID: "p1")
+        XCTAssertEqual(credentials.snapshot()["p1"], "v", "precondition: seeded")
+
+        store.deletePassword(forProfileID: "p1")
+        XCTAssertNil(credentials.snapshot()["p1"], "credential entry must be gone")
     }
 }
