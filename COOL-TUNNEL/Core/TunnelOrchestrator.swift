@@ -2313,30 +2313,52 @@ public final class TunnelOrchestrator {
     }
 
     /// Fills in the profile's password from the credential store
-    /// when the in-memory copy is empty.
-    ///
-    /// **H3 (v2.0.38):** now throws `OrchestratorError.credentialReadFailed`
-    /// on a credential-store error so callers can distinguish "the
-    /// keychain is locked" from "no password was ever set." The
-    /// previous implementation collapsed both into the empty-string
-    /// path, which then surfaced a misleading "please enter a
-    /// password" banner. An item-not-found returns `""` per the
-    /// `CredentialStore` contract and falls through to the original
-    /// no-password UX — the orchestrator's validation gate
-    /// handles the empty-string case.
+    /// when the in-memory copy is empty. Instance-method form;
+    /// delegates to the static `hydratePassword(_:from:)` so the
+    /// H3 plumbing is unit-testable without standing up a full
+    /// `TunnelOrchestrator`.
     private func hydratePasswordIfNeeded(_ profile: inout Profile) throws {
-        if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let stored: String
-            do {
-                stored = try profileStore.password(forProfileID: profile.id)
-            } catch {
-                throw OrchestratorError.credentialReadFailed(
-                    reason: error.localizedDescription
-                )
-            }
-            if !stored.isEmpty {
-                profile.password = stored
-            }
+        try Self.hydratePassword(&profile, from: profileStore)
+    }
+
+    /// Static helper that does the actual H3 hydration. Pure: takes
+    /// the profile (inout) and a `ProfileStore`, throws
+    /// `OrchestratorError.credentialReadFailed(reason:)` on credential
+    /// backend failure. Item-not-found returns `""` per the
+    /// `CredentialStore` contract and falls through to the original
+    /// no-password UX — the orchestrator's validation gate handles
+    /// the empty-string case.
+    ///
+    /// **H3 (v2.0.38):** the throw lets callers distinguish "keychain
+    /// locked" from "no password was ever set." The previous
+    /// implementation collapsed both into the empty-string path, which
+    /// then surfaced a misleading "please enter a password" banner.
+    ///
+    /// Visibility: marked `internal` (no access modifier) and `static`
+    /// so the unit-test target can pin the H3 contract directly via
+    /// `@testable import Cool_Tunnel` without constructing a real
+    /// orchestrator (which would need `CoreClient`, `SystemProxyController`,
+    /// `FirewallProbe`, etc.). `nonisolated` because the helper is
+    /// pure (no instance state, no MainActor-bound dependencies);
+    /// the implicit `@MainActor` from the enclosing class would
+    /// otherwise force every caller — production and test — onto
+    /// the main actor for no benefit.
+    nonisolated static func hydratePassword(
+        _ profile: inout Profile, from store: ProfileStore
+    )
+        throws
+    {
+        guard profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        let stored: String
+        do {
+            stored = try store.password(forProfileID: profile.id)
+        } catch {
+            throw OrchestratorError.credentialReadFailed(reason: error.localizedDescription)
+        }
+        if !stored.isEmpty {
+            profile.password = stored
         }
     }
 
