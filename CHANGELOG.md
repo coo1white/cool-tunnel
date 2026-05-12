@@ -9,6 +9,108 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.40] — 2026-05-12 — Robustness Test Surface + CI Gate Refinement
+
+> **Suite goes from 16 → 35 regression tests. Annotation-aware
+> `try?` ratchet at cap 0. `cut_release.sh` unblocked from a latent
+> code-signing pre-flight. CONTRIBUTING.md documents the new gate
+> set.**
+
+Closes the post-v2.0.39 debt called out in the milestone-assessment
+gap audit. No production-code behavior change for end users —
+bundled `naive`, `cool-tunnel-core`, and the macOS bundle's runtime
+surface are byte-equivalent to v2.0.39 modulo:
+
+- Internal-visibility tweak: `TunnelOrchestrator.hydratePasswordIfNeeded`
+  now delegates to a `nonisolated static func hydratePassword(_:from:)`
+  helper used as the H3 test seam. Behaviorally identical; the
+  instance method is a one-line delegate.
+- `// try-ok: <reason>` annotations on every legitimate cleanup
+  `try?` in the Swift production tree. Comment-only; zero runtime
+  effect.
+- Two doc-comment rephrases in `ProfileStore` / `CredentialStore`
+  to drop literal `try?` tokens from prose so the ratchet's
+  grep-based count doesn't penalise historical commentary.
+
+### Added — annotation-aware `try?` ratchet (#60)
+
+- `scripts/try_question_ratchet.sh` now accepts a `// try-ok:
+  <reason>` annotation on the same line as the `try?` token OR
+  the immediately preceding line. Annotated sites are zero-cost
+  against the cap; unannotated sites count.
+- Cap lowered from 54 → 0. Every remaining `try?` in `COOL-TUNNEL/`
+  carries a one-line rationale.
+- Bi-directional enforcement: introducing or removing a `try?`
+  without updating the cap fails CI in the same commit.
+
+### Added — Swift unit-test target (#61)
+
+- New `COOL-TUNNELTests` XCTest target wired into the Xcode
+  project, the shared `COOL-TUNNEL` scheme's TestAction, and CI
+  via a new `swift-tests` job on `macos-latest`.
+- `scripts/add_test_target.rb` — Ruby + `xcodeproj` gem script
+  that adds the target idempotently; future test files just need
+  to be dropped into `COOL-TUNNELTests/` and the script re-run.
+- 16 tests at landing: `ProfileStoreTests` (6) + `MigratingCredentialStoreTests`
+  (10) pinning the H2/H3/M1 persistence-layer invariants.
+
+### Added — regression tests for the remaining audit gaps (#65)
+
+Suite grows to **35 tests**. New coverage:
+
+- `GitHubTrustTests` (11) — `isTrustedGitHubURL` exhaustively
+  (accept list + reject list including HTTP downgrade, look-alike
+  hosts, IP literals, sibling GitHub services); `GitHubRedirectGuard.download`
+  rejects untrusted URLs before any network call.
+- `ProfileStoreTests` `+2` — `deletePassword` swallows credential-
+  store failures (M1 contract) and removes the entry on success.
+- `TunnelOrchestratorTests` (6) — H3 plumbing: backend errors
+  become `OrchestratorError.credentialReadFailed`, "not stored"
+  flows through unchanged, whitespace-only counts as empty.
+
+### Fixed — `cut_release.sh` pre-flight (#62)
+
+- `scripts/audit.sh`'s `xcodebuild test (Debug)` step now passes
+  `CODE_SIGNING_ALLOWED=NO`. PR #61 activated the previously-
+  skipped step; on systems without an Apple Developer ID identity
+  the ad-hoc-signed test host crashed during bootstrap, which
+  blocked `cut_release.sh`'s PRE-FLIGHT step 4. One-flag fix
+  aligns audit.sh with the CI swift-tests job and the Release
+  build, all of which already disable code signing.
+
+### Changed — `CONTRIBUTING.md` (#62)
+
+- New "CI gates and invariants" section documents the Zero
+  `try?` rule (with concrete `do/catch` + annotation examples),
+  the test target conventions, the NaiveProxy pin model, and the
+  full six-gate green requirement.
+- Older "All four green checks" line updated to enumerate the
+  six current jobs.
+
+### Internal refactor — H3 plumbing (#65)
+
+- `TunnelOrchestrator.hydratePasswordIfNeeded` extracted into a
+  `nonisolated static func hydratePassword(_:from:)` helper. Pure
+  function over `(inout Profile, ProfileStore) throws`; throws
+  `OrchestratorError.credentialReadFailed(reason:)` on credential-
+  backend failure. The instance method one-line-delegates; the
+  static is the test seam so the H3 contract is pinnable without
+  constructing a real orchestrator.
+
+### Verified
+
+- 35/35 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
+- `bash scripts/audit.sh --strict` — `audit: PASS` across every
+  section: cargo fmt, clippy --pedantic -D warnings, cargo test,
+  cargo deny check, swift-format lint, xcodebuild test, naive
+  arch guard, schema sync probe, `try?` ratchet.
+- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
+- GitHub Actions CI on `main` — 6/6 jobs green across PRs #60,
+  #61, #62, #65.
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary verification,
+  and package security checks.
+
 ## [2.0.39] — 2026-05-11 — M1 Ratchet + Sweep + GitHubTrust Fail-Closed
 
 > **CI guardrail against silent `try?` regressions, first sweep
