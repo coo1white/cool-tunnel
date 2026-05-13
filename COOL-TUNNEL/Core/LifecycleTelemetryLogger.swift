@@ -121,13 +121,135 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
         return formatter.string(from: date)
     }
 
-    private static func redact(_ raw: String) -> String {
-        raw.replacingOccurrences(
-            of: #"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+:[^@\s/]+@"#,
-            with: "$1***:***@",
-            options: .regularExpression
-        )
+    /// Credential-redaction pass applied to every `message` and
+    /// every `details` value before the record reaches disk. The
+    /// rules match the Rust-side `cool_tunnel_core::redaction::redact`
+    /// surface so a string the Rust engine already redacted stays
+    /// redacted on the Swift side too, AND so a string that
+    /// arrives only via Swift (e.g. a `URLError.localizedDescription`
+    /// that wrapped a userinfo-bearing URL, or a Foundation error
+    /// embedding an `Authorization:` header from a misbehaving
+    /// reverse proxy) still gets stripped before it reaches the
+    /// 0600-mode telemetry file.
+    ///
+    /// **W1 (v2.0.42):** pre-fix this only handled
+    /// `scheme://user:pass@host`. Authorization headers, Cookie
+    /// headers, JSON-shaped `"password":"…"` payloads, and
+    /// multi-`@` userinfo (`https://user:p@ssword@host`) reached
+    /// the file verbatim. Aligning with the Rust regex set closes
+    /// the defense-in-depth gap.
+    static func redact(_ raw: String) -> String {
+        var current = raw
+        for rule in Self.redactionRules {
+            current = rule.regex.stringByReplacingMatches(
+                in: current,
+                range: NSRange(current.startIndex..., in: current),
+                withTemplate: rule.template
+            )
+        }
+        return current
     }
+
+    /// `scheme://userinfo@` matcher. Greedy userinfo class
+    /// `[^/\s]+@` redacts the *whole* userinfo run, so passwords
+    /// containing an embedded `@` (`user:p@ssword@host`) are fully
+    /// stripped rather than leaving the tail visible. Schemes
+    /// matched case-insensitively to catch curl's occasional
+    /// upper-cased error output.
+    private static let userinfoPattern =
+        #"(?i)((?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^/\s]+@"#
+
+    /// `Authorization: <scheme> <value>` and `Proxy-Authorization:`
+    /// variants. Scheme stays (Bearer / Basic / Digest is useful
+    /// operator context); value is masked.
+    private static let authHeaderPattern =
+        #"(?i)((?:Proxy-)?Authorization:\s*[A-Za-z]+\s+)\S+"#
+
+    /// `Cookie: …` and `Set-Cookie: …`. Whole value redacted —
+    /// session tokens are conservatively all-or-nothing.
+    private static let cookieHeaderPattern = #"(?i)((?:Set-)?Cookie:\s*)[^\r\n]+"#
+
+    /// Strict-JSON quoted credential values
+    /// (`"password":"Tr0ub4dor 3 cat-pic"`). Value consumes any
+    /// non-`"` char or escaped pair, terminating at the literal
+    /// closing quote — passwords with embedded spaces, commas, or
+    /// punctuation are fully redacted.
+    private static let jsonQuotedCredPattern = #"""
+        (?ix)
+        (
+            "(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token)"
+            \s* : \s*
+            "
+        )
+        (?:[^"\\]|\\.)*
+        (")
+        """#
+
+    /// Bare `k=v` / `k: v` credential dumps
+    /// (`password=hunter2`, `password: hunter2`). Optional
+    /// surrounding quotes on key / value tolerated; trailing
+    /// closing quote (group 2) preserved so JSON stays parse-able
+    /// when the bare-token path runs after the strict path on a
+    /// mixed-format line.
+    private static let jsonBareCredPattern = #"""
+        (?ix)
+        (
+            "?(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token)"?
+            \s* [:=] \s*
+            "?
+        )
+        [^"\s,}\r\n]+
+        ("?)
+        """#
+
+    private struct RedactionRule {
+        let regex: NSRegularExpression
+        let template: String
+    }
+
+    /// `expect` is appropriate here: every pattern below is a
+    /// compile-time constant. A failed compile would be a build-
+    /// breaking regression caught by the test
+    /// `redactionRulesCompile` in
+    /// `LifecycleTelemetryRedactionTests`.
+    private static let redactionRules: [RedactionRule] = {
+        func make(_ pattern: String, template: String) -> RedactionRule {
+            // Explicit do/catch (instead of an optional-coalesce)
+            // so the regex compile error surfaces in the crash
+            // message — a future bad edit shouldn't crash with a
+            // generic "regex was nil" but with the actual
+            // NSError.localizedDescription. `fatalError` is right
+            // because the patterns are compile-time constants; a
+            // failure here is a build regression, not a runtime
+            // condition.
+            let regex: NSRegularExpression
+            do {
+                regex = try NSRegularExpression(
+                    pattern: pattern,
+                    options: [.allowCommentsAndWhitespace]
+                )
+            } catch {
+                fatalError(
+                    "lifecycle telemetry redaction regex failed to compile: "
+                        + "\(pattern); error: \(error.localizedDescription)"
+                )
+            }
+            return RedactionRule(regex: regex, template: template)
+        }
+        return [
+            // Order matters: strict-JSON quoted runs first so the
+            // bare-token pass doesn't truncate quoted values at the
+            // first comma / space. Authorization re-runs after the
+            // JSON pass in case a header-shaped credential appears
+            // in a log line that also contains a JSON dump.
+            make(userinfoPattern, template: "$1***:***@"),
+            make(authHeaderPattern, template: "$1***"),
+            make(cookieHeaderPattern, template: "$1***"),
+            make(jsonQuotedCredPattern, template: "$1***$2"),
+            make(jsonBareCredPattern, template: "$1***$2"),
+            make(authHeaderPattern, template: "$1***"),
+        ]
+    }()
 
     private static let logger = Logger.cooltunnel("LifecycleTelemetry")
 }
