@@ -9,6 +9,80 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.41] — 2026-05-13 — Panel Trust-Gate Regression Coverage
+
+> **`SubscriptionManifestV1.validate(now:)` and
+> `isBlockedHost(_:)` — the two security-trust gates protecting
+> the panel-import flow against counterfeit / hijacked panels —
+> were documented in code but had zero regression tests. Closed
+> with 29 new tests. Suite goes from 35 → 64.**
+
+Strictly additional test coverage. No production code change.
+Bundled `naive`, `cool-tunnel-core`, and the macOS bundle's
+runtime surface are byte-equivalent to v2.0.40.
+
+### Added — `validate(now:)` coverage (15 tests)
+
+Happy path plus one test per documented rejection rule:
+
+- `version != 1` → `unsupportedVersion`
+- empty `profiles` → `noProfiles`
+- profile flood above `maxProfiles` cap → `tooManyProfiles`
+- exactly `maxProfiles` accepted (boundary)
+- profile with blocked host → `blockedHost` (wires the SSRF gate
+  through the validator)
+- `capabilities.http3 == true` → `counterfeitCapabilities`
+- `issuedAt == 0` sentinel → `invalidIssuedAt`
+- future `issuedAt` beyond the 60 s skew window → `invalidIssuedAt`
+- future `issuedAt` inside the skew window (accepted)
+- `expiresAt < issuedAt` → `malformedExpiry`
+- validity window > 1 year → `validityTooLong`
+- validity at exactly 1 year (boundary)
+- already-expired manifest → `expired`
+- older than 7-day max age → `stale`
+- exactly maxAge old (boundary; `>` not `>=`)
+- overflow safety at `UInt64.max` (saturating-add discipline)
+
+### Added — `isBlockedHost(_:)` coverage (14 tests)
+
+SSRF protection classifier covered across every category:
+
+- Hostname forms: `localhost` (case + whitespace), `*.local`
+  mDNS, empty / whitespace-only.
+- IPv4 every RFC 1918 / loopback / link-local / unspecified
+  block: `127/8`, `10/8`, `172.16/12`, `192.168/16`, `169.254/16`,
+  `0.0.0.0`.
+- **Adjacency boundaries** — `172.15.255.255` and `172.32.0.0`
+  must remain ALLOWED. Off-by-one CIDR-classifier bugs are a
+  known anti-pattern; the boundary tests catch a regression that
+  expands or contracts the block by one octet.
+- Public IPv4 allowed (8.8.8.8, 1.1.1.1, 203.0.113.1, 11.0.0.1).
+- IPv6 bracketed literals: `[::1]`, `[::]`, `[fe80::]`,
+  `[fc00::]`, `[fd00::]` blocked; `[2001:db8::]` and
+  `[2001:4860:4860::8888]` allowed.
+- Public hostnames pass through.
+
+### Verified
+
+- 64/64 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
+- `bash scripts/audit.sh --strict` — `audit: PASS`.
+- `xcrun swift-format lint -r --strict` clean across both
+  `COOL-TUNNEL` and `COOL-TUNNELTests`.
+- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
+- GitHub Actions CI on `main` — 6/6 jobs green.
+- Release cutter passed every audit gate.
+
+### Remaining audit-gap risks (next follow-up — not v2.0.41-blocking)
+
+- `Subprocess.swift` timeout + SIGTERM → SIGKILL escalation
+  (used by AppUpdater for ditto extraction) — untested. Needs a
+  controllable subprocess fixture.
+- `NaiveBinaryResolver` / `RustCoreResolver` path resolution —
+  untested. Needs a filesystem fixture.
+
+Neither is a trust gate; both are bounded by the existing
+compile-time CI gates.
+
 ## [2.0.40] — 2026-05-12 — Robustness Test Surface + CI Gate Refinement
 
 > **Suite goes from 16 → 35 regression tests. Annotation-aware
