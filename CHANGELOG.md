@@ -9,6 +9,130 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.42] — 2026-05-13 — Web3 Privacy Posture (Telemetry Redaction + SECURITY-WEB3.md)
+
+> **Web3-oriented privacy audit (post-v2.0.41) closed three gaps:
+> telemetry-side redaction is now at parity with the Rust core's
+> credential-redaction surface; 16 new regression tests pin the
+> categories; `SECURITY-WEB3.md` documents the threat model,
+> architectural guarantees, and known surfaces for operators
+> routing wallet / RPC traffic through the tunnel.**
+
+No production-runtime behavior change. The redaction extension
+is a defense-in-depth alignment — the Rust core's redaction
+already catches anything that flows from the engine; this
+closes the gap for strings that arrive only via Swift
+(Foundation errors, third-party library descriptions).
+Bundled `naive`, `cool-tunnel-core`, and the macOS bundle's
+runtime surface are byte-equivalent to v2.0.41.
+
+### Changed — telemetry redaction at parity with Rust core (W1)
+
+`LifecycleTelemetryLogger.redact` previously handled only
+`scheme://user:pass@host`. The Rust core's
+`cool_tunnel_core::redaction::redact` catches FOUR additional
+categories — Authorization / Proxy-Authorization headers,
+Cookie / Set-Cookie headers, JSON-shaped credentials (both
+strict-quoted and bare-token forms), and multi-`@` userinfo. A
+`URLError.localizedDescription` wrapping a userinfo URL, a
+Foundation error embedding an `Authorization:` header, or any
+third-party library error that surfaces a `"password":"…"` JSON
+dump would have reached the 0o600 telemetry file verbatim.
+
+Aligned: five sequential `NSRegularExpression` passes,
+order-equivalent to the Rust impl (strict-quoted JSON first,
+then bare-token, then a final Authorization sweep for header-
+shaped credentials inside JSON dumps). Patterns embedded as
+named constants with extended regex syntax for readability.
+
+The previous one-line regex (`replacingOccurrences` returning
+an optional) became an explicit `do/catch` with a `fatalError`
+carrying the underlying `NSError.localizedDescription` — a
+future bad regex edit now surfaces the actual compile error
+rather than a generic "regex was nil". Compile failure is a
+build-regression, not a runtime condition.
+
+### Added — telemetry redaction regression coverage (W2, 16 tests)
+
+`COOL-TUNNELTests/LifecycleTelemetryRedactionTests.swift`:
+
+  - Sanity (3): rules compile, clean line passes through, empty
+    string is safe.
+  - Userinfo (5): https, every SOCKS variant, multi-`@`
+    embedded, two URLs on one line each redacted, bare `@`
+    outside a URL untouched.
+  - Authorization (3): Bearer, Basic / Proxy-Authorization,
+    mixed-case + tight-colon variants.
+  - Cookie (1): Cookie + Set-Cookie shapes.
+  - JSON quoted (3): embedded space, embedded comma, token /
+    api_key / refresh_token variants.
+  - JSON bare (1): k=v / k: v shapes.
+
+Test names mirror the Rust-side redaction tests so contract
+drift between the two languages stays visible. Suite: 64 → 80.
+
+### Added — `SECURITY-WEB3.md` (W3)
+
+Sibling to `SECURITY.md`. Three sections, each anchored in
+code paths a reviewer can verify:
+
+  1. **Architectural guarantees** — what Cool Tunnel does NOT
+     see, ever: HTTPS CONNECT payloads, destination URLs of
+     routed traffic, telemetry endpoints (none exist),
+     credential-carrying process arguments, wallet-specific
+     state.
+
+  2. **What persists on disk** — `config.json` + `credentials.json`
+     + `lifecycle-telemetry.jsonl` (all 0o600, atomic-write,
+     Time Machine-excluded). Exact content categories.
+
+  3. **Known surfaces** — the honest section: `naive`'s stderr
+     in error paths can name destination hostnames (the
+     redaction layer strips credentials, NOT identifiers). The
+     live log and lifecycle telemetry file should be treated as
+     sensitive by an operator routing wallet/RPC traffic.
+     Explicit operator guidance: clear the log before
+     screenshotting, delete the telemetry file between sessions
+     if destination metadata for that window matters.
+
+The doc deliberately distinguishes "guaranteed" from "best-
+effort." No sweeping "secure-by-default" claims; explicit
+operator agency where the architecture can't deliver a hard
+guarantee.
+
+### Verified
+
+- 80/80 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
+- `bash scripts/audit.sh --strict` — `audit: PASS` across every
+  section.
+- `xcrun swift-format lint -r --strict` clean.
+- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
+- GitHub Actions CI on `main` — 6/6 jobs green.
+- Release cutter passed every audit gate.
+
+### What this is NOT
+
+- Not a fix for a known leak. The Rust-side redaction already
+  catches anything that flows from the engine; W1 closes the
+  gap for strings that arrive only via Swift.
+- Not wallet-aware logic. No payload inspection, no transaction
+  parsing, no destination-list maintenance. Cool Tunnel stays
+  transport-neutral.
+- Not a new telemetry endpoint. The existing
+  `lifecycle-telemetry.jsonl` is local, 0o600, never sent
+  anywhere; W1 strengthens its credential-redaction discipline.
+
+### Remaining audit-gap risks (next follow-ups — not v2.0.42-blocking)
+
+- `Subprocess.swift` timeout + SIGTERM → SIGKILL ladder
+  untested (carried from v2.0.41 — not Web3-specific).
+- `NaiveBinaryResolver` / `RustCoreResolver` path resolution
+  untested (carried from v2.0.41).
+- Configurable identifier-redaction mode for operators with
+  extreme RPC-destination sensitivity needs would impair
+  connectivity debugging; the documented operator guidance in
+  `SECURITY-WEB3.md` is the right answer for now.
+
 ## [2.0.41] — 2026-05-13 — Panel Trust-Gate Regression Coverage
 
 > **`SubscriptionManifestV1.validate(now:)` and
