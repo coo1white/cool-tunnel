@@ -191,6 +191,17 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
     /// closing quote (group 2) preserved so JSON stays parse-able
     /// when the bare-token path runs after the strict path on a
     /// mixed-format line.
+    ///
+    /// **OPSEC (post-v2.0.50):** `&` and `#` added to the value
+    /// terminator set. Without them the bare-token matcher
+    /// applied to a URL (`?token=abc&user=alice#frag`) consumes
+    /// past both separators, clobbering subsequent
+    /// non-credential query parameters / URL fragments AND
+    /// re-matching the already-redacted `token=***` produced by
+    /// the query-string rule below. Bare-token dumps in `naive`
+    /// config-load errors and curl `-v` output don't include
+    /// `&` or `#` as a value separator, so this is a strict
+    /// tightening.
     private static let jsonBareCredPattern = #"""
         (?ix)
         (
@@ -198,8 +209,26 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
             \s* [:=] \s*
             "?
         )
-        [^"\s,}\r\n]+
+        [^"\s,&\x23}\r\n]+
         ("?)
+        """#
+
+    /// **OPSEC (post-v2.0.50):** query-string credentials —
+    /// `?token=abc`, `&api_key=xyz`, `?session=...`. URL
+    /// shape: leading `?` or `&`, the credential key, `=`,
+    /// then anything up to the next `&` / whitespace / line
+    /// boundary. The previous rule set caught `key=value`
+    /// dumps but only when the `=` was the line's primary
+    /// separator; an HTTPS URL with `?token=…` embedded
+    /// passed through because the URL userinfo rule looks
+    /// for `://user:pass@`, not query-string credentials.
+    private static let queryStringCredPattern = #"""
+        (?ix)
+        ([?&]
+            (?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|session|auth|password|secret)
+            =
+        )
+        [^&\s\x23]+
         """#
 
     private struct RedactionRule {
@@ -246,6 +275,15 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
             make(authHeaderPattern, template: "$1***"),
             make(cookieHeaderPattern, template: "$1***"),
             make(jsonQuotedCredPattern, template: "$1***$2"),
+            // Query-string rule MUST run before the bare k=v rule:
+            // the bare matcher's value class doesn't include `&`,
+            // so a URL like `?token=abc&user=alice` would have its
+            // `user=alice` segment clobbered. The query-string
+            // matcher's value class terminates at `&`, so by the
+            // time the bare matcher sees the line the token is
+            // already replaced with `***` and the rest of the
+            // query string is structurally intact.
+            make(queryStringCredPattern, template: "$1***"),
             make(jsonBareCredPattern, template: "$1***$2"),
             make(authHeaderPattern, template: "$1***"),
         ]

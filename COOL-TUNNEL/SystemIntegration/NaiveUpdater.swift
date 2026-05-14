@@ -440,8 +440,12 @@ final class NaiveUpdater {
         do {
             return try await GitHubRedirectGuard.download(url: url, to: destination)
         } catch let untrusted as UntrustedGitHubHostError {
+            // **OPSEC (post-v2.0.50):** host-only, never the
+            // full URL — same discipline as RustCoreUpdater and
+            // the GitHubTrust redirect handler.
+            let host = untrusted.url.host ?? "<unknown>"
             naiveUpdaterLogger.error(
-                "untrusted host: \(untrusted.url.absoluteString, privacy: .public)"
+                "untrusted host: \(host, privacy: .public)"
             )
             throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."

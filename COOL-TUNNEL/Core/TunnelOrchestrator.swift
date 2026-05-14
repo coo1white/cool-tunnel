@@ -594,7 +594,18 @@ public final class TunnelOrchestrator {
         else {
             throw SubscriptionImportError.invalidURL
         }
-        appendInfo("subscription: fetching \(url.host ?? urlString)…")
+        // **OPSEC (post-v2.0.50):** never log the raw subscription
+        // string. The path of a panel URL typically embeds the
+        // operator's subscription token (e.g.
+        // `/api/v1/subscription/<TOKEN>`); the previous form
+        // (`url.host ?? urlString`) fell back to the full string
+        // when `url.host` was nil (edge case: `https:///path` or
+        // similar parser-permissive shapes), leaking the token
+        // into the in-memory log AND the lifecycle-telemetry
+        // file. Log host-only; if even the host can't be
+        // resolved, log a fixed-shape placeholder.
+        let host = url.host.flatMap { $0.isEmpty ? nil : $0 } ?? "<unknown>"
+        appendInfo("subscription: fetching \(host)…")
 
         let manifest: SubscriptionManifestV1
         do {
@@ -641,7 +652,15 @@ public final class TunnelOrchestrator {
         // `Username::Display` returns `"***"`). Matching that
         // discipline on the Mac side avoids leaking the username
         // into a support log the user pastes into a ticket.
-        appendInfo("subscription: imported \(primary.host):\(primary.port)")
+        // **OPSEC (post-v2.0.50):** previously logged
+        // `\(primary.host):\(primary.port)`, which leaked the
+        // operator's proxy hostname into the in-memory log + the
+        // lifecycle-telemetry file (the same redaction gap the
+        // v2.0.47 debug_handshake fix closed at a different
+        // callsite). Hostname:port is operator-fingerprinting
+        // infrastructure metadata; the import-success message
+        // doesn't need it to be useful.
+        appendInfo("subscription: imported new credentials")
     }
 
     /// Translates a [`SubscriptionClientError`] (transport-shape
