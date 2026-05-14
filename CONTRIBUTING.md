@@ -223,10 +223,12 @@ unexpected exit" error.
 When you add a new credential / persistence regression test:
 
 1. Drop the `*.swift` file into `COOL-TUNNELTests/`.
-2. Run `ruby scripts/add_test_target.rb` (requires
-   `gem install --user-install xcodeproj`) to add it to the
-   target. The script is idempotent — re-running just picks up
-   the new file.
+
+That's the entire step. Both targets (`COOL-TUNNEL` and
+`COOL-TUNNELTests`) use Xcode 16's `fileSystemSynchronizedGroups`,
+so any new file under the target directory is auto-picked-up by
+the next `xcodebuild` run — no project-file edit, no script,
+no Ruby toolchain.
 
 ### NaiveProxy pin verification — the supply-chain anchor
 
