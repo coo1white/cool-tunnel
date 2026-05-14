@@ -92,6 +92,36 @@ There is no FFI bridge. There is no shared memory contract. The JSON schema is t
 
 ---
 
+## First Deployment
+
+A working Cool Tunnel deployment is **server + client + first connection**. The detailed playbooks for each step live in the sections below; this walkthrough names the sequence so the order is unambiguous on a first install.
+
+### What you need before you start
+
+| Resource | Why |
+|---|---|
+| A Debian VPS with at least 1 GB RAM | The data plane. See [One-Click VPS Installation](#one-click-vps-installation). |
+| A domain (or subdomain) with an `A` / `AAAA` record pointed at the VPS | Caddy issues a TLS cert via ACME; the cert is anchored to a name that resolves to the host. |
+| `root` (or `sudo`) on the VPS | The installer owns `/opt/cool-tunnel`, Docker, and ports 80/443. |
+| A Mac on macOS 14 Sonoma or newer | The control plane. Apple Silicon or Intel. |
+| ~10 minutes | First deployment is one VPS command + one DMG install + one form. |
+
+If any of those are missing, fix them first. Skipping a prerequisite produces an incident later that costs more time than fixing it now.
+
+### The four steps
+
+1. **Stand up the VPS.** Follow [One-Click VPS Installation](#one-click-vps-installation). The installer is idempotent — re-running converges the host to the declared state, not parallel services. At the end of step 1 you have a working HTTPS proxy listening on `:443` and a `server=`, `user=`, `password=` triple printed to the operator's terminal.
+
+2. **Verify the VPS in isolation.** Before installing the client, confirm the VPS forwards traffic correctly. The [Server Verification](#one-click-vps-installation) table at the end of step 1 lists four `curl` probes; the `Proxy path` probe in particular proves the basic-auth credentials and the upstream egress before the Mac is involved. A VPS that fails this table will fail the Mac client too — fix it here, not after.
+
+3. **Install the macOS client.** Follow [macOS Installation](#macos-installation). Paste the credentials from step 1 (or import them from a `cool-tunnel-server` panel subscription URL if you're using the panel-based deployment). Pick `Smart` as the default routing mode unless you have a reason for `Global` or `Local`.
+
+4. **Verify end-to-end.** With the tunnel connected, run [Operator Diagnostics](#operator-diagnostics) → `Run Diagnostics`. The probe drives a CONNECT through the live tunnel and reports DNS, TCP, TLS, and end-to-end timings. Anything other than a green pass at this step means a hop between the Mac and the destination is wrong, and the diagnostic names which hop. The [VPS Health overlay](#operator-diagnostics) is the right next click — it runs an out-of-band reachability probe against the VPS so you can tell whether the failure is local or upstream.
+
+Once step 4 passes, the deployment is done. The Mac will surface a `Connected · Smart` (or `· Global`, `· Local`) pill in the menu bar and the header view; the system proxy is configured automatically based on the chosen mode. From that point forward the operator's job is the [Maintenance](#maintenance) chapter below.
+
+---
+
 ## One-Click VPS Installation
 
 ### First Scold: Do Not Run This Blind
@@ -238,6 +268,121 @@ Reports are also visible to the operator via the optional Developer Overlay (`De
 
 ---
 
+## Maintenance
+
+A deployed Cool Tunnel is plumbing. After step 4 of the [First Deployment](#first-deployment) walkthrough, the daily operator surface is small: install updates when they appear, glance at the VPS Health overlay if traffic feels off, and triage the three documented error layers when the banner flips red. This chapter is the operator's manual for that surface.
+
+### Keeping the client up to date
+
+Cool Tunnel ships its own SHA-256-pinned in-app updater. Updates are operator-initiated, never silent:
+
+| Action | What it does |
+|---|---|
+| Open the Settings window → `Check for Updates` | Issues one HTTPS request to `api.github.com` to read the `latest` release tag. No background polling. |
+| Click `Update` when a newer version is offered | Downloads `Cool-tunnel-vX.Y.Z.zip` AND its `.sha256` manifest from `*.githubusercontent.com`. Refuses to install if either asset is missing. Verifies the bytes of the `.zip` against the manifest line before extracting — a mismatch produces a "Refusing to install — checksum failed" banner, not a silent upgrade. |
+| App relaunch | Old `Cool Tunnel.app` is replaced atomically. A 5-second watchdog `Darwin.exit(0)` kicks in if the clean shutdown path stalls, so a wedged update can't park the app in "Relaunching…" forever. |
+
+**Verifying integrity without the updater UI.** Every release tag publishes the same `.sha256` manifest as a release asset. After downloading a DMG manually, you can verify it from the terminal:
+
+```bash
+shasum -a 256 -c Cool-tunnel-vX.Y.Z.sha256
+# Expected: "Cool-tunnel-vX.Y.Z.dmg: OK"
+```
+
+A mismatch here means the bytes you downloaded don't match the bytes the release cutter signed. Don't open the DMG; report it as a [SECURITY.md](./SECURITY.md) incident.
+
+**What versions look like.** The header view + `About Cool Tunnel` panel both surface the running version. The release cutter pins the version in three places (`core/Cargo.toml`, both `MARKETING_VERSION` lines in `COOL-TUNNEL.xcodeproj/project.pbxproj`, `CHANGELOG.md`); a mismatch trips `cut_release.sh`'s pre-flight gate, so any version you see in the running app is the version that passed every CI gate.
+
+### Triaging the three error layers
+
+When the banner flips red, the chip names the layer. The right next click is layer-specific:
+
+| Chip | Meaning | Operator next step |
+|---|---|---|
+| `Local Kernel` | The local Mac stack: `naive` not running, saved credentials malformed, local firewall blocking the loopback bind, profile fields invalid. | Open `Run Diagnostics`. The probe will name DNS, TCP, or TLS at the local layer. If `Debug Handshake` succeeds but `Run Diagnostics` fails, the `naive` child is alive but loopback routing is broken. |
+| `ISP` | Between the Mac and the public internet: Wi-Fi association, captive portal, ISP DNS, route to the VPS hostname. | Open the `VPS Health overlay`. If it reports `Probe error · DNS ?`, your local resolver is down or hijacked. If it reports `Blocked · DNS ✓ · TCP ?`, your ISP has TCP-level interference. |
+| `VPS` | The configured server itself: hostname doesn't resolve, `:443` refuses connections, `forward_proxy` rejects the handshake, certificate expired. | Run [Server Verification](#one-click-vps-installation) on the VPS side. The fallback `curl https://$CT_DOMAIN` probe in particular reveals whether the Caddy stack is alive at all. |
+
+The classifier is deterministic — same input, same layer attribution — so two operators triaging the same incident reach the same root cause without coordinating.
+
+### Where state lives
+
+Three files in `~/Library/Application Support/space.coolwhite.cooltunnel/`, all `0o600`, atomic-write, excluded from Time Machine:
+
+| File | Purpose | Lifecycle |
+|---|---|---|
+| `config.json` | Generated `naive` config carrying the operator's `https://user:pass@host:port` URL. | Written fresh on every Start. Deleted on graceful Stop. Never under operator hand-editing. |
+| `credentials.json` | Base64-encoded profile passwords. | Survives across launches. Migrates from the macOS Keychain on first run under the file backend. |
+| `lifecycle-telemetry.jsonl` | Local-only state-machine transitions (bootstrap, start, stop, anomaly classification, error-layer attribution, sleep/wake). | Append-only. Credential-redacted before write (the redaction surface is regression-tested in `LifecycleTelemetryRedactionTests`). Never sent off-device. |
+
+The full operator-facing privacy model for these files — including the known surfaces where information about traffic CAN leak in error paths — lives in [SECURITY-WEB3.md](./SECURITY-WEB3.md). Read it once before routing sensitive traffic.
+
+### Rotating VPS credentials
+
+Cool Tunnel does not auto-rotate; rotation is an explicit operator action:
+
+1. On the VPS, regenerate the password and update the `Caddyfile`:
+   ```bash
+   export CT_USER="cool"
+   export CT_PASSWORD="$(openssl rand -base64 32)"
+   sed -i "s/basic_auth .* .*/basic_auth ${CT_USER} ${CT_PASSWORD}/" /opt/cool-tunnel/Caddyfile
+   docker compose -f /opt/cool-tunnel/docker-compose.yml restart
+   ```
+2. On the Mac, open the connection form, paste the new password, save. The old password lingers in `credentials.json` until the next save; the new save replaces it.
+3. Run `Run Diagnostics` to confirm the new credentials forward traffic correctly.
+
+Rotation cadence is operator-defined. The project doesn't enforce one — the threat model is "the operator owns the VPS" — but the credentials are 32 bytes from `/dev/urandom` and are not weakened by age. Rotate if you suspect a leak; otherwise leave them alone.
+
+### Rolling the bundled NaiveProxy pin
+
+The `naive` binary inside the app bundle is pinned by `COOL-TUNNEL/naive.upstream.json`. The pin is **authoritative** — `cut_release.sh` verifies the bundled binary's SHA against the manifest on every release cut and refuses to ship a mismatch. A daily scheduled CI workflow (`naive-pin-audit.yml`) re-downloads the upstream tarballs at the pinned tag and verifies every SHA still reproduces; an upstream tag rewrite or mirror tampering surfaces within 24 hours.
+
+Operators don't normally touch the pin. If you're a maintainer and you need to roll it intentionally:
+
+```bash
+git pull origin main
+CT_REPIN_CONFIRM=1 bash scripts/fetch_naive.sh --repin v148.0.7778.96-7
+# Inspect the printed OLD → NEW diff.
+git add COOL-TUNNEL/naive COOL-TUNNEL/naive.upstream.json
+git commit -m "chore(naive): repin to v148.0.7778.96-7"
+```
+
+The `--repin` flag refuses to write anything without `CT_REPIN_CONFIRM=1` — rolling the pin is an operator decision, not an accident. The change must land as a single commit (binary + manifest) that names the old → new tag transition in the message. See `scripts/fetch_naive.sh --help` for the full mode table.
+
+### Common-failure quick reference
+
+| Symptom | Likely cause | First operator action |
+|---|---|---|
+| `Unlock the Keychain and try again` banner | Keychain locked, prompt dismissed, or migration write failed. | Unlock the login keychain, click Start again. The credential won't be silently re-prompted-and-lost (regression-tested in `ProfileStoreTests`). |
+| `Refusing to install — checksum failed` | Update artifact bytes don't match the published `.sha256`. | Don't retry blindly. Verify the release tag's `.sha256` is intact on GitHub. If it's a CDN cache issue, retry after a few minutes; if not, report as a security incident. |
+| Banner flips to `Local Kernel · naive stopped unexpectedly` | The `naive` child died. Self-healing retries automatically (3 attempts, 0.5 s / 2 s / 5 s back-off) unless the failure is permanent (invalid credentials, missing binary). | Watch the log for `self-healing aborted: …` — that names the permanent cause. |
+| Wake from sleep, header shows `Active` but no traffic | Sleep/wake checkpoint missed (rare; usually Path A in `handleSystemDidWake` recovers without operator action). | Click the active mode chip to re-enter it. The orchestrator's stop-quiet + restart hot-swap path is the same one used by mode changes. |
+| `lifecycle-telemetry.jsonl` growing slowly over time | Normal. Append-only, schema-versioned, credential-redacted. | If you're routing sensitive traffic and the file holds session metadata you'd rather not preserve: `rm "$HOME/Library/Application Support/space.coolwhite.cooltunnel/lifecycle-telemetry.jsonl"` between sessions. |
+
+For anything not in this table, [SUPPORT.md](./SUPPORT.md) names the LTSC contract.
+
+### Uninstalling cleanly
+
+```bash
+# Stop the tunnel from the menu bar, then:
+osascript -e 'quit app "Cool Tunnel"'
+
+# Remove the app
+rm -rf "/Applications/Cool Tunnel.app"
+
+# Remove local state (config, credentials, telemetry, PAC file)
+rm -rf "$HOME/Library/Application Support/space.coolwhite.cooltunnel"
+
+# Remove the in-app updater's staging dirs (purely cosmetic; auto-cleaned per pipeline)
+rm -rf "$(getconf DARWIN_USER_TEMP_DIR)cool-tunnel-* "
+```
+
+If the VPS is going away too: `docker compose -f /opt/cool-tunnel/docker-compose.yml down -v && rm -rf /opt/cool-tunnel` on the server.
+
+System proxy settings are reverted automatically on every clean Stop and on `applicationWillTerminate`. If the app crashed without reverting (rare), `networksetup -setautoproxystate <service> off` and `networksetup -setsocksfirewallproxystate <service> off` for each active service in `Network` preferences restores the default state.
+
+---
+
 ## Quality Assurance: Heng
 
 Heng means constancy. A release does not ship because the UI looks calm; it ships only after the same failure classes have been forced through the same gates again.
@@ -307,10 +452,10 @@ cd cool-tunnel
 bash scripts/preflight.sh
 ```
 
-For a release build:
+For a release build (substitute the next version — pre-flight rejects any value that doesn't match `core/Cargo.toml` and `MARKETING_VERSION`):
 
 ```bash
-bash scripts/cut_release.sh 2.0.36
+bash scripts/cut_release.sh 2.0.42
 ```
 
 ---
