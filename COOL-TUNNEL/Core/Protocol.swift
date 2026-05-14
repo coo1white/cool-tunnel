@@ -25,27 +25,44 @@ public let coreProtocolVersion: UInt32 = 1
 
 // MARK: - Profile
 
-/// Wire-format profile shared with the engine. Field names match
-/// `core::domain::profile::RawProfile` exactly.
+/// Wire-format profile shared with the engine. The five core
+/// fields (id / server / username / password / localPort) match
+/// `core::domain::profile::RawProfile` exactly; `subscriptionURL`
+/// is a Swift-only persistence field that the Rust deserializer
+/// silently ignores (no `#[serde(deny_unknown_fields)]` on the
+/// Rust side). Carried on the Profile so a profile imported via
+/// a subscription URL remembers its source — the auto-sync flow
+/// uses it to re-fetch when the engine reports an auth failure
+/// against the cached credentials.
 public struct Profile: Sendable, Codable, Hashable, Identifiable {
     public var id: String
     public var server: String
     public var username: String
     public var password: String
     public var localPort: String
+    /// Subscription URL the profile was last imported from, if
+    /// any. `nil` for hand-entered profiles; non-nil for profiles
+    /// imported via the "Import from subscription URL" flow.
+    /// Persisted alongside the rest of the profile so a future
+    /// auto-sync can re-fetch credentials transparently when the
+    /// upstream rotates the password and the cached value is
+    /// no longer accepted.
+    public var subscriptionURL: String?
 
     public init(
         id: String,
         server: String,
         username: String,
         password: String,
-        localPort: String
+        localPort: String,
+        subscriptionURL: String? = nil
     ) {
         self.id = id
         self.server = server
         self.username = username
         self.password = password
         self.localPort = localPort
+        self.subscriptionURL = subscriptionURL
     }
 
     public static let `default` = Profile(

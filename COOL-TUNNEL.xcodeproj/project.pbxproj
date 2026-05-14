@@ -14,6 +14,7 @@
 		512CB2601AD2B633029FC63B /* MockCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D104EEEFCE8A5369DB7ED758 /* MockCredentialStore.swift */; };
 		88F5383A6F45C8CA1129BF7F /* TunnelOrchestratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59272EFA176F02077FC2BE79 /* TunnelOrchestratorTests.swift */; };
 		97CBFD8020C8BE9B9DABCF99 /* SHAVerifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5425630E56F54663944CDA0F /* SHAVerifierTests.swift */; };
+		B8879517012CF516D5E75ADC /* CredentialAutoSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28114AF3A38DCF66D4AE93CA /* CredentialAutoSyncTests.swift */; };
 		CE599EFBA358A0DC51D5EB0D /* LipoOutputParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7B30F95B67BF1DD89A75A4E /* LipoOutputParserTests.swift */; };
 		DAD8A56F67CAE0F7B36E07A6 /* ProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7878B4D53EF20E097C673880 /* ProfileStoreTests.swift */; };
 		E8D5C4DF5B6260BE72160372 /* MigratingCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 554B53A6069678081A10DC49 /* MigratingCredentialStoreTests.swift */; };
@@ -32,6 +33,7 @@
 
 /* Begin PBXFileReference section */
 		01AF2175B2B58ED8E5BC3EC4 /* LifecycleTelemetryRedactionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LifecycleTelemetryRedactionTests.swift; sourceTree = "<group>"; };
+		28114AF3A38DCF66D4AE93CA /* CredentialAutoSyncTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CredentialAutoSyncTests.swift; sourceTree = "<group>"; };
 		5425630E56F54663944CDA0F /* SHAVerifierTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SHAVerifierTests.swift; sourceTree = "<group>"; };
 		554B53A6069678081A10DC49 /* MigratingCredentialStoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MigratingCredentialStoreTests.swift; sourceTree = "<group>"; };
 		59272EFA176F02077FC2BE79 /* TunnelOrchestratorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TunnelOrchestratorTests.swift; sourceTree = "<group>"; };
@@ -96,6 +98,7 @@
 				B7B30F95B67BF1DD89A75A4E /* LipoOutputParserTests.swift */,
 				7739FA878179F5C51F323AA2 /* ProxyActiveFlagTests.swift */,
 				5425630E56F54663944CDA0F /* SHAVerifierTests.swift */,
+				28114AF3A38DCF66D4AE93CA /* CredentialAutoSyncTests.swift */,
 			);
 			name = "COOL-TUNNELTests";
 			path = "COOL-TUNNELTests";
@@ -270,6 +273,7 @@
 				CE599EFBA358A0DC51D5EB0D /* LipoOutputParserTests.swift in Sources */,
 				026198BA72C47D27D871856D /* ProxyActiveFlagTests.swift in Sources */,
 				97CBFD8020C8BE9B9DABCF99 /* SHAVerifierTests.swift in Sources */,
+				B8879517012CF516D5E75ADC /* CredentialAutoSyncTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

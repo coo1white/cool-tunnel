@@ -115,6 +115,27 @@ public final class TunnelOrchestrator {
     private var autoStopTask: Task<Void, Never>?
     private var selfHealTask: Task<Void, Never>?
     private var vpsHealthTask: Task<Void, Never>?
+    /// Single-flight guard for the credential auto-sync flow.
+    /// Triggered by HTTP-407-class auth failures in the engine's
+    /// stderr stream when the active profile has a
+    /// `subscriptionURL`. A burst of auth-failure log lines from
+    /// a single failed start would otherwise queue duplicate
+    /// re-fetches against the panel; once one is in flight, every
+    /// other auth-failure line in the same window is a no-op.
+    private var credentialAutoSyncTask: Task<Void, Never>?
+    /// Timestamp of the last auto-sync attempt (success or
+    /// failure). Pairs with `credentialAutoSyncCooldown` to keep
+    /// a continuously-retrying engine from hammering the
+    /// subscription panel — once the sync runs and returns "no
+    /// drift," any further auth-failure stderr lines in the
+    /// cooldown window are accepted and dropped, not retried.
+    private var lastCredentialAutoSyncAt: ContinuousClock.Instant?
+    /// Lower bound between consecutive auto-sync attempts. 30 s
+    /// is long enough to let a transient panel hiccup self-heal,
+    /// short enough that a real credential rotation propagates
+    /// to the operator within one minute even if the first sync
+    /// races a panel restart.
+    private static let credentialAutoSyncCooldown: Duration = .seconds(30)
     private var lastTrafficSnapshot: TrafficSnapshotState?
     private var pendingLogEntries: [LogEntry] = []
     private var logFlushTask: Task<Void, Never>?
@@ -341,6 +362,8 @@ public final class TunnelOrchestrator {
         selfHealTask = nil
         vpsHealthTask?.cancel()
         vpsHealthTask = nil
+        credentialAutoSyncTask?.cancel()
+        credentialAutoSyncTask = nil
         flushPendingLogs()
         // Flush any pending debounced settings write before we go
         // away — without this, a settings edit made <250ms before
@@ -601,7 +624,14 @@ public final class TunnelOrchestrator {
             server: "\(primary.host):\(primary.port)",
             username: primary.username,
             password: primary.password,
-            localPort: selectedProfile?.localPort ?? "1080"
+            localPort: selectedProfile?.localPort ?? "1080",
+            // **Auto-sync foundation (post-v2.0.48):** remember
+            // the URL we just imported from so the auth-failure
+            // auto-sync flow can re-fetch transparently when the
+            // upstream rotates credentials. Stored on the
+            // profile, persisted via ProfileStore alongside the
+            // other fields.
+            subscriptionURL: trimmed
         )
         selectedProfile = imported
         // Username deliberately omitted — the in-memory log buffer
@@ -729,6 +759,12 @@ public final class TunnelOrchestrator {
         )
         selfHealTask?.cancel()
         selfHealTask = nil
+        // A mode switch supersedes any in-flight credential
+        // auto-sync — the auto-sync's captured `activeModeAtTrigger`
+        // would otherwise restart the engine in the previous mode
+        // a beat after the user picked the new one.
+        credentialAutoSyncTask?.cancel()
+        credentialAutoSyncTask = nil
         // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
         // rapid second click while a prior switchMode is
         // mid-flight (between stopQuiet and startCore) is a
@@ -1250,6 +1286,12 @@ public final class TunnelOrchestrator {
         selfHealTask = nil
         vpsHealthTask?.cancel()
         vpsHealthTask = nil
+        // User-initiated stop cancels any in-flight credential
+        // auto-sync — the operator wants the tunnel down, not a
+        // background restart that surprises them by re-spawning
+        // naive a half-second after they hit Stop.
+        credentialAutoSyncTask?.cancel()
+        credentialAutoSyncTask = nil
         // Guard against re-entry when we're already stopped. A
         // user spam-clicking the Stop button would otherwise loop
         // back through `disableAll()` (which iterates every active
@@ -1851,6 +1893,190 @@ public final class TunnelOrchestrator {
         }
     }
 
+    // MARK: - Credential auto-sync (HTTP-407 self-healing)
+
+    /// Detects HTTP-407-class auth failures in the engine's
+    /// stderr. NaiveProxy is built on Chromium's networking stack
+    /// and reports proxy-auth failures with `ERR_PROXY_AUTH_*` /
+    /// `ERR_TUNNEL_AUTH_*` chips, plus the raw `407` status if it
+    /// surfaces in any log line. The match is permissive on
+    /// purpose — a false positive turns into a no-op
+    /// `scheduleCredentialAutoSync` when the upstream credentials
+    /// are unchanged, but a false negative leaves the operator
+    /// stranded with a stale password.
+    ///
+    /// Pure / nonisolated so the function is testable from outside
+    /// the MainActor and so the hot stderr loop in `handle(event:)`
+    /// doesn't need to hop actors for the check.
+    nonisolated static func isProxyAuthFailureLine(_ line: String) -> Bool {
+        let upper = line.uppercased()
+        if upper.contains("ERR_PROXY_AUTH") { return true }
+        if upper.contains("ERR_TUNNEL_AUTH") { return true }
+        if upper.contains("407 PROXY AUTHENTICATION") { return true }
+        if upper.contains("PROXY AUTHENTICATION REQUIRED") { return true }
+        if upper.contains("AUTHENTICATION REQUIRED") { return true }
+        // Raw status-code match — surrounded by non-alphanumeric
+        // separators so a coincidental "407" inside a longer
+        // numeric run (port numbers, byte counts) doesn't fire.
+        // The separators include space, comma, period, colon,
+        // bracket, paren, slash, equals, quote, and end-of-line.
+        let separators: [Character] = [
+            " ", ",", ".", ":", ";", "[", "]", "(", ")", "{", "}",
+            "/", "=", "\"", "'", "\t", "\n", "\r",
+        ]
+        if let range = line.range(of: "407") {
+            let before: Character? =
+                range.lowerBound == line.startIndex
+                ? nil
+                : line[line.index(before: range.lowerBound)]
+            let after: Character? =
+                range.upperBound == line.endIndex
+                ? nil
+                : line[range.upperBound]
+            let leftOK = before.map { separators.contains($0) } ?? true
+            let rightOK = after.map { separators.contains($0) } ?? true
+            if leftOK && rightOK {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Auto-sync triggered by an auth-failure log line. Returns
+    /// early when there's nothing to do (no profile, no
+    /// subscription URL on the profile, or a sync already in
+    /// flight). Otherwise: fetches the subscription URL,
+    /// compares the returned credentials to the cached values,
+    /// and restarts the engine only when they actually differ.
+    ///
+    /// **Single-flight discipline.** A failed start can emit
+    /// many 407-shaped stderr lines in a few milliseconds; only
+    /// the first one schedules an actual sync. The
+    /// `credentialAutoSyncTask` property is the gate.
+    ///
+    /// **Fail-quiet on the "no drift" path.** If the upstream
+    /// returns the same credentials we already cached, the auth
+    /// failure was something else (subscription token revoked,
+    /// server-side basic_auth misconfiguration, etc.) — the sync
+    /// logs a one-line info note and falls through to the
+    /// existing error-classification path the user has always
+    /// seen.
+    ///
+    /// **Restart path.** When credentials do change, the engine
+    /// is stopped via `stopQuiet()` (the same path
+    /// `switchMode` uses for hot-swap) and started against the
+    /// previous mode. A start failure here surfaces through the
+    /// usual self-heal pipeline — auto-sync is best-effort,
+    /// not a hard guarantee.
+    private func scheduleCredentialAutoSync(reason: String) {
+        guard credentialAutoSyncTask == nil else { return }
+        guard let profile = selectedProfile else { return }
+        guard let url = profile.subscriptionURL,
+            !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return
+        }
+        // Cooldown — drop the request silently if we're inside
+        // the window of the previous attempt. The continuously-
+        // failing case (panel down + engine retrying) should
+        // hit the panel at most twice per minute, not 200 times
+        // per second.
+        if let last = lastCredentialAutoSyncAt,
+            ContinuousClock.now - last < Self.credentialAutoSyncCooldown
+        {
+            return
+        }
+        lastCredentialAutoSyncAt = ContinuousClock.now
+        let oldPassword = profile.password
+        let oldUsername = profile.username
+        let oldServer = profile.server
+        let activeModeAtTrigger = activeMode
+        appendInfo("credentials: \(reason) — auto-syncing from subscription URL")
+        recordTelemetry(
+            "credentials.auto_sync.begin",
+            details: ["reason": reason]
+        )
+        credentialAutoSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.credentialAutoSyncTask = nil }
+
+            do {
+                try await self.importFromSubscriptionURL(url)
+            } catch {
+                self.appendInfo(
+                    "credentials: auto-sync fetch failed — \(error.localizedDescription)"
+                )
+                self.recordTelemetry(
+                    "credentials.auto_sync.fetch_failed",
+                    details: ["error": error.localizedDescription]
+                )
+                // Don't recordError here — the existing
+                // error-classification path already produced a
+                // user-facing banner for the underlying auth
+                // failure. A second banner about a failed
+                // sync would be noise.
+                return
+            }
+
+            // **UX-F#3 race:** the `selectedProfile` setter
+            // raises a "Profile edits applied — click Stop,
+            // then a mode chip" banner whenever a running
+            // session's profile is mutated. The auto-sync IS
+            // about to do exactly that, so the banner is
+            // false-positive guidance — the user can't act on
+            // it any faster than we're already acting. Clear
+            // it here before the restart.
+            self.lastError = nil
+            self.lastErrorLayer = nil
+            self.activeProfileEdited = false
+
+            // After import, selectedProfile reflects the upstream's
+            // current credentials. If nothing changed, the auth
+            // failure was something other than credential drift.
+            let refreshed = self.selectedProfile
+            let changed =
+                refreshed?.password != oldPassword
+                || refreshed?.username != oldUsername
+                || refreshed?.server != oldServer
+            guard changed else {
+                self.appendInfo(
+                    "credentials: auto-sync — upstream returned identical credentials; not restarting"
+                )
+                self.recordTelemetry("credentials.auto_sync.no_drift")
+                return
+            }
+
+            self.appendInfo(
+                "credentials: auto-sync — credentials refreshed; restarting \(activeModeAtTrigger.title)"
+            )
+            self.recordTelemetry(
+                "credentials.auto_sync.restart",
+                details: ["mode": activeModeAtTrigger.rawValue]
+            )
+
+            // Quiet stop (no recovery banner, no system-proxy
+            // revert flicker) followed by a fresh start. If start
+            // fails, the engine's existing event-driven self-heal
+            // path takes over from there.
+            await self.stopQuiet()
+            do {
+                try await self.start(mode: activeModeAtTrigger)
+                self.appendInfo(
+                    "credentials: auto-sync — restarted with refreshed credentials"
+                )
+                self.recordTelemetry("credentials.auto_sync.success")
+            } catch {
+                self.appendInfo(
+                    "credentials: auto-sync — restart failed: \(error.localizedDescription)"
+                )
+                self.recordTelemetry(
+                    "credentials.auto_sync.restart_failed",
+                    details: ["error": error.localizedDescription]
+                )
+            }
+        }
+    }
+
     /// Returns true for failures that retrying `start(mode:)` will not
     /// recover. Used by `scheduleSelfHeal` to short-circuit the retry
     /// budget when the cause is unambiguously configuration / shape
@@ -1886,6 +2112,21 @@ public final class TunnelOrchestrator {
         switch event {
         case .logLine(let source, let line):
             appendLog(source: source, text: line)
+            // **Auto-sync hook (post-v2.0.48):** if the engine
+            // reports an HTTP-407-class auth failure in stderr,
+            // the active profile carries a `subscriptionURL`, and
+            // no sync is already in flight, fetch fresh
+            // credentials from the panel and restart the engine.
+            // The check is cheap (substring scan on each stderr
+            // line) and gated by `selectedProfile?.subscriptionURL`
+            // inside `scheduleCredentialAutoSync`, so profiles
+            // without a subscription URL never pay any cost
+            // beyond the substring test.
+            if source == .stderr,
+                Self.isProxyAuthFailureLine(line)
+            {
+                scheduleCredentialAutoSync(reason: "engine reported HTTP 407 / proxy auth failure")
+            }
         case .stateChanged(let running):
             // **UX-F#5 (v2.0.13):** during a hot-swap
             // (`switchMode`) the engine emits stateChanged(false)
