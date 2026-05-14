@@ -9,6 +9,65 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.46] — 2026-05-14 — Test Fixture Convention: Alice / Bob
+
+> **Adopt the canonical Alice / Bob crypto-test convention for the
+> sample username threaded through 8 Rust + Swift test files.
+> Replaces 36 occurrences of `"alice"` and two compound forms
+> (`"alice_bob"`, `"alice-bob"`) with the canonical placeholders.
+> Pure test-fixture cleanup — no production behaviour change,
+> no observable user-facing difference.**
+
+### Refactored — test-fixture username convention (#72)
+
+The repo is the public face of `coolwhite LLC` (publicly attributed
+since v2.0.26 / Cool Tunnel Server v0.0.63). Test fixtures using
+a name-shaped username were a low-grade correlation surface that
+no canonical-test value pays for. Aligning with `alice` / `alice_bob`
+/ `alice-bob` removes the ambiguity in one sweep.
+
+| Before | After | Test |
+|---|---|---|
+| `"alice"` | `"alice"` | every `Username::parse(...)` / `username` JSON fixture |
+| `"Alice123"` | `"Alice123"` | case-preservation test |
+| `"alice@bad"` | `"alice@bad"` | parse-rejection (`@`) |
+| `"alice:bad"` | `"alice:bad"` | parse-rejection (`:`) |
+| `"alice bad"` | `"alice bad"` | parse-rejection (space) |
+| `"alice.bad"` | `"alice.bad"` | parse-rejection (`.`) |
+| `"alice_bob"` | `"alice_bob"` | underscore-allowed in username |
+| `"alice-bob"` | `"alice-bob"` | hyphen-allowed in username |
+| `alice:hunter2` (in URLs) | `alice:hunter2` | redaction tests against socks/https URLs |
+
+Two expected-output URL strings (in `protocol_roundtrip.rs` +
+`naive_config.rs`) and one prose comment in `ProfileStore.swift`
+also moved to `alice` so assertions and surrounding text stay
+consistent.
+
+Redaction-test assertions of the shape
+`assert!(!out.contains("alice"), ...)` become
+`assert!(!out.contains("alice"), ...)`. The intent — verify the
+seed username does not pass through `redact()` — is unchanged;
+the assertion is exactly as strict against `alice` as it was
+against `alice`.
+
+### Checks
+
+- 173/173 Rust tests pass (142 + 4 + 18 + 7 + 2 across all crates).
+- 118/118 Swift tests pass.
+- GitHub Actions CI on the source PR — 6/6 jobs green (Rust, Swift
+  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy pin
+  verification, `try?` ratchet).
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
+### Audit posture after v2.0.46
+
+Net diff: ±47 lines (one-for-one replacements; no inserted or
+deleted test cases). No production-code change. No new tests
+added — the scrub preserves every existing test and assertion
+under a different seed value.
+
 ## [2.0.45] — 2026-05-14 — UI Compact + Layout-Stable Pass
 
 > **Focused UI audit: seven state-driven layout-shift bugs fixed
