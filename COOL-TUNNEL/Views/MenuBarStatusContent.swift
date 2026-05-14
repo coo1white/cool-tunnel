@@ -125,16 +125,19 @@ struct MenuBarStatusContent: View {
         Button {
             send(.switchMode(mode))
         } label: {
-            // Leading checkmark mirrors the AirPort menu's
-            // "✓ network-name" pattern — system users read it
-            // without thinking. SwiftUI `Label` + `.titleAndIcon`
-            // keeps the icon column aligned with un-checked rows
-            // (where we render plain `Text`) so labels don't
-            // jitter sideways when state changes.
-            if isActive {
-                Label(label, systemImage: "checkmark")
-            } else {
+            // Always render a `Label` so the checkmark column is
+            // permanently reserved; the inactive variant uses a
+            // zero-opacity glyph that still claims layout, so the
+            // mode-name text stays at the same x-coordinate
+            // whether the row is active or not. Pre-refactor the
+            // active branch returned `Label` and the inactive
+            // branch returned plain `Text`, which kicked the
+            // label sideways every time a mode changed.
+            Label {
                 Text(label)
+            } icon: {
+                Image(systemName: "checkmark")
+                    .opacity(isActive ? 1 : 0)
             }
         }
         .disabled(!state.isRunning && !state.selectedProfileCanRequestStart)
