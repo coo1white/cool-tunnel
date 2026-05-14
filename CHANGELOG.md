@@ -13,42 +13,38 @@ line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
 > **Adopt the canonical Alice / Bob crypto-test convention for the
 > sample username threaded through 8 Rust + Swift test files.
-> Replaces 36 occurrences of `"alice"` and two compound forms
-> (`"alice_bob"`, `"alice-bob"`) with the canonical placeholders.
 > Pure test-fixture cleanup — no production behaviour change,
 > no observable user-facing difference.**
 
 ### Refactored — test-fixture username convention (#72)
 
 The repo is the public face of `coolwhite LLC` (publicly attributed
-since v2.0.26 / Cool Tunnel Server v0.0.63). Test fixtures using
-a name-shaped username were a low-grade correlation surface that
-no canonical-test value pays for. Aligning with `alice` / `alice_bob`
-/ `alice-bob` removes the ambiguity in one sweep.
+since v2.0.26 / Cool Tunnel Server v0.0.63). The prior placeholder
+username was a name-shaped string with no canonical-test value;
+aligning with `alice` / `alice_bob` / `alice-bob` removes that in
+one sweep across the suites that previously embedded it.
 
-| Before | After | Test |
-|---|---|---|
-| `"alice"` | `"alice"` | every `Username::parse(...)` / `username` JSON fixture |
-| `"Alice123"` | `"Alice123"` | case-preservation test |
-| `"alice@bad"` | `"alice@bad"` | parse-rejection (`@`) |
-| `"alice:bad"` | `"alice:bad"` | parse-rejection (`:`) |
-| `"alice bad"` | `"alice bad"` | parse-rejection (space) |
-| `"alice.bad"` | `"alice.bad"` | parse-rejection (`.`) |
-| `"alice_bob"` | `"alice_bob"` | underscore-allowed in username |
-| `"alice-bob"` | `"alice-bob"` | hyphen-allowed in username |
-| `alice:hunter2` (in URLs) | `alice:hunter2` | redaction tests against socks/https URLs |
+| Fixture (post-refactor) | Test |
+|---|---|
+| `"alice"` | every `Username::parse(...)` / `username` JSON fixture |
+| `"Alice123"` | case-preservation test |
+| `"alice@bad"` | parse-rejection (`@`) |
+| `"alice:bad"` | parse-rejection (`:`) |
+| `"alice bad"` | parse-rejection (space) |
+| `"alice.bad"` | parse-rejection (`.`) |
+| `"alice_bob"` | underscore-allowed in username |
+| `"alice-bob"` | hyphen-allowed in username |
+| `alice:hunter2` (in URLs) | redaction tests against socks/https URLs |
 
 Two expected-output URL strings (in `protocol_roundtrip.rs` +
 `naive_config.rs`) and one prose comment in `ProfileStore.swift`
-also moved to `alice` so assertions and surrounding text stay
-consistent.
+also move to the new convention so assertions and surrounding
+text stay consistent.
 
-Redaction-test assertions of the shape
-`assert!(!out.contains("alice"), ...)` become
-`assert!(!out.contains("alice"), ...)`. The intent — verify the
+Redaction-test assertions of the shape `!out.contains(<seed>)`
+update in lockstep with the seed change. The intent — verify the
 seed username does not pass through `redact()` — is unchanged;
-the assertion is exactly as strict against `alice` as it was
-against `alice`.
+the assertion is exactly as strict against the new fixture.
 
 ### Checks
 

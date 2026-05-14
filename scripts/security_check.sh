@@ -159,12 +159,12 @@ heading "6. Source-level secret scan"
 # git directory, and the dist/ output so a previous build never trips
 # the check.
 # Specific historical leak — early dev scripts shipped a real password
-# before v0.1.5.3. Build the pattern from concatenated halves so this
-# script's source never contains the literal in one piece (otherwise
-# the scan would self-match every run).
-HISTORICAL_LEAK_HALF1='***REDACTED***'
-HISTORICAL_LEAK_HALF2='***REDACTED***'
-HISTORICAL_LEAK_PATTERN="${HISTORICAL_LEAK_HALF1}${HISTORICAL_LEAK_HALF2}"
+# before v0.1.5.3. The pattern is base64-encoded so this script's
+# source never contains any plaintext fragment of the leak (a
+# previous shape stored two halves verbatim; even a half-fragment
+# left an OPSEC trace). Decoded at runtime; the resulting regex
+# pattern is identical to the prior shape.
+HISTORICAL_LEAK_PATTERN="$(printf '%s' 'MTk5OTA1MTVXcnk=' | base64 -d)"
 
 SECRET_PATTERNS=(
     'AKIA[0-9A-Z]{16}'              # AWS access key id
