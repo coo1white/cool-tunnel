@@ -671,8 +671,16 @@ final class AppUpdater {
         // Manifest lines look like:
         //   `<sha256>  Cool-tunnel-v0.1.7.6.zip`
         // Two-space separator (BSD/Linux `shasum` default).
+        //
+        // `\.isNewline` rather than an explicit `$0 == "\n" || $0 == "\r"`
+        // because Swift represents the CRLF byte pair as a SINGLE extended
+        // grapheme cluster — the previous predicate compared `Character`
+        // to single-codepoint literals and never matched CRLF, so a
+        // manifest with Windows line endings parsed as one giant line and
+        // the SHA lookup silently failed. Mirrors the same fix landed on
+        // `SHAVerifier.expectedHash`.
         var expectedSha: String?
-        for line in manifest.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+        for line in manifest.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
             guard parts.count >= 2 else { continue }
             let name = String(parts.last ?? "")
