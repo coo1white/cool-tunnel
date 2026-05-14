@@ -203,21 +203,29 @@ public struct LogConsoleView: View {
                 .frame(width: 130)
                 .autocorrectionDisabled()
                 .accessibilityLabel("Filter log entries")
-            if !filter.isEmpty {
-                Button {
-                    filter = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Clear filter")
-                .accessibilityLabel("Clear filter")
+            // Reserve the clear-button column unconditionally. The
+            // previous shape only rendered the X when `!filter.isEmpty`,
+            // so the capsule grew the moment the user typed one
+            // character and the count + ⋯ menu to its right jumped
+            // sideways. A transparent placeholder of identical
+            // metrics keeps the layout stable.
+            Button {
+                filter = ""
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .opacity(filter.isEmpty ? 0 : 1)
+            .allowsHitTesting(!filter.isEmpty)
+            .help("Clear filter")
+            .accessibilityLabel("Clear filter")
+            .accessibilityHidden(filter.isEmpty)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
+        .frame(height: 22)
         .background(.regularMaterial, in: .capsule)
         .overlay {
             Capsule().strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)

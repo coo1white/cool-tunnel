@@ -135,12 +135,22 @@ public struct ConnectionFormView: View {
                 Button {
                     Task { await runImport() }
                 } label: {
-                    if isImporting {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .scaleEffect(0.8)
-                    } else {
+                    // ZStack overlays the spinner on top of an
+                    // always-rendered (but hidden-when-busy) Text
+                    // so the button keeps its "Import" intrinsic
+                    // width across the idle / importing toggle.
+                    // Previously the spinner was narrower than
+                    // the label, so the Subscription row visibly
+                    // reflowed every time an import started.
+                    ZStack {
                         Text("Import")
+                            .opacity(isImporting ? 0 : 1)
+                        if isImporting {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(0.6)
+                                .accessibilityLabel("Importing subscription")
+                        }
                     }
                 }
                 .disabled(

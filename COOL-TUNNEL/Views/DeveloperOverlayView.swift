@@ -93,12 +93,22 @@ public struct DeveloperOverlayView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(9)
-        .frame(width: 178, height: 86, alignment: .topLeading)
+        // `width` is fixed so the four tiles align as a strict
+        // column row; height is `minHeight` so an unusually long
+        // status string (`metrics.vps.status` after a probe error,
+        // for instance) grows the tile instead of being clipped
+        // by the previous rigid `height: 86`. All four tiles in a
+        // row visually equalise to the tallest because the HStack
+        // resolves their heights together.
+        .frame(width: 178, alignment: .topLeading)
+        .frame(minHeight: 86, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor), in: .rect(cornerRadius: 6))
         .overlay {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value). \(detail)")
     }
 
     private var sampleText: String {
