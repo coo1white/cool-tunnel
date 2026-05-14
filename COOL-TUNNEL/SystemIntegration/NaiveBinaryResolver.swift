@@ -193,32 +193,18 @@ public struct NaiveBinaryResolver: Sendable {
     /// Parses `lipo -info <path>` output into a set of arch names.
     /// Tolerant of both `Non-fat file: … is architecture: arm64` and
     /// `Architectures in the fat file: … are: x86_64 arm64`.
+    /// Spawns `lipo -info <path>` and delegates output parsing to
+    /// `LipoOutputParser`. The split lets the parser stay
+    /// unit-testable without subprocess spawning; both resolvers
+    /// (Naive and RustCore) share the parser so the
+    /// known-arch allow-list lives in one place.
     private static func runLipoInfo(at url: URL) async -> Set<String> {
         let result = await runProcess(
             executable: URL(fileURLWithPath: "/usr/bin/lipo"),
             arguments: ["-info", url.path]
         )
-        guard let output = result, !output.isEmpty else { return [] }
-
-        // `lipo -info` puts the arch list after the last colon on the
-        // line. Splitting on ":" and trimming gives us "arm64 x86_64"
-        // for fat files and "arm64" for thin ones.
-        guard
-            let tail =
-                output
-                .components(separatedBy: ":")
-                .last?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        else { return [] }
-
-        let tokens =
-            tail
-            .split(whereSeparator: { $0.isWhitespace })
-            .map(String.init)
-        // Filter to the slice names we know about. This protects the UI
-        // from printing junk if a future `lipo` adds extra annotations.
-        let known: Set<String> = ["arm64", "arm64e", "x86_64", "i386"]
-        return Set(tokens.filter { known.contains($0) })
+        guard let output = result else { return [] }
+        return LipoOutputParser.parse(output)
     }
 
     /// Runs the candidate with `--version` and returns the first line
