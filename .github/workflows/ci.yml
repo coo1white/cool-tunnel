@@ -11,7 +11,8 @@
 #   - swift-tests: xcodebuild test against the COOL-TUNNEL scheme.
 #                  Exercises the COOL-TUNNELTests target (regression
 #                  coverage for H2/H3/M1 and future Swift unit tests).
-#   - shellcheck:  every script under scripts/
+#   - shellcheck:  every script under scripts/ + the brew-style
+#                  bin/ct maintenance wrapper
 #   - naive-pin:   bundled NaiveProxy binary matches naive.upstream.json
 #                  (no network — just a SHA-256 compare; supply-chain
 #                  audit against the moving upstream tag is the
@@ -210,8 +211,8 @@ jobs:
           persist-credentials: false
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: shellcheck scripts/*.sh
-        run: shellcheck scripts/*.sh
+      - name: shellcheck scripts/*.sh bin/ct
+        run: shellcheck scripts/*.sh bin/ct
 
   naive-pin:
     name: NaiveProxy pin verification

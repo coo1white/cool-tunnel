@@ -358,16 +358,25 @@ You'll need Xcode (with Swift 6 and the macOS 14 SDK), the Rust toolchain pinned
 ```bash
 git clone https://github.com/coo1white/cool-tunnel.git
 cd cool-tunnel
-bash scripts/preflight.sh        # runs every CI gate locally
+bin/ct doctor                   # is my checkout healthy? (preflight + audit + ratchet)
+```
+
+`bin/ct` is a brew-style single-entry-point CLI over the build / release / audit scripts. Add `bin/` to your `$PATH` if you want `ct …` instead of `bin/ct …`. Discover everything with:
+
+```bash
+bin/ct commands         # full list
+bin/ct help <command>   # full usage for one verb
 ```
 
 For a release build (substitute the next version — pre-flight rejects any value that doesn't match `core/Cargo.toml` and `MARKETING_VERSION`):
 
 ```bash
-bash scripts/cut_release.sh 2.0.47
+bin/ct release 2.0.52
 ```
 
-The script verifies version sync, refreshes the bundled NaiveProxy binary, runs the strict audit suite, rebuilds Rust and Swift, runs `security_check.sh`, and packages `.dmg`, `.pkg`, `.zip`, the universal core binary, and the SHA-256 manifest.
+The release pipeline verifies version sync, refreshes the bundled NaiveProxy binary, runs the strict audit suite, rebuilds Rust and Swift, runs `ct security`, and packages `.dmg`, `.pkg`, `.zip`, the universal core binary, and the SHA-256 manifest.
+
+> Every `ct …` subcommand is a thin wrapper over a `scripts/*.sh` file. Running `bash scripts/preflight.sh` etc. directly still works — `bin/ct` is the discoverable surface, not a replacement.
 
 ---
 
@@ -442,7 +451,7 @@ Operators don't normally touch the pin. Maintainers who want to roll it intentio
 
 ```bash
 git pull origin main
-CT_REPIN_CONFIRM=1 bash scripts/fetch_naive.sh --repin v148.0.7778.96-7
+CT_REPIN_CONFIRM=1 bin/ct naive --repin v148.0.7778.96-7
 # Inspect the printed OLD → NEW diff.
 git add COOL-TUNNEL/naive COOL-TUNNEL/naive.upstream.json
 git commit -m "chore(naive): repin to v148.0.7778.96-7"
@@ -487,8 +496,8 @@ Misclassification is a product defect — pointing the operator at the wrong lay
 The release gate is a command, not a checklist in someone's memory:
 
 ```bash
-bash scripts/preflight.sh
-bash scripts/cut_release.sh 2.0.47
+bin/ct preflight
+bin/ct release 2.0.52
 ```
 
 If you can't run those locally, you can't ship a release.
