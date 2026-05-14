@@ -9,6 +9,108 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.44] — 2026-05-14 — SHA Manifest CRLF Fix + LipoOutputParser Extraction
+
+> **Real-bug fix: the in-app updater's SHA-256 manifest parser
+> silently failed to verify against CRLF-formatted manifests
+> because Swift represents `\r\n` as a single extended grapheme
+> cluster. Two production sites affected (`SHAVerifier.expectedHash`
+> and `AppUpdater.verifyZipAgainstManifest`); both fixed. Plus a
+> focused refactor extracting duplicated `lipo -info` parsing,
+> with 38 new regression tests across both. Suite 80 → 118.**
+
+### Fixed — CRLF manifest silent parse failure (#70)
+
+`SHAVerifier.expectedHash` and `AppUpdater.verifyZipAgainstManifest`
+both used:
+
+  for line in manifest.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+
+Swift's `Character` type merges the CRLF byte pair into a single
+extended grapheme cluster, and that cluster equals neither
+single-codepoint literal. So a CRLF-formatted manifest round-
+tripped as one giant line, the asset-name match never fired, and
+the function returned `nil` — surfacing in the UI as "Refusing
+to install — checksum failed" even when the bytes matched.
+
+Production-impact bound: macOS / Linux `shasum -a 256` emits LF,
+so the canonical release-cutter path was never affected by this
+release. The bug bites if an operator hand-edits a manifest on
+Windows, round-trips a manifest through a tool that rewrites
+line endings, or generates a manifest on an unusual host.
+Defensive parsing is what we want either way — fail-closed is
+fine, fail-silently is not.
+
+Fix is one character per site: `whereSeparator: \.isNewline`.
+`Character.isNewline` is true for both LF and the CRLF grapheme,
+so the splitter sees the right separators in both cases. Inline
+comment at each site explains the gotcha so a future maintainer
+doesn't re-introduce it.
+
+Caught by `SHAVerifierTests.testHandlesCrlfLineEndings`, which
+failed on first run and led directly to the fix.
+
+### Refactored — `LipoOutputParser` extracted (#69)
+
+`NaiveBinaryResolver.runLipoInfo` and `RustCoreResolver.runLipoInfo`
+each carried a near-verbatim copy of the same colon-split +
+tokenize + known-arch filter logic. Extracted the pure parsing
+step to `COOL-TUNNEL/SystemIntegration/LipoOutputParser.swift`.
+Both resolvers now delegate. The subprocess invocation stays
+in each resolver; only the string-to-set parsing moved.
+Behaviour is byte-equivalent — the known-arch allow-list now
+lives in one place rather than two.
+
+### Added — regression tests (38 new across three files)
+
+- `SHAVerifierTests.swift` (12) — known-vector SHA-256
+  (empty / "abc" / multi-chunk), missing-file throw, manifest
+  parser happy-path + corruption defenses (short hash, non-hex,
+  case normalisation, duplicate-asset first-match-wins, CRLF
+  parsing, empty manifest, missing manifest throw).
+
+- `ProxyActiveFlagTests.swift` (12) — sentinel lifecycle:
+  existence-check on fresh dir / after write / after clear,
+  `clear` idempotency on missing-file + double-clear, payload
+  round-trip across every documented mode (Smart / Global /
+  Local), atomic overwrite of existing sentinel, defensive
+  read paths (missing → nil, corrupt JSON → nil, wrong-schema
+  → nil).
+
+- `LipoOutputParserTests.swift` (14) — thin-file shapes (arm64
+  / x86_64 / arm64e / i386), fat-file shape + order-
+  independence, defensive cases (empty / whitespace / colonless
+  / multi-line / unknown-arch annotations), allow-list exact-
+  match invariant.
+
+Suite: 80 → 118.
+
+### Verified
+
+- 118/118 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
+- `bash scripts/audit.sh --strict` — `audit: PASS` across every
+  section.
+- `xcrun swift-format lint -r --strict` clean across app + tests.
+- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
+- GitHub Actions CI on `main` — 6/6 jobs green.
+- Release cutter passed every audit gate.
+
+### Audit posture after v2.0.44
+
+Every previously-flagged "remaining risk" from the v2.0.38 →
+v2.0.43 sprint is now either closed or genuinely needs
+scaffolding refactor that the project's "Do not rewrite large
+modules just for style" discipline rules out: `Subprocess.swift`
+SIGTERM/SIGKILL ladder, `CodeSignVerifier`, `FirewallProbe`.
+None are trust gates; all are bounded by existing CI gates.
+
+The CRLF bug is the legitimate find of this audit pass — caught
+by a new test against a previously-untested surface, fixed at
+both sites it appeared, regression-tested. The refactor + test
+deltas in v2.0.44 are pure infrastructure; runtime behaviour is
+byte-equivalent to v2.0.43 EXCEPT for the CRLF parse path,
+which now produces correct results instead of silent `nil`.
+
 ## [2.0.43] — 2026-05-14 — README: First Deployment Walkthrough + Maintenance Chapter
 
 > **README answers two questions it didn't: "how do I deploy this
