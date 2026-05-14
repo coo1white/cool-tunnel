@@ -1660,9 +1660,24 @@ public final class TunnelOrchestrator {
                 appendLog(source: .stderr, text: "[debug handshake error] \(error)")
             }
             let total = Self.formatElapsed(since: started)
+            // **Redaction (post-v2.0.45):** the `server` and `target`
+            // bare-hostname strings (e.g. `"cookie.coolwhite.space:443"`,
+            // `"www.google.com:443"`) do not match any pattern in
+            // `LifecycleTelemetryLogger.redact` — the rule set only
+            // catches `scheme://userinfo@host`, auth headers, cookies,
+            // and JSON credential pairs. Emitting them verbatim leaked
+            // the operator's server hostname into the 0600-mode
+            // telemetry file on every Debug Handshake click. Both
+            // values are already visible in the user's live log
+            // surface and exported on demand through the log
+            // console's Copy / Save / Share path, so dropping them
+            // from auto-persisted telemetry loses nothing the
+            // operator can't recover. Regression-tested by
+            // `LifecycleTelemetryRedactionTests
+            // .testDebugHandshakeDetailsCarryNoServerHostname`.
             recordTelemetry(
                 report.ok ? "debug_handshake.success" : "debug_handshake.failure",
-                details: ["elapsed": total, "server": report.server, "target": report.target]
+                details: ["elapsed": total]
             )
         } catch {
             recordError("debug handshake failed: \(error)", layer: .localKernel)
