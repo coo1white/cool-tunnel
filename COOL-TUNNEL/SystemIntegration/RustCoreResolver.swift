@@ -180,25 +180,17 @@ public struct RustCoreResolver: Sendable {
 
     // MARK: - Subprocess helpers (same shape as NaiveBinaryResolver)
 
+    /// Spawns `lipo -info <path>` and delegates output parsing to
+    /// `LipoOutputParser`. Pair to `NaiveBinaryResolver.runLipoInfo`;
+    /// both resolvers share the parser via `LipoOutputParser` so the
+    /// known-arch allow-list lives in one place.
     private static func runLipoInfo(at url: URL) async -> Set<String> {
         let result = await runProcess(
             executable: URL(fileURLWithPath: "/usr/bin/lipo"),
             arguments: ["-info", url.path]
         )
-        guard let output = result, !output.isEmpty else { return [] }
-        guard
-            let tail =
-                output
-                .components(separatedBy: ":")
-                .last?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        else { return [] }
-        let tokens =
-            tail
-            .split(whereSeparator: { $0.isWhitespace })
-            .map(String.init)
-        let known: Set<String> = ["arm64", "arm64e", "x86_64", "i386"]
-        return Set(tokens.filter { known.contains($0) })
+        guard let output = result else { return [] }
+        return LipoOutputParser.parse(output)
     }
 
     /// Invokes the binary with `--version` and accepts only output
