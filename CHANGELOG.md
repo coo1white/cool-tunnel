@@ -9,6 +9,82 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.48] — 2026-05-14 — Beginner-Friendly README Rewrite
+
+> **Restructures `README.md` to lead with the first-time reader's
+> path without dropping any operator-facing truth. Adds two new
+> audience-targeted chapters (Quick Start, Reading this code),
+> softens the heaviest industrial section headers, and reorders
+> content beginner → operator → maintainer. Documentation-only.
+> No production-code change.**
+
+### Documented — beginner + code-learner onboarding (#74)
+
+The pre-rewrite README opened with `Repository Metadata` and
+`Operating Posture` — both correct and useful, but the wrong
+first chapter for someone who has never run the app. The rewrite
+leads with **What is Cool Tunnel?** (plain-English intro, use
+and don't-use cases, three differentiators), then **Quick Start
+(5 minutes)** for someone with a server already, then **How does
+it work? (Plain-English version)** with an ASCII diagram and a
+"why three languages" table.
+
+The Mermaid architecture diagram and the boundary-contract table
+move to **Architecture details (for the curious)** further down,
+so the curious reader can drill in without crowding the first-
+time path.
+
+### Documented — `Reading this code` chapter (#74)
+
+A new chapter targets the secondary audience the brief named:
+"noob coders and new code learners." It walks 7 actual source
+files in recommended reading order (`ContentView.swift` →
+`UIComponents.swift` → `CoolTunnelState.swift` →
+`TunnelOrchestrator.swift` → `core/src/main.rs` →
+`core/src/protocol.rs` → `scripts/cut_release.sh`) and includes a
+patterns-to-file-paths table mapping 8 idioms (Swift 6 strict
+concurrency, schema-driven UI, process supervision, JSON-over-
+stdio RPC, credential redaction, atomic file writes, defensive
+shell, code organization) to specific files. A curious reader can
+navigate the source without guessing.
+
+### Operational truth preserved verbatim
+
+- One-shell-block VPS install command — byte-identical
+- All 4 `curl` server-verification probes — unchanged
+- Mermaid architecture diagram — unchanged (moved later)
+- 3-error-layer classification table — unchanged
+- Common-failure table — unchanged
+- Uninstall sequence — unchanged
+- Credential rotation procedure — unchanged
+- `naive`-pin rolling procedure — unchanged
+- Sleep/wake + error-classification + release-reproducibility
+  quality-bar tables — unchanged
+- Every cross-link to sibling files (CHANGELOG, SUPPORT,
+  CONTRIBUTING, SECURITY, SECURITY-WEB3, Disclaimer, NOTICE,
+  NaiveProxy_Server_Setup) — preserved
+
+### Removed (deliberate)
+
+The `Repository Metadata` section (GitHub-topic keyword salad +
+redacted description copy-paste) is dropped. It served the
+GitHub repo configuration surface, not a reader of the project;
+the description field and topics on the GitHub repo page are the
+right home for those values.
+
+### Checks
+
+- README rendering: well-formed Markdown, every in-page `#anchor`
+  link resolves to a heading this commit defines.
+- Cross-file links: every linked sibling file exists at HEAD.
+- GitHub Actions CI on PR #74 — 6/6 jobs green.
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
+Net diff: +37 lines (521 → 558). No production-code change.
+No new tests.
+
 ## [2.0.47] — 2026-05-14 — Telemetry Hostname Redaction
 
 > **Closes a redaction gap in the on-disk lifecycle telemetry file.
