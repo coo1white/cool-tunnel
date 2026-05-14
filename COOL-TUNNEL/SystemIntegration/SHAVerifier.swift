@@ -51,7 +51,15 @@ public enum SHAVerifier {
         for assetName: String, in manifestURL: URL
     ) throws -> String? {
         let manifest = try String(contentsOf: manifestURL, encoding: .utf8)
-        for line in manifest.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+        // `\.isNewline` rather than an explicit `$0 == "\n" || $0 == "\r"`
+        // because Swift represents the CRLF byte pair as a SINGLE extended
+        // grapheme cluster. The previous predicate compared `Character` to
+        // single-codepoint literals and never matched the CRLF grapheme,
+        // so CRLF manifests round-tripped as one giant line and the
+        // asset-name match never fired. `Character.isNewline` is true for
+        // both LF and the CRLF grapheme, so the splitter sees the right
+        // separators in both cases. Caught by `SHAVerifierTests.testHandlesCrlfLineEndings`.
+        for line in manifest.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
             guard parts.count >= 2 else { continue }
             let name = String(parts.last ?? "")
