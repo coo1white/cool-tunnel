@@ -9,6 +9,86 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.50] — 2026-05-14 — Remove Ruby; Tests Target → fileSystemSynchronizedGroups
+
+> **Drops Ruby from the project toolchain. The single Ruby file
+> — `scripts/add_test_target.rb` — existed solely to register
+> new test source files into the `COOL-TUNNELTests` target's
+> explicit pbxproj entries. The tests target now uses Xcode 16's
+> native `fileSystemSynchronizedGroups` (same pattern the app
+> target has used since the project upgrade), so new test files
+> in `COOL-TUNNELTests/` auto-pick-up on the next `xcodebuild`
+> with no script invocation, no pbxproj edit, no `gem install`.
+> The project toolchain is now Swift + Rust + POSIX shell only.**
+
+### Changed — tests target adopts fileSystemSynchronizedGroups (#76)
+
+The main `COOL-TUNNEL` app target has tracked source files via
+`fileSystemSynchronizedGroups` since the Xcode 16 project upgrade
+— every Swift file under `COOL-TUNNEL/` is auto-picked-up. The
+`COOL-TUNNELTests` target was the lone holdout still using
+explicit `PBXBuildFile` + `PBXFileReference` + `PBXGroup` entries
+per test file, which is why every new test required a
+`ruby scripts/add_test_target.rb` invocation (and a
+`gem install --user-install xcodeproj` prerequisite, plus a
+`LANG=en_US.UTF-8` workaround for the gem's plist parser).
+
+This release applies the same auto-sync pattern to the tests
+target. Effect on a contributor's workflow:
+
+  Before: 1. Drop the *.swift file into COOL-TUNNELTests/
+          2. ruby scripts/add_test_target.rb
+                (after gem install --user-install xcodeproj)
+
+  After:  1. Drop the *.swift file into COOL-TUNNELTests/.
+                That's the entire step.
+
+### Removed — scripts/add_test_target.rb (132 lines)
+
+The script's only purpose was to maintain the explicit pbxproj
+entries that the synchronized-group mechanism makes obsolete.
+Project-file changes:
+
+  Removed (24 entries):
+    - 11 PBXBuildFile entries (one per *.swift in the test
+      target's Sources build phase)
+    - 11 PBXFileReference entries (the same 11 files)
+    - 1 PBXGroup "COOL-TUNNELTests" wrapping those references
+    - 1 Sources-build-phase files list (was the 11 entries)
+
+  Added (2 entries):
+    - 1 PBXFileSystemSynchronizedRootGroup for "COOL-TUNNELTests"
+      pointing at the on-disk COOL-TUNNELTests/ directory
+    - 1 fileSystemSynchronizedGroups = (...) row on the
+      COOL-TUNNELTests PBXNativeTarget, identical in shape to
+      the existing row on the COOL-TUNNEL target
+
+  Net pbxproj diff: -47 lines.
+
+### Checks
+
+- 133/133 Swift tests pass (unchanged — the synced group picked
+  up every existing test file automatically; the previously-
+  explicit 11 entries are now resolved on disk).
+- 173/173 Rust tests pass.
+- GitHub Actions CI on PR #76 — 6/6 jobs green.
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+- `find . -name '*.rb' -not -path './target/*' -not -path
+  './.git/*'` -> zero hits.
+
+### Architecture note
+
+The language ratio question (whether the project should target
+a balanced Swift/Rust/Shell mix) was evaluated alongside this
+change. Conclusion: the existing boundary — Swift owns
+lifecycle, Rust owns the supervisor, Shell owns deployment — is
+sound. Moving more code across the boundary for cosmetic
+balance would be churn without safety value. The bar reads what
+the architecture actually is; the architecture is what we
+designed for.
+
 ## [2.0.49] — 2026-05-14 — HTTP-407 Credential Auto-Sync
 
 > **Closes the Mac-side counterpart to cool-tunnel-server's
