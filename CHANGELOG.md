@@ -9,6 +9,123 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.45] — 2026-05-14 — UI Compact + Layout-Stable Pass
+
+> **Focused UI audit: seven state-driven layout-shift bugs fixed
+> and two duplicated structures consolidated across the SwiftUI
+> surface. All fixes share one technique — reserve the column /
+> frame / glyph slot unconditionally so changing state never
+> reflows neighbouring controls. Three small shared components
+> absorb the duplication. No production behaviour change.**
+
+### Fixed — toolbar reflows on Start ↔ Stop (#71)
+
+`ControlPanelView.primaryButton` toggled between "Start" and
+"Stop" labels with different glyphs (`play.fill` vs `stop.fill`),
+both rendering at different widths. The five secondary icon
+buttons to the right shifted a few pixels every time the proxy
+started or stopped. Fixed by widening `minWidth` 60 → 72 so the
+button keeps its widest natural width across both states.
+
+### Fixed — uneven icon-button row (#71)
+
+The five secondary buttons (Diagnostics / Debug Handshake /
+Latency / Developer / Settings) carried SF Symbols with very
+different intrinsic widths (`stethoscope`,
+`network.badge.shield.half.filled`, `speedometer`,
+`waveform.path.ecg`, `gear`). Default `.bordered` sizes to glyph,
+producing five visibly-different cells. New `IconBarButton`
+wrapper pins every secondary to 30×22 pt with a 16×16 inner
+image frame; the row now reads as a uniform cluster.
+
+### Fixed — Import button collapses to spinner width (#71)
+
+`ConnectionFormView`'s Subscription Import button rendered
+`Text("Import")` when idle and `ProgressView()` (much narrower)
+while importing. The whole row reflowed every time an import
+started. Replaced with a ZStack overlaying the spinner on a
+hidden-opacity but always-rendered "Import" label, so the
+button keeps its intrinsic width across the toggle.
+
+### Fixed — Developer Overlay tiles clip long status (#71)
+
+`DeveloperOverlayView` metric tiles used rigid
+`frame(width: 178, height: 86)`. Long VPS status strings
+(e.g. probe-error messages) were clipped by the fixed parent
+height even though the inner detail row had `lineLimit(2)` +
+`fixedSize(vertical)`. Split into separate width and `minHeight`
+frames so unusually long detail strings grow the tile; the
+HStack equalises all four tiles to the tallest. Added
+`accessibilityElement(.combine)` per tile so VoiceOver hears
+one cohesive utterance per metric instead of three.
+
+### Fixed — log filter capsule grows on first keystroke (#71)
+
+`LogConsoleView.filterField` only rendered the clear-X button
+when `!filter.isEmpty`. The capsule grew the moment the user
+typed one character, kicking the count and ⋯ menu sideways.
+The X is now always present at zero opacity when idle,
+hit-testing disabled, so the column is reserved
+unconditionally. Pinned the capsule to `frame(height: 22)` so
+caret rendering inside the TextField doesn't perturb the row
+height.
+
+### Fixed — menu-bar mode rows drift sideways on activate (#71)
+
+`MenuBarStatusContent` rendered the active row with
+`Label(label, systemImage: "checkmark")` and the inactive row
+with bare `Text(label)`. The icon column appeared and
+disappeared per row, shifting the mode names horizontally on
+every state change. Now always renders
+`Label { Text(label) } icon: { Image(...).opacity(isActive ? 1 : 0) }` —
+the checkmark column is permanently reserved; only its opacity
+flips.
+
+### Refactored — `VerdictPill` component extracted (#71)
+
+`SettingsView` shipped four near-identical inline OK / NG pills
+(naive verdict + picker-error, rust verdict + picker-error),
+each a ~20-line HStack with conditional colour and alpha
+background. Hoisted to a single `VerdictPill` type carrying
+`.ok` / `.ng` / `.neutral`, optional tag, optional system image,
+optional 2-line message. The mode-aware alpha (light 0.10 /
+dark 0.22) the v0.2 audit introduced for legibility against
+`.windowBackground` moves inside the component, resolved from
+`@Environment(\.colorScheme)` so light/dark transitions repaint
+without a view rebuild.
+
+### Refactored — `SummaryRow` component extracted (#71)
+
+The label/value diagnostic row was a private function on
+`SettingsView` duplicating itself for Path / Architectures /
+Version / Host slice across the naive and rust sections.
+Promoted to a `SummaryRow` type with a `labelWidth` parameter so
+the same shape serves the 70 pt machine-detail gutter and the
+90 pt binary-diagnostic gutter. `lineLimit(1) +
+truncationMode(.middle) + help() + textSelection(.enabled)`
+stay inside the component.
+
+### Checks
+
+- 118/118 tests pass.
+- GitHub Actions CI on `main` — 6/6 jobs green (Rust, Swift
+  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy
+  pin verification, `try?` ratchet).
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
+### Audit posture after v2.0.45
+
+Net diff across the six modified view files is **−21 lines**;
+the new `UIComponents.swift` adds 322 lines of shared
+component + `#Preview` blocks, absorbing those deletions and
+the four duplicated inline pill constructions. The structural
+discipline ("Do not rewrite large modules just for style")
+holds: `SettingsView` stays at 1,726 lines and its section
+structure is unchanged. Only the inline pills and rows
+extract.
+
 ## [2.0.44] — 2026-05-14 — SHA Manifest CRLF Fix + LipoOutputParser Extraction
 
 > **Real-bug fix: the in-app updater's SHA-256 manifest parser
