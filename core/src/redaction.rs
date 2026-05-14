@@ -523,7 +523,10 @@ mod tests {
         let line = "https://x.com/p?token=abc&user=alice&page=2";
         let out = redact(line);
         assert!(!out.contains("abc"), "token leaked: {out}");
-        assert!(out.contains("user=alice"), "non-cred param clobbered: {out}");
+        assert!(
+            out.contains("user=alice"),
+            "non-cred param clobbered: {out}"
+        );
         assert!(out.contains("page=2"), "non-cred param clobbered: {out}");
     }
 
