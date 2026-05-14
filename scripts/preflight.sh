@@ -147,8 +147,11 @@ run_check "xcrun swift-format lint -r --strict --configuration .swift-format COO
 
 # Expand the glob in the parent shell so `run_check` receives explicit
 # file args, not a literal '*' that wouldn't expand inside the function.
-SHELL_FILES=("${REPO_ROOT}"/scripts/*.sh)
-run_check "shellcheck scripts/*.sh" \
+# **post-v2.0.51:** `bin/ct` (the brew-style maintenance CLI) is also
+# linted here so a future edit to the wrapper can't silently regress
+# its shellcheck cleanliness.
+SHELL_FILES=("${REPO_ROOT}"/scripts/*.sh "${REPO_ROOT}/bin/ct")
+run_check "shellcheck scripts/*.sh bin/ct" \
     shellcheck "${SHELL_FILES[@]}"
 
 # --- summary --------------------------------------------------------------

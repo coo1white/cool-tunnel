@@ -1,0 +1,442 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 coolwhite LLC
+# See LICENSE for full terms.
+#
+# bin/ct — Cool Tunnel maintenance CLI
+#
+# A friendly single-entry-point wrapper around the existing
+# `scripts/*.sh` toolchain. The verbs map onto the actual scripts
+# below; running `ct help <verb>` shows the source path so a
+# curious reader can drill straight in.
+#
+# Designed to feel like brew:
+#   - one entry point with subcommands instead of nine script paths
+#   - `==>` blue prefix for major operations, `Error:` red for failure
+#   - `ct help`, `ct help <verb>`, `ct commands` all work
+#   - idempotent: re-running any subcommand converges, never compounds
+#   - no setup: just a Bash script, no Ruby, no plugins, no daemons
+#
+# The existing `scripts/*.sh` paths still work directly — this
+# wrapper sits on top; it doesn't replace them. CI and historical
+# changelog references keep working unchanged.
+
+set -Eeuo pipefail
+
+# ----------------------------------------------------------------------
+# Repo root resolution
+# ----------------------------------------------------------------------
+
+# Resolve the repo root from this script's location. Works whether
+# `ct` is invoked as `bin/ct`, `./bin/ct`, or via a PATH lookup once
+# the operator has aliased / symlinked it into their shell.
+CT_BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CT_REPO_ROOT="$(cd "${CT_BIN_DIR}/.." && pwd)"
+CT_SCRIPTS_DIR="${CT_REPO_ROOT}/scripts"
+
+# ----------------------------------------------------------------------
+# Output helpers — colour only on TTY
+# ----------------------------------------------------------------------
+
+if [[ -t 1 ]]; then
+    CT_BLUE=$'\033[1;34m'
+    CT_GREEN=$'\033[1;32m'
+    CT_YELLOW=$'\033[1;33m'
+    CT_RED=$'\033[1;31m'
+    CT_RESET=$'\033[0m'
+else
+    CT_BLUE=""
+    CT_GREEN=""
+    CT_YELLOW=""
+    CT_RED=""
+    CT_RESET=""
+fi
+
+step() {
+    printf '%s==>%s %s\n' "${CT_BLUE}" "${CT_RESET}" "$*"
+}
+
+ok() {
+    printf '%sok:%s %s\n' "${CT_GREEN}" "${CT_RESET}" "$*"
+}
+
+warn() {
+    printf '%sWarning:%s %s\n' "${CT_YELLOW}" "${CT_RESET}" "$*" >&2
+}
+
+err() {
+    printf '%sError:%s %s\n' "${CT_RED}" "${CT_RESET}" "$*" >&2
+}
+
+die() {
+    err "$@"
+    exit 1
+}
+
+# ----------------------------------------------------------------------
+# Top-level subcommands
+# ----------------------------------------------------------------------
+#
+# Every cmd_* function follows the same shape:
+#
+#   - On `--help` / `-h`: print its own help and exit 0.
+#   - Otherwise: forward to the underlying script with the verb's
+#     conventional arg order. Trust the underlying script's exit
+#     code; `set -e` at the top of `ct` carries the failure out.
+#
+# Order of declaration here roughly matches the recommended-reading
+# order in `cmd_commands` below.
+
+cmd_doctor() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct doctor
+
+    Run the full local sanity suite: preflight, audit, and the
+    try? ratchet. Equivalent to running `ct preflight && ct audit
+    --strict && ct ratchet`, but with one composite summary at the
+    end so an operator can answer "is my checkout healthy?" with
+    one command.
+
+    Exits 0 if every gate passed.
+    Exits 1 if any gate failed.
+
+Aliases:
+    ct doc       (none — use `ct doctor`)
+
+See also:
+    ct preflight   ct audit   ct ratchet
+HELP
+        return 0
+    fi
+    step "doctor: preflight + audit --strict + ratchet"
+    local failed=()
+    if ! "${CT_SCRIPTS_DIR}/preflight.sh"; then
+        failed+=("preflight")
+    fi
+    if ! "${CT_SCRIPTS_DIR}/audit.sh" --strict; then
+        failed+=("audit")
+    fi
+    if ! "${CT_SCRIPTS_DIR}/try_question_ratchet.sh"; then
+        failed+=("ratchet")
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        err "doctor: ${#failed[@]} gate(s) failed — ${failed[*]}"
+        return 1
+    fi
+    ok "doctor: every gate passed"
+}
+
+cmd_preflight() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct preflight
+
+    Run the local synthetic CI gate suite: cargo fmt, clippy,
+    cargo-deny, Rust tests, Swift format lint, ShellCheck, and the
+    bundled-binary verification. Match for match what the
+    GitHub Actions CI runs on every PR.
+
+    No arguments. Exits 0 on green, non-zero on any gate failure.
+
+Source: scripts/preflight.sh
+HELP
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/preflight.sh"
+}
+
+cmd_audit() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct audit [--strict]
+
+    Run the static audit suite — checks for unannotated try? usage,
+    binary pinning consistency, secret patterns, hardcoded paths,
+    and other code-hygiene rules.
+
+    --strict
+        Promote warnings to failures. Required by the release-cut
+        path; recommended for local dev.
+
+Source: scripts/audit.sh
+HELP
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/audit.sh" "$@"
+}
+
+cmd_ratchet() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct ratchet
+
+    Run the try? annotation ratchet. The repo invariant is that
+    every `try?` in Swift carries either an inline `// try-ok:`
+    annotation explaining why the silent failure is acceptable,
+    or a preceding-line annotation of the same shape.
+
+    The ratchet enforces "0 unannotated == cap" — any unannotated
+    try? is a failure. Adding new try? without an annotation is
+    blocked here, before it ever reaches CI.
+
+Source: scripts/try_question_ratchet.sh
+HELP
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/try_question_ratchet.sh"
+}
+
+cmd_release() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
+        cat <<'HELP'
+Usage: ct release VERSION
+
+    Cut a release. Runs the full release-time pipeline:
+
+        1. Verify VERSION matches core/Cargo.toml and the two
+           MARKETING_VERSION lines in COOL-TUNNEL.xcodeproj/.
+        2. Refresh the bundled NaiveProxy binary's SHA pin.
+        3. Run cargo fmt, clippy, tests, cargo-deny, ShellCheck,
+           Swift format, and security_check.sh.
+        4. Rebuild the Rust core + Swift app in Release mode
+           (universal arm64+x86_64).
+        5. Package .dmg, .pkg, .zip, the universal core binary,
+           and the SHA-256 manifest into dist/.
+
+    VERSION must match what's already in Cargo.toml / pbxproj;
+    the script refuses any mismatch up-front, before any work.
+
+    The next step after `ct release X.Y.Z` succeeds:
+
+        gh release create vX.Y.Z dist/Cool-tunnel-vX.Y.Z.{dmg,pkg,zip} \
+            dist/cool-tunnel-core-vX.Y.Z-universal \
+            dist/Cool-tunnel-vX.Y.Z.sha256 \
+            --title "vX.Y.Z — …" --notes-file dist/release-notes-vX.Y.Z.md \
+            --latest
+
+Source: scripts/cut_release.sh
+HELP
+        [[ $# -eq 0 ]] && return 2
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/cut_release.sh" "$@"
+}
+
+cmd_package() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -eq 0 ]]; then
+        cat <<'HELP'
+Usage: ct package VERSION
+
+    Package release artifacts (.dmg / .pkg / .zip / universal core /
+    SHA-256 manifest) into dist/. Assumes the Rust core and Swift
+    app are already built in Release mode; for the full pipeline
+    use `ct release` instead.
+
+    VERSION must match the live pbxproj / Cargo.toml version.
+
+Source: scripts/package_release.sh
+HELP
+        [[ $# -eq 0 ]] && return 2
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/package_release.sh" "$@"
+}
+
+cmd_naive() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct naive [--check-only | --repin TAG]
+
+    Without arguments:
+        Verify the bundled `naive` binary's SHA matches the pin
+        in COOL-TUNNEL/naive.upstream.json. No network access.
+        This is the form run by cut_release.sh and PR-time CI.
+
+    --check-only
+        Re-download the upstream tarballs at the pinned tag and
+        verify every SHA still reproduces. Network. Run daily by
+        the naive-pin-audit.yml workflow.
+
+    --repin TAG
+        Operator-explicit rollover. REQUIRES `CT_REPIN_CONFIRM=1`
+        in the environment. Re-downloads at the new tag,
+        re-computes SHAs, rewrites naive.upstream.json, and
+        replaces the bundled binary. Must land as a single audited
+        commit. Refuses to do anything without the confirmation
+        env var so a typo'd flag can't silently roll the pin.
+
+Source: scripts/fetch_naive.sh
+HELP
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/fetch_naive.sh" "$@"
+}
+
+cmd_security() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct security
+
+    Run the embedded-secret scanner. Greps the whole tree for
+    common credential patterns (AWS keys, OpenAI sk- prefixes,
+    GitHub PATs, Slack tokens, embedded PEM private keys, the
+    pinned historical-leak sentinel, and `basic_auth user pass`
+    Caddyfile lines).
+
+    Exits 0 if clean; exits non-zero on any hit.
+
+    Run automatically by `ct release` before any artifact leaves
+    the tree. Useful manually after editing config / doc files
+    that might accidentally have copy-pasted real credentials.
+
+Source: scripts/security_check.sh
+HELP
+        return 0
+    fi
+    "${CT_SCRIPTS_DIR}/security_check.sh"
+}
+
+cmd_version() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cat <<'HELP'
+Usage: ct version
+
+    Print the current project version (from core/Cargo.toml).
+    Sanity-checks that the version is in sync across Cargo.toml,
+    both MARKETING_VERSION lines in COOL-TUNNEL.xcodeproj/, and
+    the most recent CHANGELOG.md entry.
+
+    Output:
+        cool-tunnel X.Y.Z
+HELP
+        return 0
+    fi
+    local cargo_version
+    cargo_version=$(grep -m 1 '^version' "${CT_REPO_ROOT}/core/Cargo.toml" \
+        | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+    printf 'cool-tunnel %s\n' "${cargo_version}"
+}
+
+cmd_commands() {
+    cat <<'HELP'
+Available commands:
+
+  Local sanity & dev loop
+    doctor       Run preflight + audit + ratchet (composite health check)
+    preflight    Run the local synthetic CI gate suite
+    audit        Run the static audit (use --strict for release-grade)
+    ratchet      Verify every try? in Swift carries an annotation
+
+  Release pipeline
+    release      Cut a release (refresh pin, build, package)
+    package      Package an already-built release into dist/
+    security     Scan the tree for embedded secrets
+
+  Maintainer
+    naive        Verify or roll the bundled NaiveProxy pin
+
+  Discovery
+    version      Print the current project version
+    commands     This list
+    help [CMD]   Show help for a subcommand
+
+Each subcommand also accepts --help / -h for its own usage:
+
+    ct release --help
+    ct naive --help
+
+Source paths: every subcommand wraps a script under scripts/*.sh —
+running the underlying script directly still works.
+HELP
+}
+
+cmd_help() {
+    if [[ $# -eq 0 ]]; then
+        cat <<'HELP'
+Cool Tunnel maintenance CLI
+
+Usage:
+    ct <command> [<args>]
+    ct help <command>
+    ct commands
+
+Quick start:
+    ct doctor              # is my checkout healthy?
+    ct release 2.0.52      # cut a release
+    ct naive               # verify the bundled NaiveProxy pin
+    ct help release        # full usage for one verb
+
+Run `ct commands` for the full list.
+
+This wrapper is a thin Bash dispatch — all the real work lives in
+scripts/*.sh, and every subcommand's `--help` names its source.
+The toolchain is Swift + Rust + POSIX shell only; no Ruby, no
+plugins, no global daemons.
+HELP
+        return 0
+    fi
+    # `ct help <cmd>` — dispatch into the cmd's own --help
+    local cmd="$1"
+    shift
+    case "$cmd" in
+        doctor)    cmd_doctor --help ;;
+        preflight) cmd_preflight --help ;;
+        audit)     cmd_audit --help ;;
+        ratchet)   cmd_ratchet --help ;;
+        release)   cmd_release --help ;;
+        package)   cmd_package --help ;;
+        naive)     cmd_naive --help ;;
+        security)  cmd_security --help ;;
+        version)   cmd_version --help ;;
+        commands)  cmd_commands ;;
+        help)      cmd_help ;;
+        *)
+            err "unknown command: ${cmd}"
+            echo "Run 'ct commands' to see the list." >&2
+            return 2
+            ;;
+    esac
+}
+
+# ----------------------------------------------------------------------
+# Dispatch
+# ----------------------------------------------------------------------
+
+# Pre-flight: scripts dir must exist. Catches the case where
+# someone has copied just `bin/ct` somewhere without the rest of
+# the repo and is wondering why nothing works.
+if [[ ! -d "${CT_SCRIPTS_DIR}" ]]; then
+    die "scripts/ not found relative to ${CT_BIN_DIR}; \
+expected to run inside the cool-tunnel repo tree"
+fi
+
+if [[ $# -eq 0 ]]; then
+    cmd_help
+    exit 0
+fi
+
+case "$1" in
+    -h|--help|help)
+        shift
+        cmd_help "$@"
+        ;;
+    -V|--version)
+        cmd_version
+        ;;
+    doctor)    shift; cmd_doctor "$@" ;;
+    preflight) shift; cmd_preflight "$@" ;;
+    audit)     shift; cmd_audit "$@" ;;
+    ratchet)   shift; cmd_ratchet "$@" ;;
+    release)   shift; cmd_release "$@" ;;
+    package)   shift; cmd_package "$@" ;;
+    naive)     shift; cmd_naive "$@" ;;
+    security)  shift; cmd_security "$@" ;;
+    version)   shift; cmd_version "$@" ;;
+    commands)  shift; cmd_commands ;;
+    *)
+        err "unknown command: $1"
+        echo "Run 'ct commands' to see the list, or 'ct help' for an overview." >&2
+        exit 2
+        ;;
+esac

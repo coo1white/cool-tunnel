@@ -44,40 +44,41 @@ Then:
 git clone https://github.com/coo1white/cool-tunnel
 cd cool-tunnel
 
-# Pull the upstream NaiveProxy binary into COOL-TUNNEL/naive (universal)
-scripts/fetch_naive.sh
-
-# Build the .app
-xcodebuild -scheme COOL-TUNNEL -configuration Release \
-    -derivedDataPath build/DerivedData \
-    -destination "generic/platform=macOS" \
-    CODE_SIGN_IDENTITY=- \
-    CODE_SIGN_STYLE=Manual \
-    DEVELOPMENT_TEAM="" \
-    clean build
-
-# Run the pre-package security audit (substitute the version
-# you're cutting; e.g. the current latest is 2.0.21).
-EXPECTED_VERSION=2.0.21 scripts/security_check.sh
-
-# Package .dmg + .pkg + .zip + standalone cool-tunnel-core
-scripts/package_release.sh 2.0.21
+# One-command release pipeline (verify pin, build, audit, package).
+# Substitute the next version; pre-flight rejects a mismatched value.
+bin/ct release 2.0.52
 ```
+
+If you'd rather drive each step manually, every `ct …` verb wraps
+a `scripts/*.sh` file. Discover them with:
+
+```sh
+bin/ct commands         # full list
+bin/ct help <command>   # full usage for one verb
+```
+
+The underlying scripts (`scripts/preflight.sh`, `scripts/cut_release.sh`,
+etc.) still work directly — `bin/ct` is the discoverable surface,
+not a replacement.
 
 ## Running the test sweep
 
-Before sending a pull request, run the one-line equivalent of the CI
-gate:
+Before sending a pull request:
 
 ```sh
-scripts/preflight.sh
+bin/ct doctor
 ```
 
-That covers `cargo fmt --check`, `cargo clippy -- -D warnings`,
+That's the composite — runs preflight + audit --strict + the try?
+ratchet, with one summary at the end. Exits 0 if every gate passed,
+1 with a failure list otherwise.
+
+The individual verbs are also available (`bin/ct preflight`,
+`bin/ct audit --strict`, `bin/ct ratchet`). `bin/ct preflight` alone
+covers `cargo fmt --check`, `cargo clippy -- -D warnings`,
 `cargo test`, `cargo deny check`, `xcrun swift-format lint --strict`,
 and `shellcheck scripts/*.sh` — every check `.github/workflows/ci.yml`
-runs, with the same flags. Exits non-zero on the first batch of
-failures.
+runs, with the same flags.
 
 If you prefer to run the checks manually (or to debug a single one),
 the underlying commands are:
