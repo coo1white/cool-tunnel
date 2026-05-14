@@ -9,6 +9,108 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.52] — 2026-05-14 — bin/ct — Brew-Style Maintenance Wrapper
+
+> **Adds a single discoverable entry point over the existing
+> `scripts/*.sh` toolchain. The mental model collapses from
+> "remember nine script paths and their argv conventions" to
+> "run `ct <verb>` and get help." Backwards-compatible: every
+> existing `bash scripts/...` invocation keeps working.**
+
+### Added — bin/ct brew-style CLI (#78)
+
+A new wrapper at `bin/ct` collects every maintenance script
+under a single verb-based interface. Verbs map onto the
+underlying scripts:
+
+  ct doctor       → preflight + audit --strict + ratchet (composite)
+  ct preflight    → scripts/preflight.sh
+  ct audit        → scripts/audit.sh
+  ct ratchet      → scripts/try_question_ratchet.sh
+  ct release X    → scripts/cut_release.sh X
+  ct package X    → scripts/package_release.sh X
+  ct naive [...]  → scripts/fetch_naive.sh [...]
+  ct security     → scripts/security_check.sh
+  ct version      → reads core/Cargo.toml
+  ct commands     → full list
+  ct help [VERB]  → top-level help, or detail for a verb
+
+Every verb supports `--help` / `-h` and names its source
+script in the help text, so a curious reader can drill
+straight into the implementation. Each verb is a thin
+function that forwards to the underlying script with the
+conventional arg order; trust the underlying script's exit
+code, `set -E` carries the failure out.
+
+Brew-style output: `==>` blue prefix for major operations,
+`Error:` red for failures, `Warning:` yellow, `ok:` green —
+ONLY on a TTY (the colour vars resolve to empty strings
+under redirection or in CI logs, so piped output stays
+clean).
+
+### Ergonomics change
+
+Before:
+  bash scripts/preflight.sh
+  bash scripts/cut_release.sh 2.0.52
+  CT_REPIN_CONFIRM=1 bash scripts/fetch_naive.sh --repin v...
+
+After:
+  bin/ct preflight
+  bin/ct release 2.0.52
+  CT_REPIN_CONFIRM=1 bin/ct naive --repin v...
+
+Plus a new composite "is my checkout healthy?" command
+(`ct doctor`) that runs preflight + audit --strict + ratchet
+and prints one summary at the end with the list of failed
+gates (if any).
+
+### Backwards-compatible
+
+`bin/ct` is a wrapper, not a replacement. Every existing
+script under `scripts/` continues to work the way it always
+has. Every existing CI workflow, every CHANGELOG history
+entry, every `bash scripts/...` muscle-memory invocation
+keeps working unchanged.
+
+### Documentation updates
+
+- README.md "Building from source" + "Release reproducibility"
+  + naive-pin rolling sections lead with `bin/ct ...` and
+  explicitly preserve the "underlying scripts still work"
+  note.
+- CONTRIBUTING.md "Running the test sweep" simplifies from a
+  9-line shell block invoking three separate scripts to a
+  single `bin/ct doctor` call, with the manual
+  `ct preflight` / `ct audit --strict` / `ct ratchet`
+  shapes mentioned as the granular alternatives.
+
+### CI + shellcheck coverage
+
+`bin/ct` is added to BOTH the local preflight script's
+shellcheck pass AND the GitHub Actions `ShellCheck` job — so
+a future edit to the wrapper that introduces a shellcheck
+warning fails CI before it can ship. Pinned at zero
+shellcheck warnings as of this release.
+
+### Checks
+
+- `shellcheck bin/ct scripts/*.sh` → clean (zero warnings).
+- `bin/ct help`, `bin/ct commands`, `bin/ct version` all emit
+  expected output.
+- `bin/ct ratchet` end-to-end → same result as direct
+  invocation of the underlying script.
+- `bin/ct release` with no args → prints usage + exit 2
+  (brew convention for "missing required arg").
+- `bin/ct nonexistent` → red `Error:` message + exit 2.
+- Colour codes correctly omitted when stdout isn't a TTY
+  (verified via `bin/ct help | cat` — no escape sequences in
+  the piped output).
+- GitHub Actions CI on PR #78 — 6/6 jobs green.
+
+No production code change. No new tests. No new dependencies.
+No new files outside `bin/`.
+
 ## [2.0.51] — 2026-05-14 — OPSEC Audit: Close 6 Redaction Gaps
 
 > **Senior-engineer OPSEC audit identified six leak sites that,
