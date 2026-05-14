@@ -12,6 +12,7 @@
 		4696829D512929F5A3126A81 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5F45E8C0B5FB7722D873F9E3 /* Cocoa.framework */; };
 		512CB2601AD2B633029FC63B /* MockCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D104EEEFCE8A5369DB7ED758 /* MockCredentialStore.swift */; };
 		88F5383A6F45C8CA1129BF7F /* TunnelOrchestratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59272EFA176F02077FC2BE79 /* TunnelOrchestratorTests.swift */; };
+		CE599EFBA358A0DC51D5EB0D /* LipoOutputParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7B30F95B67BF1DD89A75A4E /* LipoOutputParserTests.swift */; };
 		DAD8A56F67CAE0F7B36E07A6 /* ProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7878B4D53EF20E097C673880 /* ProfileStoreTests.swift */; };
 		E8D5C4DF5B6260BE72160372 /* MigratingCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 554B53A6069678081A10DC49 /* MigratingCredentialStoreTests.swift */; };
 		F11166D09EA092C0666B3701 /* GitHubTrustTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D91E0C0C0DA9665A3C177D35 /* GitHubTrustTests.swift */; };
@@ -36,6 +37,7 @@
 		9160D66E7D48ADFF3F143B72 /* COOL-TUNNELTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "COOL-TUNNELTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1D073272FA598AD00E952AE /* naive.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = naive.app; path = "Cool tunnel.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B239B555EB5862DA3FC82459 /* SubscriptionValidationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SubscriptionValidationTests.swift; sourceTree = "<group>"; };
+		B7B30F95B67BF1DD89A75A4E /* LipoOutputParserTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LipoOutputParserTests.swift; sourceTree = "<group>"; };
 		D104EEEFCE8A5369DB7ED758 /* MockCredentialStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockCredentialStore.swift; sourceTree = "<group>"; };
 		D91E0C0C0DA9665A3C177D35 /* GitHubTrustTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitHubTrustTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -87,6 +89,7 @@
 				59272EFA176F02077FC2BE79 /* TunnelOrchestratorTests.swift */,
 				B239B555EB5862DA3FC82459 /* SubscriptionValidationTests.swift */,
 				01AF2175B2B58ED8E5BC3EC4 /* LifecycleTelemetryRedactionTests.swift */,
+				B7B30F95B67BF1DD89A75A4E /* LipoOutputParserTests.swift */,
 			);
 			name = "COOL-TUNNELTests";
 			path = "COOL-TUNNELTests";
@@ -258,6 +261,7 @@
 				88F5383A6F45C8CA1129BF7F /* TunnelOrchestratorTests.swift in Sources */,
 				4494B162DBAACD79AFF8D3A0 /* SubscriptionValidationTests.swift in Sources */,
 				424CC79A6B169ADE1E8207FE /* LifecycleTelemetryRedactionTests.swift in Sources */,
+				CE599EFBA358A0DC51D5EB0D /* LipoOutputParserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
