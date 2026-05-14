@@ -183,6 +183,60 @@ final class LifecycleTelemetryRedactionTests: XCTestCase {
         }
     }
 
+    // MARK: - Query-string credentials (post-v2.0.50 OPSEC audit)
+
+    /// `?token=...` in a URL must be redacted. The bare-token
+    /// k=v rule reads up to whitespace / comma / quote; URLs use
+    /// `&` as the separator, so without the dedicated rule a
+    /// query-string token would pass through verbatim.
+    func testRedactsQueryStringToken() {
+        let line = "fetching https://panel.example.com/path?token=secretvalue123"
+        let out = LifecycleTelemetryLogger.redact(line)
+        XCTAssertFalse(out.contains("secretvalue123"), "token leaked: \(out)")
+        XCTAssertTrue(out.contains("?token=***"), "shape wrong: \(out)")
+    }
+
+    /// Multiple credential-shaped query parameters separated by `&`
+    /// — each value runs only to the next `&`, so subsequent
+    /// non-credential parameters survive.
+    func testRedactsQueryStringTokenFollowedByOtherParams() {
+        let line = "https://x.com/p?token=abc&user=alice&page=2"
+        let out = LifecycleTelemetryLogger.redact(line)
+        XCTAssertFalse(out.contains("abc"), "token leaked: \(out)")
+        XCTAssertTrue(out.contains("user=alice"), "non-cred param clobbered: \(out)")
+        XCTAssertTrue(out.contains("page=2"), "non-cred param clobbered: \(out)")
+    }
+
+    /// All documented credential-shaped query keys fire.
+    func testRedactsEveryQueryStringCredentialShape() {
+        for (line, leak) in [
+            ("https://x.com/p?api_key=xyz", "xyz"),
+            ("https://x.com/p?session=def", "def"),
+            ("https://x.com/p?auth=ghi", "ghi"),
+            ("https://x.com/p?password=jkl", "jkl"),
+            ("https://x.com/p?secret=mno", "mno"),
+            ("https://x.com/p?refresh_token=pqr", "pqr"),
+        ] {
+            let out = LifecycleTelemetryLogger.redact(line)
+            XCTAssertFalse(out.contains(leak), "credential leaked: \(out)")
+        }
+    }
+
+    /// Non-credential query params must NOT match.
+    func testPassesThroughNonCredentialQueryParams() {
+        let line = "https://x.com/p?page=2&sort=asc"
+        XCTAssertEqual(LifecycleTelemetryLogger.redact(line), line)
+    }
+
+    /// Boundary tested via fragment `#`. Redaction must stop at
+    /// the URL fragment separator, not eat into the fragment.
+    func testRedactsQueryStringTokenWithFragment() {
+        let line = "https://x.com/p?token=abc#anchor"
+        let out = LifecycleTelemetryLogger.redact(line)
+        XCTAssertFalse(out.contains("abc"), "token leaked: \(out)")
+        XCTAssertTrue(out.contains("#anchor"), "fragment lost: \(out)")
+    }
+
     // MARK: - Bare hostname gap (post-v2.0.45 fix)
 
     /// Documents a deliberate limitation in the redaction rule set: a

@@ -484,8 +484,12 @@ final class RustCoreUpdater {
             return try await GitHubRedirectGuard.download(
                 url: url, to: destination, maxBytes: maxBytes)
         } catch let untrusted as UntrustedGitHubHostError {
+            // **OPSEC (post-v2.0.50):** host-only, never the
+            // full URL — same discipline as the SubscriptionClient
+            // and GitHubTrust redirect handlers.
+            let host = untrusted.url.host ?? "<unknown>"
             rustCoreUpdaterLogger.error(
-                "untrusted host: \(untrusted.url.absoluteString, privacy: .public)"
+                "untrusted host: \(host, privacy: .public)"
             )
             throw UpdaterError.message(
                 "Refusing to download from non-GitHub host."

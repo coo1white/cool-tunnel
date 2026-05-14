@@ -149,8 +149,16 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
         if let url = request.url, isTrustedGitHubURL(url) {
             completionHandler(request)
         } else {
+            // **OPSEC (post-v2.0.50):** log only the redirect
+            // target host. The full URL could in theory carry
+            // a query-string token from an upstream redirect
+            // that we just refused (one of the reasons we
+            // refused it). The host alone names the rejected
+            // hop without leaking whatever the panel /
+            // attacker tried to send us toward.
+            let host = request.url?.host ?? "<unknown>"
             Logger.cooltunnel("GitHubTrust").info(
-                "redirect rejected: \(request.url?.absoluteString ?? "<nil>", privacy: .public)"
+                "redirect rejected (target host: \(host, privacy: .public))"
             )
             completionHandler(nil)
         }

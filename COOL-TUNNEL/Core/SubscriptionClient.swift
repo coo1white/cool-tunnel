@@ -205,10 +205,18 @@ public actor SubscriptionClient {
             // `Equatable` impl. The full underlying error is
             // already in the system log via `URLSession` itself;
             // we don't double-log here.
+            //
+            // **OPSEC (post-v2.0.50):** `URLError.localizedDescription`
+            // frequently embeds the full failing URL ("Could not
+            // connect to https://panel.example.com/api/v1/subscription/<TOKEN>"),
+            // so the redaction pipeline runs before `os_log` AND
+            // the throw — neither the log nor the SwiftUI banner
+            // surfaces a path-embedded token.
+            let redacted = LifecycleTelemetryLogger.redact(error.localizedDescription)
             Self.logger.error(
-                "subscription fetch transport error: \(error.localizedDescription, privacy: .public)"
+                "subscription fetch transport error: \(redacted, privacy: .public)"
             )
-            throw SubscriptionClientError.transportFailed(error.localizedDescription)
+            throw SubscriptionClientError.transportFailed(redacted)
         }
 
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -292,10 +300,15 @@ public actor SubscriptionClient {
         } catch let error as SubscriptionClientError {
             throw error
         } catch {
+            // Same OPSEC discipline as the fetch path above:
+            // body-read errors can wrap the original URL or
+            // streamed bytes in their description. Redact
+            // before either log or throw.
+            let redacted = LifecycleTelemetryLogger.redact(error.localizedDescription)
             Self.logger.error(
-                "subscription body read error: \(error.localizedDescription, privacy: .public)"
+                "subscription body read error: \(redacted, privacy: .public)"
             )
-            throw SubscriptionClientError.transportFailed(error.localizedDescription)
+            throw SubscriptionClientError.transportFailed(redacted)
         }
 
         let manifest: SubscriptionManifestV1
@@ -390,8 +403,17 @@ final class NoRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendab
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        // **OPSEC (post-v2.0.50):** log only the redirect host,
+        // never the full URL. A panel that issues a redirect
+        // could (incorrectly) preserve the subscription token
+        // in the query string of the redirect target; logging
+        // `absoluteString` at `privacy: .public` would surface
+        // the token in `os_log`. Host alone tells support
+        // engineers where the redirect was pointing without
+        // leaking the credential.
+        let host = request.url?.host ?? "<unknown>"
         Logger.cooltunnel("SubscriptionClient").info(
-            "subscription redirect refused: \(request.url?.absoluteString ?? "<nil>", privacy: .public)"
+            "subscription redirect refused (target host: \(host, privacy: .public))"
         )
         completionHandler(nil)
     }

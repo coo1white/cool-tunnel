@@ -61,6 +61,20 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     if let Cow::Owned(s) = JSON_KV_QUOTED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
         current = Cow::Owned(s);
     }
+    // **OPSEC (post-v2.0.50):** query-string credentials. URLs
+    // with the credential in the path can't be detected generically
+    // (the token is a bare opaque blob), but query-string-shaped
+    // credentials follow the well-known `?key=value` / `&key=value`
+    // pattern and ARE distinguishable. Must run BEFORE the bare
+    // k=v rule below: the bare matcher's value class `[^"\s,}\r\n]+`
+    // does not include `&`, so it would otherwise greedily eat a
+    // URL like `?token=abc&user=alice&page=2` — clobbering
+    // subsequent non-credential parameters. The query-string
+    // matcher's value class `[^&\s#]+` correctly terminates at
+    // the URL query separator.
+    if let Cow::Owned(s) = QUERY_STRING_CRED_REGEX.replace_all(&current, "${prefix}***") {
+        current = Cow::Owned(s);
+    }
     if let Cow::Owned(s) = JSON_KV_CRED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
         current = Cow::Owned(s);
     }
@@ -175,6 +189,16 @@ static JSON_KV_QUOTED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// space-delimited by definition.
 #[allow(clippy::expect_used)]
 static JSON_KV_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    // **OPSEC (post-v2.0.50):** `&` and `#` added to the value
+    // terminator set. Without them, the bare-token matcher applied
+    // to a URL (`?token=abc&user=alice#frag`) would consume past
+    // the `&` AND past the `#`, clobbering subsequent
+    // non-credential query parameters / URL fragments AND
+    // re-matching the already-redacted `token=***` left by
+    // QUERY_STRING_CRED_REGEX. Bare-token dumps in `naive`
+    // config-load errors and curl `-v` output don't include `&`
+    // or `#` as a value separator, so this is a strict
+    // tightening.
     Regex::new(
         r#"(?ix)
         (?P<prefix>
@@ -182,11 +206,31 @@ static JSON_KV_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
             \s* [:=] \s*
             "?
         )
-        [^"\s,}\r\n]+
+        [^"\s,&\x23}\r\n]+
         (?P<suffix>"?)
         "#,
     )
     .expect("JSON KV credential redaction regex must compile")
+});
+
+/// **OPSEC (post-v2.0.50):** query-string credentials. Matches the
+/// URL-query-string credential shapes `?token=…`, `&api_key=…`,
+/// `?session=…`, `?auth=…`, etc. The value runs from `=` to the next
+/// `&`, whitespace, or fragment `#` separator. Distinct from
+/// `JSON_KV_CRED_REGEX` because URL queries use `&` as the value
+/// terminator whereas k=v dumps terminate on whitespace / commas /
+/// brace — a URL like `https://x.com/p?token=abc&u=alice` would
+/// otherwise have the bare-token rule eat the whole tail.
+#[allow(clippy::expect_used)]
+static QUERY_STRING_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    // Single-line form (no `(?x)`) because the character class
+    // `[^&\s#]+` contains a literal `#` that extended-mode would
+    // otherwise treat as a comment marker and refuse to parse.
+    // `(?i)` keeps the credential keys case-insensitive.
+    Regex::new(
+        r"(?i)(?P<prefix>[?&](?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|session|auth|password|secret)=)[^&\s#]+",
+    )
+    .expect("query-string credential redaction regex must compile")
 });
 
 #[cfg(test)]
@@ -455,5 +499,74 @@ mod tests {
             out == "from https://***:***@host1 to https://***:***@host2",
             "redaction shape wrong: {out}"
         );
+    }
+
+    // MARK: - Query-string credentials (post-v2.0.50)
+
+    /// `?token=...` in a URL must be redacted. The previous rule
+    /// set caught `key=value` k=v dumps but only when the value
+    /// terminated at whitespace / comma / quote — URLs use `&` as
+    /// the separator and so passed through verbatim.
+    #[test]
+    fn redacts_query_string_token() {
+        let line = "fetching https://panel.example.com/path?token=secretvalue123";
+        let out = redact(line);
+        assert!(!out.contains("secretvalue123"), "token leaked: {out}");
+        assert!(out.contains("?token=***"), "shape wrong: {out}");
+    }
+
+    /// Multiple credential-shaped query parameters separated by `&`
+    /// — each one's value runs only to the next `&`, so subsequent
+    /// non-credential parameters survive.
+    #[test]
+    fn redacts_query_string_token_followed_by_other_params() {
+        let line = "https://x.com/p?token=abc&user=alice&page=2";
+        let out = redact(line);
+        assert!(!out.contains("abc"), "token leaked: {out}");
+        assert!(out.contains("user=alice"), "non-cred param clobbered: {out}");
+        assert!(out.contains("page=2"), "non-cred param clobbered: {out}");
+    }
+
+    /// All five documented credential-shaped query keys fire.
+    #[test]
+    fn redacts_every_query_string_credential_shape() {
+        for line in [
+            "https://x.com/p?api_key=xyz",
+            "https://x.com/p?session=def",
+            "https://x.com/p?auth=ghi",
+            "https://x.com/p?password=jkl",
+            "https://x.com/p?secret=mno",
+            "https://x.com/p?refresh_token=pqr",
+        ] {
+            let out = redact(line);
+            assert!(
+                !out.contains("xyz")
+                    && !out.contains("def")
+                    && !out.contains("ghi")
+                    && !out.contains("jkl")
+                    && !out.contains("mno")
+                    && !out.contains("pqr"),
+                "credential leaked: {out}"
+            );
+        }
+    }
+
+    /// Non-credential query params must NOT match.
+    #[test]
+    fn passes_through_non_credential_query_params() {
+        let line = "https://x.com/p?page=2&sort=asc";
+        let out = redact(line);
+        assert_eq!(out, line);
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    /// Boundary tested via fragment `#`. The redaction must stop
+    /// at the URL fragment separator, not eat into the fragment.
+    #[test]
+    fn redacts_query_string_token_with_fragment() {
+        let line = "https://x.com/p?token=abc#anchor";
+        let out = redact(line);
+        assert!(!out.contains("abc"), "token leaked: {out}");
+        assert!(out.contains("#anchor"), "fragment lost: {out}");
     }
 }
