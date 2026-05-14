@@ -9,6 +9,93 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.43] — 2026-05-14 — README: First Deployment Walkthrough + Maintenance Chapter
+
+> **README answers two questions it didn't: "how do I deploy this
+> the first time?" and "how do I maintain a running version?"**
+
+No code change. README grows +147 / −2 lines: two new H2
+sections plus a small stale-version fix in `Build From Source`.
+Bundled `naive`, `cool-tunnel-core`, and the macOS bundle's
+runtime surface are byte-equivalent to v2.0.42.
+
+### Added — First Deployment chapter
+
+Sits between Architecture Blueprint and One-Click VPS
+Installation. Names the four-step arc that a first-time operator
+needs in order, with forward-links to each existing detailed
+playbook:
+
+  1. Stand up the VPS.
+  2. Verify the VPS in isolation BEFORE installing the client.
+  3. Install the macOS client.
+  4. Verify end-to-end via Run Diagnostics + VPS Health overlay.
+
+Plus a prerequisites table (Debian VPS ≥ 1 GB RAM, DNS pointed
+at the host, ports open, root shell, Mac on macOS 14+, ~10
+minutes) so operators self-check before touching a terminal.
+
+### Added — Maintenance chapter
+
+Sits between Operator Diagnostics and Quality Assurance: Heng.
+Documents the post-deployment surface that wasn't documented
+anywhere:
+
+  - **Keeping the client up to date.** Operator-initiated in-app
+    updater. SHA-256 manifest pinning. Manual `shasum -a 256 -c`
+    verification path for security-conscious operators. The
+    "Refusing to install — checksum failed" banner and what it
+    means. Where the running version is surfaced in the UI.
+
+  - **Triaging the three error layers.** Local Kernel / ISP /
+    VPS chip → meaning → first operator click. The classifier
+    was already in the code (v2.0.29 Deterministic Error
+    Reporting); now operators can read what each chip means
+    without grepping the source.
+
+  - **Where state lives.** The three 0o600 files in Application
+    Support, their lifecycle, atomic-write discipline, Time
+    Machine exclusion. Cross-link to SECURITY-WEB3.md for the
+    full privacy model.
+
+  - **Rotating VPS credentials.** Three-step VPS-side regen +
+    Caddyfile `sed` + `docker compose restart`, then Mac
+    profile update, then Run Diagnostics to verify. Threat
+    model: operator-defined cadence, no automated policy.
+
+  - **Rolling the bundled NaiveProxy pin.** Maintainer surface,
+    not the typical operator. Documents `--repin` +
+    `CT_REPIN_CONFIRM=1` + the single-audited-commit
+    requirement. Cross-links to the daily naive-pin-audit.yml
+    workflow.
+
+  - **Common-failure quick reference.** Five-row symptom →
+    likely cause → first operator action table, pinned against
+    actual error strings the orchestrator surfaces.
+
+  - **Uninstalling cleanly.** Sequenced `rm` commands for the
+    app, Application Support state, and updater staging dirs.
+    Plus `networksetup` recovery commands for the system-proxy
+    settings in case the app crashed without reverting.
+
+### Fixed — stale version example in Build From Source
+
+`bash scripts/cut_release.sh 2.0.36` was carried forward from
+v2.0.36's release. Bumped to v2.0.42 and added a one-line note
+that pre-flight rejects any value that doesn't match
+`core/Cargo.toml` and `MARKETING_VERSION` — so a reviewer
+following the example doesn't pick a stale value and hit a
+pre-flight error they don't understand.
+
+### Verified
+
+- GitHub Actions CI on `main` — 6/6 jobs green.
+- `bash scripts/audit.sh --strict` — `audit: PASS`.
+- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
+- README section anchors all resolve to the actual section IDs
+  GitHub generates (`#first-deployment`, `#one-click-vps-installation`,
+  `#macos-installation`, `#operator-diagnostics`, `#maintenance`).
+
 ## [2.0.42] — 2026-05-13 — Web3 Privacy Posture (Telemetry Redaction + SECURITY-WEB3.md)
 
 > **Web3-oriented privacy audit (post-v2.0.41) closed three gaps:
