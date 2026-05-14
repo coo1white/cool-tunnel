@@ -9,6 +9,156 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.51] — 2026-05-14 — OPSEC Audit: Close 6 Redaction Gaps
+
+> **Senior-engineer OPSEC audit identified six leak sites that,
+> while bounded by the existing privacy-first posture, would
+> surface operator-fingerprinting infrastructure metadata or
+> subscription tokens into the in-memory log / lifecycle-
+> telemetry file / `os_log` in specific failure modes. All six
+> fixed; 10 new regression tests (5 Rust + 5 Swift) lock in
+> the new redaction discipline.**
+
+### Fixed — subscription URL token leak via fallback (H1) (#77)
+
+`TunnelOrchestrator.importFromSubscriptionURL`:
+
+  Before: `appendInfo("subscription: fetching \(url.host ?? urlString)…")`
+  After:  `appendInfo("subscription: fetching \(host)…")`  (host-only)
+
+The `??` fallback fired when `url.host` returned nil for a URL
+that nevertheless parsed (edge cases: `https:///path`,
+`https://?token=X`, parser-permissive shapes). In that window
+the full `urlString` — which on a subscription import embeds
+the operator's token in the path
+(`/api/v1/subscription/<TOKEN>`) — went into the in-memory log
+buffer AND, via the lifecycle-telemetry pipeline, the 0600-mode
+JSONL file on disk. The redaction regex set didn't catch it
+because tokens-in-path don't match any of the credential-shaped
+patterns (no `scheme://user:pass@`, no Auth header, no JSON kv).
+
+### Fixed — subscription redirect URL logged at `privacy: .public` (H2) (#77)
+
+`SubscriptionClient.urlSession(_:task:willPerformHTTPRedirection:...)`:
+
+  Before: `"subscription redirect refused: \(absoluteString, privacy: .public)"`
+  After:  `"subscription redirect refused (target host: \(host, privacy: .public))"`
+
+A panel that issues a redirect could (incorrectly) preserve the
+subscription token in the query string of the redirect target.
+Logging `absoluteString` at `privacy: .public` surfaced the
+redirect URL into `os_log` unredacted — reachable via
+`log show`, support bundles, and screen-capture.
+
+### Fixed — transport-error description leak (H3) (#77)
+
+`SubscriptionClient.fetch()` catch blocks at lines 209 + 296:
+
+  Before: `throw .transportFailed(error.localizedDescription)`
+          (also logged at `privacy: .public`)
+  After:  let redacted = LifecycleTelemetryLogger.redact(error.localizedDescription)
+          throw .transportFailed(redacted)
+          (logs redacted form)
+
+`URLError.localizedDescription` routinely embeds the full
+failing URL: "Could not connect to https://panel.example.com/
+api/v1/subscription/<TOKEN>". The previous shape both logged
+AND re-threw the unredacted string — the throw surfaced in the
+SubscriptionImportError UI banner, AND in the engine stderr
+stream forwarded to the lifecycle-telemetry file. Wrapping
+through the canonical redaction pipeline once, before either
+log or throw, closes both leak paths.
+
+### Fixed — operator-hostname leak in import-success log (M1) (#77)
+
+`TunnelOrchestrator.importFromSubscriptionURL`:
+
+  Before: `appendInfo("subscription: imported \(primary.host):\(primary.port)")`
+  After:  `appendInfo("subscription: imported new credentials")`
+
+Same class as the v2.0.47 debug_handshake gap at a different
+callsite. The bare-hostname:port redaction rule doesn't catch
+this shape; the import-success message doesn't need the hostname
+to be useful.
+
+### Fixed — updater untrusted-host URL exposure (M2) (#77)
+
+Three sites (`GitHubTrust.swift`, `RustCoreUpdater.swift`,
+`NaiveUpdater.swift`):
+
+  Before: `"untrusted host: \(url.absoluteString, privacy: .public)"`
+  After:  `"untrusted host: \(host, privacy: .public)"`
+
+Lower risk than H1-H3 because the URL is upstream-supplied
+(from a GitHub redirect we just refused) rather than
+operator-supplied, but host-only is still the principled
+posture — the host names the rejected hop without leaking
+whatever the attacker / mis-configured panel tried to send.
+
+### Added — query-string credential redaction rule (L1) (#77)
+
+Both `core/src/redaction.rs` and `COOL-TUNNEL/Core/LifecycleTelemetryLogger.swift`
+gain a new rule for URL-query-string credentials:
+
+  `([?&](token|api_key|access_token|refresh_token|session|auth|password|secret)=)[^&\s\x23]+`
+  → `$1***`   (preserves the key, redacts the value)
+
+Order matters: the query-string rule runs BEFORE the bare-token
+kv rule in both pipelines. Without that ordering, the bare-token
+rule's value class would eat past the URL `&` separator,
+clobbering subsequent non-credential parameters. The bare-token
+rule's value-terminator class now also includes `&` and `\x23`
+(`#`, via hex-escape to avoid the regex extended-mode comment
+trap) so the bare matcher can't undo the query-string rule by
+re-matching the redacted token and eating the URL tail.
+
+### Findings the audit CLEARED — no fix needed (#77)
+
+- naive proxy invocation: credentials in config FILE path, NOT
+  argv (`core/src/supervisor/mod.rs:279`). ✓
+- curl probe stderr: already runs `redaction::redact` before
+  stringifying into the wire-shipped `notes` field
+  (`core/src/diagnostics/probe.rs:111`). ✓
+- loopback binding: `LOOPBACK_HOST = "127.0.0.1"` is the only
+  bind the `naive` config generator ever writes
+  (`core/src/config/naive_config.rs`). No `0.0.0.0` codepath
+  exists. ✓
+- Subprocess env passthrough: only PATH / HOME / LANG / LC_ALL
+  propagated; DYLD_INSERT_LIBRARIES, OBJC_DEBUG_*,
+  MallocStackLogging etc. stripped. ✓
+- curl invocation: `--` separator + `socks5h://127.0.0.1:port`
+  proxy arg — no userinfo in argv. ✓
+- Third-party analytics SDKs: grep for sentry / crashlytics /
+  amplitude / segment / datadog / firebase returns zero. ✓
+- ApplicationSupport file permissions: `RestrictedFile` writes
+  mode 0600 atomic O_CREAT|O_EXCL. ✓
+- Updater SHA + GitHubTrust + code-signing: unchanged. ✓
+
+### Checks
+
+- 138/138 Swift tests pass (was 133, +5 new query-string
+  redaction tests).
+- 178/178 Rust tests pass (was 173, +5 new query-string
+  redaction tests).
+- GitHub Actions CI on PR #77 — 6/6 jobs green.
+- `cargo clippy --all-targets -- -D warnings` clean.
+- `cargo fmt --all -- --check` clean.
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
+### Remaining OPSEC risks (deferred)
+
+- `Subprocess.swift` HOME env-var passthrough leaks
+  `/Users/<name>` to any inspection-time child that logs it.
+  Tightening requires auditing codesign / lipo / naive
+  --version for HOME dependencies; Subprocess.run is not on
+  the live tunnel path, so deferred.
+- Bare `hostname:port` redaction via a generic regex risks
+  false positives. Callsite-by-callsite review is the correct
+  shape; M1 in this release is the second callsite handled
+  that way (the first was the v2.0.47 debug_handshake fix).
+
 ## [2.0.50] — 2026-05-14 — Remove Ruby; Tests Target → fileSystemSynchronizedGroups
 
 > **Drops Ruby from the project toolchain. The single Ruby file
