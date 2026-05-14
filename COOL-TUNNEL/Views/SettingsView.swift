@@ -465,7 +465,11 @@ public struct SettingsView: View {
 
     /// One-line OK / NG headline. Computed from the descriptor so
     /// the user sees a clear pass/fail tag *before* scanning the
-    /// individual rows.
+    /// individual rows. The pill structure is shared with the
+    /// Rust core verdict via the project-wide `VerdictPill`
+    /// component — the four duplicated inline pills the v0.2
+    /// Settings refactor introduced collapsed into two component
+    /// calls each.
     @ViewBuilder
     private var verdictRow: some View {
         if isInspecting {
@@ -477,43 +481,20 @@ public struct SettingsView: View {
             }
         } else if let descriptor = inspection {
             let verdict = naiveVerdict(for: descriptor)
-            HStack(spacing: 6) {
-                Image(systemName: verdict.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
-                Text(verdict.ok ? "OK" : "NG")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text(verdict.message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill((verdict.ok ? Color.green : Color.red).opacity(pillAlpha))
-            }
+            VerdictPill(
+                kind: verdict.ok ? .ok : .ng,
+                tag: verdict.ok ? "OK" : "NG",
+                message: verdict.message,
+                systemImage: verdict.ok ? "checkmark.circle.fill" : "xmark.octagon.fill"
+            )
         } else if let pickerError = binaryPickerError {
-            HStack(spacing: 6) {
-                Image(systemName: "xmark.octagon.fill").foregroundStyle(Color.red)
-                Text("NG")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(Color.red)
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text(pickerError)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.red.opacity(pillAlpha))
-            }
+            VerdictPill(
+                kind: .ng,
+                tag: "NG",
+                message: pickerError,
+                systemImage: "xmark.octagon.fill",
+                messageLineLimit: 2
+            )
         } else {
             EmptyView()
         }
@@ -622,24 +603,7 @@ public struct SettingsView: View {
     }
 
     private func summaryRow(label: String, value: String, monospaced: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .leading)
-            Text(value)
-                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                // Hover tooltip + selection so users can read or
-                // copy a long path/version even when it's
-                // middle-truncated. Diagnostic info — exactly
-                // what's hidden by truncation is what the user
-                // wants when they're in Settings.
-                .help(value)
-                .textSelection(.enabled)
-        }
+        SummaryRow(label: label, value: value, monospaced: monospaced, labelWidth: 90)
     }
 
     private func hostSliceRow(descriptor: NaiveBinaryDescriptor) -> some View {
@@ -1358,43 +1322,20 @@ public struct SettingsView: View {
             }
         } else if let descriptor = rustInspection {
             let verdict = rustVerdict(for: descriptor)
-            HStack(spacing: 6) {
-                Image(systemName: verdict.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
-                Text(verdict.ok ? "OK" : "NG")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(verdict.ok ? Color.green : Color.red)
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text(verdict.message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill((verdict.ok ? Color.green : Color.red).opacity(pillAlpha))
-            }
+            VerdictPill(
+                kind: verdict.ok ? .ok : .ng,
+                tag: verdict.ok ? "OK" : "NG",
+                message: verdict.message,
+                systemImage: verdict.ok ? "checkmark.circle.fill" : "xmark.octagon.fill"
+            )
         } else if let pickerError = rustPickerError {
-            HStack(spacing: 6) {
-                Image(systemName: "xmark.octagon.fill").foregroundStyle(Color.red)
-                Text("NG")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(Color.red)
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text(pickerError)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.red.opacity(pillAlpha))
-            }
+            VerdictPill(
+                kind: .ng,
+                tag: "NG",
+                message: pickerError,
+                systemImage: "xmark.octagon.fill",
+                messageLineLimit: 2
+            )
         } else {
             EmptyView()
         }

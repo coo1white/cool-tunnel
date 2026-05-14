@@ -129,7 +129,11 @@ public struct ControlPanelView: View {
                 state.isRunning ? "Stop" : "Start",
                 systemImage: state.isRunning ? "stop.fill" : "play.fill"
             )
-            .frame(minWidth: 60)
+            // Wider than either label needs so the icon row to
+            // the right never reflows when the proxy starts /
+            // stops. The unused trailing space inside the
+            // borderedProminent shape is invisible.
+            .frame(minWidth: 72)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.regular)
@@ -168,33 +172,36 @@ public struct ControlPanelView: View {
     }
 
     // MARK: - Secondary actions
+    //
+    // Every secondary control sits in a 30×22 fixed frame via
+    // `IconBarButton` so the toolbar reads as an even cluster of
+    // equally-sized cells regardless of which SF Symbol each one
+    // happens to carry. Pre-refactor the row jittered when an
+    // adjacent button enabled / disabled — the system's bordered
+    // button sizes to glyph width, and `stethoscope` /
+    // `network.badge.shield.half.filled` / `gear` / `speedometer`
+    // / `waveform.path.ecg` are five very different widths.
 
     private var diagnosticsButton: some View {
-        Button {
+        IconBarButton(
+            systemImage: "stethoscope",
+            help: "Run diagnostics through the active proxy connection.",
+            accessibilityLabel: "Run diagnostics",
+            isEnabled: state.isRunning
+        ) {
             onIntent(.runDiagnostics)
-        } label: {
-            Label("Diagnostics", systemImage: "stethoscope")
-                .labelStyle(.iconOnly)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.regular)
-        .disabled(!state.isRunning)
-        .help("Run diagnostics through the active proxy connection.")
-        .accessibilityLabel("Run diagnostics")
     }
 
     private var debugHandshakeButton: some View {
-        Button {
+        IconBarButton(
+            systemImage: "network.badge.shield.half.filled",
+            help: "Run a temporary reference-naive handshake probe and log first-byte hex evidence.",
+            accessibilityLabel: "Debug handshake",
+            isEnabled: state.selectedProfileCanRequestStart
+        ) {
             onIntent(.runDebugHandshake)
-        } label: {
-            Label("Debug Handshake", systemImage: "network.badge.shield.half.filled")
-                .labelStyle(.iconOnly)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.regular)
-        .disabled(!state.selectedProfileCanRequestStart)
-        .help("Run a temporary reference-naive handshake probe and log first-byte hex evidence.")
-        .accessibilityLabel("Debug handshake")
     }
 
     private var latencyMenu: some View {
@@ -211,44 +218,44 @@ public struct ControlPanelView: View {
                     "Local mode runs naive on 127.0.0.1 without changing the system proxy — there is no proxied path to measure."
                 )
         } label: {
-            Label("Latency", systemImage: "speedometer")
-                .labelStyle(.iconOnly)
+            Image(systemName: "speedometer")
+                .frame(width: 16, height: 16)
         }
         .menuStyle(.borderlessButton)
+        // Visible caret distinguishes the menu from the bordered
+        // single-action icon buttons on either side — without it
+        // a user clicking the speedometer would be surprised by a
+        // popover rather than an immediate action. The 36 pt
+        // width accommodates the caret next to the glyph; the
+        // height matches IconBarButton so the row of cells reads
+        // as a uniform horizontal strip.
         .menuIndicator(.visible)
-        .frame(width: 36)
+        .frame(width: 36, height: 22)
         .disabled(!state.isRunning)
         .help("Measure DNS, connect, TLS, and first-byte timings through the proxy.")
         .accessibilityLabel("Latency test menu")
     }
 
     private var settingsButton: some View {
-        Button {
+        IconBarButton(
+            systemImage: "gear",
+            help: "Open Settings",
+            accessibilityLabel: "Settings"
+        ) {
             isShowingSettings = true
-        } label: {
-            Label("Settings", systemImage: "gear")
-                .labelStyle(.iconOnly)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.regular)
         .keyboardShortcut(",", modifiers: .command)
-        .help("Open Settings")
-        .accessibilityLabel("Settings")
     }
 
     private var developerOverlayButton: some View {
-        Button {
+        IconBarButton(
+            systemImage: "waveform.path.ecg",
+            help: isShowingDeveloperOverlay ? "Hide Developer Overlay" : "Show Developer Overlay",
+            accessibilityLabel: isShowingDeveloperOverlay
+                ? "Hide Developer Overlay" : "Show Developer Overlay"
+        ) {
             isShowingDeveloperOverlay.toggle()
-        } label: {
-            Label("Developer Overlay", systemImage: "waveform.path.ecg")
-                .labelStyle(.iconOnly)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.regular)
-        .help(isShowingDeveloperOverlay ? "Hide Developer Overlay" : "Show Developer Overlay")
-        .accessibilityLabel(
-            isShowingDeveloperOverlay ? "Hide Developer Overlay" : "Show Developer Overlay"
-        )
     }
 
     /// Project-wide UI logger for the main-window control surface.
