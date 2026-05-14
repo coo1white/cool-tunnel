@@ -388,19 +388,19 @@ mod tests {
     #[test]
     fn rejects_non_alphadash_username() {
         assert!(matches!(
-            Username::parse("nick@bad"),
+            Username::parse("alice@bad"),
             Err(InvalidCredentials::IllegalUsernameChar('@'))
         ));
         assert!(matches!(
-            Username::parse("nick:bad"),
+            Username::parse("alice:bad"),
             Err(InvalidCredentials::IllegalUsernameChar(':'))
         ));
         assert!(matches!(
-            Username::parse("nick bad"),
+            Username::parse("alice bad"),
             Err(InvalidCredentials::IllegalUsernameChar(' '))
         ));
         assert!(matches!(
-            Username::parse("nick.bad"),
+            Username::parse("alice.bad"),
             Err(InvalidCredentials::IllegalUsernameChar('.'))
         ));
     }
@@ -410,9 +410,9 @@ mod tests {
     /// accidentally exclude them when narrowed.)
     #[test]
     fn accepts_alphadash_username() {
-        assert!(Username::parse("nick_bai").is_ok());
-        assert!(Username::parse("nick-bai").is_ok());
-        assert!(Username::parse("Nick123").is_ok());
+        assert!(Username::parse("alice_bob").is_ok());
+        assert!(Username::parse("alice-bob").is_ok());
+        assert!(Username::parse("Alice123").is_ok());
     }
 
     /// Mirrors Laravel `maxLength(64)`. 65 chars must fail with
@@ -458,7 +458,7 @@ mod tests {
     /// tracing dump that captured a `Credentials` struct.
     #[test]
     fn username_debug_redacts() {
-        let u = Username::parse("nick").unwrap();
+        let u = Username::parse("alice").unwrap();
         assert_eq!(format!("{u:?}"), "Username(\"***\")");
     }
 
@@ -467,7 +467,7 @@ mod tests {
     /// to special-case.
     #[test]
     fn username_display_redacts() {
-        let u = Username::parse("nick").unwrap();
+        let u = Username::parse("alice").unwrap();
         assert_eq!(format!("{u}"), "***");
     }
 
@@ -476,11 +476,11 @@ mod tests {
     #[test]
     fn credentials_debug_redacts_both_fields() {
         let c = Credentials::new(
-            Username::parse("nick").unwrap(),
+            Username::parse("alice").unwrap(),
             Password::parse("hunter2").unwrap(),
         );
         let dump = format!("{c:?}");
-        assert!(!dump.contains("nick"), "username leaked via Debug: {dump}");
+        assert!(!dump.contains("alice"), "username leaked via Debug: {dump}");
         assert!(
             !dump.contains("hunter2"),
             "password leaked via Debug: {dump}"
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn percent_encoding_preserves_unreserved() {
-        assert_eq!(percent_encode_userinfo("nick"), "nick");
+        assert_eq!(percent_encode_userinfo("alice"), "alice");
         assert_eq!(percent_encode_userinfo("a-b.c_d~e"), "a-b.c_d~e");
         assert_eq!(percent_encode_userinfo("0123456789"), "0123456789");
     }
@@ -519,11 +519,11 @@ mod tests {
     #[test]
     fn credentials_percent_encoded_pair() {
         let creds = Credentials::new(
-            Username::parse("nick").unwrap(),
+            Username::parse("alice").unwrap(),
             Password::parse("p@ss/word").unwrap(),
         );
         let encoded = creds.percent_encoded();
-        assert_eq!(encoded.username(), "nick");
+        assert_eq!(encoded.username(), "alice");
         assert_eq!(encoded.password(), "p%40ss%2Fword");
     }
 
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn encoded_credentials_debug_redacts_password() {
         let creds = Credentials::new(
-            Username::parse("nick").unwrap(),
+            Username::parse("alice").unwrap(),
             Password::parse("hunter2").unwrap(),
         );
         let encoded = creds.percent_encoded();

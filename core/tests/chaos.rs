@@ -394,7 +394,7 @@ async fn chaos_id_correlation_holds_under_interleaved_traffic() {
             "params": {"profile": {
                 "id": "x",
                 "server": "naive.example.com",
-                "username": "nick",
+                "username": "alice",
                 "password": "p",
                 "localPort": "999999"
             }},
@@ -1012,7 +1012,7 @@ fn sample_profile() -> serde_json::Value {
     json!({
         "id": "default",
         "server": "naive.example.com",
-        "username": "nick",
+        "username": "alice",
         "password": "secret",
         "localPort": "1080",
     })

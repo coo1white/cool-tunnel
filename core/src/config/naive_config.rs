@@ -91,7 +91,7 @@ mod tests {
             ProfileId::new("default"),
             ServerAddress::parse("naive.example.com").unwrap(),
             Credentials::new(
-                Username::parse("nick").unwrap(),
+                Username::parse("alice").unwrap(),
                 Password::parse("test-password-do-not-use").unwrap(),
             ),
             Port::new(1080).unwrap(),
@@ -110,13 +110,13 @@ mod tests {
             ProfileId::new("default"),
             ServerAddress::parse("naive.example.com").unwrap(),
             Credentials::new(
-                Username::parse("nick").unwrap(),
+                Username::parse("alice").unwrap(),
                 Password::parse("p@ss/word").unwrap(),
             ),
             Port::new(1080).unwrap(),
         );
         let cfg = NaiveConfig::from_profile(&profile);
-        assert_eq!(cfg.proxy, "https://nick:p%40ss%2Fword@naive.example.com");
+        assert_eq!(cfg.proxy, "https://alice:p%40ss%2Fword@naive.example.com");
     }
 
     #[test]
@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(parsed["listen"], "socks://127.0.0.1:1080");
         assert_eq!(
             parsed["proxy"],
-            "https://nick:test-password-do-not-use@naive.example.com"
+            "https://alice:test-password-do-not-use@naive.example.com"
         );
     }
 
@@ -137,7 +137,7 @@ mod tests {
             ProfileId::new("default"),
             ServerAddress::parse("naive.example.com:8443").unwrap(),
             Credentials::new(
-                Username::parse("nick").unwrap(),
+                Username::parse("alice").unwrap(),
                 Password::parse("secret").unwrap(),
             ),
             Port::new(1080).unwrap(),
