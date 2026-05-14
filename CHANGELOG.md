@@ -9,6 +9,89 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.47] — 2026-05-14 — Telemetry Hostname Redaction
+
+> **Closes a redaction gap in the on-disk lifecycle telemetry file.
+> Debug Handshake events were carrying the operator's proxy server
+> hostname in plaintext under the `server` and `target` detail
+> fields; the Swift redaction pipeline correctly let them through
+> because they are not credential-shaped, but they should not have
+> been emitted to disk in the first place. Fix is at the call site:
+> drop both fields. The operator still sees them in the live log
+> console, exported on demand.**
+
+### Fixed — bare server hostname in debug_handshake telemetry (#73)
+
+The lifecycle telemetry file at
+`~/Library/Application Support/COOL-TUNNEL/lifecycle-telemetry.jsonl`
+(mode 0600) was carrying the operator's proxy hostname on every
+Debug Handshake click:
+
+```json
+{"event":"debug_handshake.success",
+ "details":{"elapsed":"687ms",
+            "server":"<operator-hostname>:443",
+            "target":"www.google.com:443"},
+ ...}
+```
+
+`LifecycleTelemetryLogger.redact(_:)` is scoped to credential-
+shaped strings — URL userinfo, Authorization headers, Cookie
+headers, JSON credential pairs. A bare `host:port` value matches
+none of those, and intentionally so: hostnames in non-sensitive
+log lines should remain readable for triage.
+
+The fix is at the emit site in `TunnelOrchestrator`, not at the
+redaction layer:
+
+```diff
+-details: ["elapsed": total, "server": report.server, "target": report.target]
++details: ["elapsed": total]
+```
+
+The operator still sees both fields in the live log surface
+(`LogConsoleView` buffer), which is exported on demand via the
+Copy / Save / Share path. The auto-persisted telemetry file no
+longer carries them.
+
+### Added — 2 regression tests
+
+`testBareHostnamePortPassesThroughUnredacted` documents the
+deliberate gap: a value shaped like `sentinel.example.invalid:443`
+is intentionally **not** redacted by `redact(_:)`. Pins the
+limitation so the next developer adding a hostname-bearing
+telemetry field sees explicitly that they need a different
+defense (drop the field, redact it explicitly, or expand the
+rule set).
+
+`testDebugHandshakeRecordDoesNotCarrySentinelServerHostname`
+is end-to-end: instantiates `LifecycleTelemetryLogger` against
+a temp file URL, emits a `debug_handshake.success` event
+through the public `record(_:mode:running:details:)` API with
+the post-fix details shape (`elapsed` only), and asserts the
+on-disk JSONL contains no sentinel hostname, no `"server"`
+key, no `"target"` key, but does contain the event name.
+
+### Checks
+
+- 120/120 Swift tests pass (118 prior + 2 new).
+- 173/173 Rust tests pass.
+- GitHub Actions CI on PR #73 — 6/6 jobs green (Rust, Swift
+  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy pin
+  verification, `try?` ratchet).
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
+### Notes
+
+The lifecycle-telemetry file on the operator's own machine may
+still contain historical records emitted under the old shape.
+Wiping the file (or letting it rotate via the existing
+operator-driven "clear logs" path) drops those records. This
+fix prevents new hostname-bearing records from being written;
+it does not retroactively redact existing ones.
+
 ## [2.0.46] — 2026-05-14 — Test Fixture Convention: Alice / Bob
 
 > **Adopt the canonical Alice / Bob crypto-test convention for the
