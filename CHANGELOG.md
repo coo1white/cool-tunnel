@@ -9,6 +9,121 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.49] — 2026-05-14 — HTTP-407 Credential Auto-Sync
+
+> **Closes the Mac-side counterpart to cool-tunnel-server's
+> auto-sync watchdog. When the engine reports an HTTP-407-class
+> auth failure on stderr and the active profile carries a saved
+> subscription URL, the orchestrator transparently re-fetches
+> credentials from the panel and restarts against the refreshed
+> values — no operator action required. Symmetric fix to
+> cool-tunnel-server v0.1.1.**
+
+### Fixed — auto-sync credentials on HTTP-407 auth failure (#75)
+
+cool-tunnel-server's `make auto-sync` (v0.1.1) detects and
+corrects server-side credential drift (db ↔ rendered sing-box ↔
+manifest ↔ subscription endpoint) every 5 minutes. That fixes
+server-side drift, but the symmetric failure mode — server-side
+credentials rotated correctly but the macOS client still holds
+the old password in its credentials store — was invisible to the
+server-side watchdog. An incident with this shape (operator
+rotated panel password; server-side guard converged; Mac client
+kept failing 407 with no path to recovery beyond a manual
+re-import) drove this fix.
+
+**Three pieces:**
+
+1. **Profile.subscriptionURL persistence.** New optional field
+   on the wire-format Profile, populated by
+   `importFromSubscriptionURL` and persisted via ProfileStore.
+   Rust silently ignores unknown fields (no
+   `#[serde(deny_unknown_fields)]`), so the change is additive
+   in both directions. Legacy profile blobs without the field
+   decode to `nil` (regression-tested — a strict-mode decoder
+   would have wiped every saved profile on the first launch
+   after upgrade).
+
+2. **Auth-failure stderr classification.**
+   `TunnelOrchestrator.isProxyAuthFailureLine(_:)` — nonisolated,
+   pure, testable — detects HTTP-407-class chips in engine stderr.
+   Matches Chromium-style `ERR_PROXY_AUTH_*` and `ERR_TUNNEL_AUTH_*`
+   chips, the verbatim `407 Proxy Authentication Required`
+   HTTP/1.1 status line, the bare phrase "authentication
+   required", and the raw `407` substring when bounded by
+   non-alphanumeric separators (so coincidental "407" inside
+   byte counts and session IDs doesn't fire).
+
+3. **Single-flight auto-sync + restart with 30-second cooldown.**
+   `scheduleCredentialAutoSync(reason:)` runs at most one
+   in-flight attempt at a time. The cooldown ensures a
+   continuously-retrying engine can't hammer the panel — the
+   continuously-failing case (panel down + engine retry loop)
+   hits the panel at most twice per minute. The flow captures
+   `(server, username, password)` from the live profile, calls
+   `importFromSubscriptionURL` on the saved URL, and restarts
+   the engine via `stopQuiet()` + `start(mode:)` only when the
+   refreshed credentials actually differ. If upstream returns
+   the same credentials, the sync logs "no drift" and returns —
+   the auth failure was something else (revoked token,
+   server-side basic_auth misconfiguration), and the existing
+   error-classification path retains its banner.
+
+The "Profile edits applied — click Stop" banner the
+`selectedProfile` setter raises on live-session edits is
+suppressed inside the auto-sync flow — the auto-sync IS about
+to do exactly that, so the prompt would be confusing rather
+than helpful.
+
+### Lifecycle integration
+
+The credential-auto-sync task is cancelled in three places,
+matching the existing `selfHealTask` pattern:
+
+  - `shutdown()` — process exit
+  - `stop()` — user-initiated stop
+  - `switchMode(to:)` — mode change (the auto-sync's captured
+    `activeModeAtTrigger` would otherwise restart in the old
+    mode a beat after the user picked the new one)
+
+### Tests added (13 new, suite 120 → 133)
+
+`COOL-TUNNELTests/CredentialAutoSyncTests.swift`:
+
+  Profile.subscriptionURL Codable (3 tests):
+    - JSON encode/decode round-trip preserves the field
+    - Legacy JSON without `subscriptionURL` decodes to nil
+    - `Profile.default` still has nil subscriptionURL
+
+  isProxyAuthFailureLine positive cases (6 tests):
+    - ERR_PROXY_AUTH_REQUESTED (Chromium chip)
+    - ERR_TUNNEL_AUTH_FAILURE
+    - "407 Proxy Authentication Required" HTTP/1.1 status line
+    - Bare "authentication required" mid-line
+    - Raw "407" surrounded by every documented separator class
+    - Case-insensitive variants of all the above
+
+  isProxyAuthFailureLine negative cases (4 tests):
+    - Normal connect / listen / TLS-success log lines
+    - Coincidental "407" inside byte counts and session IDs
+    - Other 4xx codes (400/401/403/404) not mis-attributed
+    - Empty / whitespace / single-newline lines
+
+The single-flight + cooldown + restart shape needs the
+SubscriptionClient + CoreClient mock harness and is left to a
+follow-up integration test.
+
+### Checks
+
+- 133/133 Swift tests pass.
+- 173/173 Rust tests pass.
+- GitHub Actions CI on PR #75 — 6/6 jobs green (Rust, Swift
+  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy pin
+  verification, `try?` ratchet).
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
 ## [2.0.48] — 2026-05-14 — Beginner-Friendly README Rewrite
 
 > **Restructures `README.md` to lead with the first-time reader's
