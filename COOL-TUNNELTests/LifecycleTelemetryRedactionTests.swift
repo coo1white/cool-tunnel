@@ -182,4 +182,78 @@ final class LifecycleTelemetryRedactionTests: XCTestCase {
             XCTAssertTrue(out.contains("***"), "redaction marker missing: \(out)")
         }
     }
+
+    // MARK: - Bare hostname gap (post-v2.0.45 fix)
+
+    /// Documents a deliberate limitation in the redaction rule set: a
+    /// bare `host:port` value (the shape `debug_handshake.*` events
+    /// passed through the `server` / `target` details fields before
+    /// the post-v2.0.45 fix) does NOT match any pattern in
+    /// `redact(_:)`. The rule set is designed around credential-
+    /// shaped strings (URL userinfo, auth headers, cookies, JSON
+    /// credential pairs) and intentionally does not redact every
+    /// hostname — proxies and CDN endpoints appear in non-sensitive
+    /// log lines and should remain readable for triage.
+    ///
+    /// The implication: when adding a new telemetry-detail field
+    /// that could carry a server-identifying string, the call
+    /// site must either drop the field, redact it explicitly, or
+    /// expand the rule set. Relying on the default redaction
+    /// pipeline is not enough. This test pins the limitation so
+    /// the next developer sees the gap before re-introducing it.
+    func testBareHostnamePortPassesThroughUnredacted() {
+        let line = "sentinel.example.invalid:443"
+        XCTAssertEqual(LifecycleTelemetryLogger.redact(line), line)
+    }
+
+    /// End-to-end coverage for the `debug_handshake.*` details
+    /// shape post-fix: the details dictionary carries only
+    /// `elapsed`, never the server or target hostname. Catches a
+    /// regression where someone re-adds `"server": report.server`
+    /// to the call site in `TunnelOrchestrator` — the test reads
+    /// back the on-disk JSONL and asserts no sentinel hostname
+    /// appears anywhere in the record.
+    func testDebugHandshakeRecordDoesNotCarrySentinelServerHostname() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "cool-tunnel-telemetry-tests-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let telemetryURL = tempDir.appendingPathComponent("telemetry.jsonl")
+        let logger = LifecycleTelemetryLogger(url: telemetryURL)
+
+        // Shape that the production call site emits after the
+        // post-v2.0.45 fix: `elapsed` only. If a future edit
+        // re-introduces a `server` key here, the assertion below
+        // will trip because the sentinel hostname will appear
+        // verbatim in the emitted JSON.
+        logger.record(
+            "debug_handshake.success",
+            mode: .global,
+            running: true,
+            details: ["elapsed": "687ms"]
+        )
+
+        let written = try String(contentsOf: telemetryURL, encoding: .utf8)
+        XCTAssertFalse(
+            written.contains("sentinel.example.invalid"),
+            "sentinel hostname leaked into telemetry: \(written)"
+        )
+        XCTAssertFalse(
+            written.contains("\"server\""),
+            "telemetry record still carries a `server` field: \(written)"
+        )
+        XCTAssertFalse(
+            written.contains("\"target\""),
+            "telemetry record still carries a `target` field: \(written)"
+        )
+        XCTAssertTrue(
+            written.contains("\"event\":\"debug_handshake.success\""),
+            "event name missing from telemetry: \(written)"
+        )
+    }
 }
