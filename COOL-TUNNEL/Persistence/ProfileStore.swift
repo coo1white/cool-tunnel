@@ -148,7 +148,7 @@ public struct ProfileStore: @unchecked Sendable {
                 profile.password = ""
             }
             // Trim whitespace at the persistence boundary so a
-            // user pasting `nick ` from a chat app doesn't end up
+            // user pasting `alice ` from a chat app doesn't end up
             // failing engine validation with no obvious cause.
             profile.server = profile.server.trimmingCharacters(in: .whitespacesAndNewlines)
             profile.username = profile.username.trimmingCharacters(in: .whitespacesAndNewlines)

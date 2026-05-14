@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn redacts_userinfo_in_https_url() {
-        let line = "Listening: https://nick:hunter2@naive.example.com:443";
+        let line = "Listening: https://alice:hunter2@naive.example.com:443";
         assert_eq!(
             redact(line),
             "Listening: https://***:***@naive.example.com:443"
@@ -234,15 +234,15 @@ mod tests {
     #[test]
     fn redacts_socks_variants() {
         for line in [
-            "socks5://nick:hunter2@proxy.example.com:1080",
-            "socks5h://nick:hunter2@proxy.example.com:1080",
-            "socks4://nick:hunter2@proxy.example.com:1080",
-            "socks4a://nick:hunter2@proxy.example.com:1080",
-            "socks://nick:hunter2@proxy.example.com:1080",
+            "socks5://alice:hunter2@proxy.example.com:1080",
+            "socks5h://alice:hunter2@proxy.example.com:1080",
+            "socks4://alice:hunter2@proxy.example.com:1080",
+            "socks4a://alice:hunter2@proxy.example.com:1080",
+            "socks://alice:hunter2@proxy.example.com:1080",
         ] {
             let out = redact(line);
             assert!(!out.contains("hunter2"), "password leaked: {out}");
-            assert!(!out.contains("nick"), "username leaked: {out}");
+            assert!(!out.contains("alice"), "username leaked: {out}");
             assert!(out.contains("***:***@"), "redaction marker missing: {out}");
         }
     }
@@ -251,13 +251,13 @@ mod tests {
     /// curl error text under unusual configurations.
     #[test]
     fn redacts_naive_and_ftp_schemes() {
-        let naive = "naive+https://nick:hunter2@server:443";
+        let naive = "naive+https://alice:hunter2@server:443";
         // The "naive+https://" case still has the inner https:// match
         // — ensure the password is gone.
         let out = redact(naive);
         assert!(!out.contains("hunter2"));
 
-        let ftp = "ftp://nick:hunter2@host";
+        let ftp = "ftp://alice:hunter2@host";
         let out = redact(ftp);
         assert!(!out.contains("hunter2"), "ftp password leaked: {out}");
     }

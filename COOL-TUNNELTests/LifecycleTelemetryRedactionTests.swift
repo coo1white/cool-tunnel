@@ -48,20 +48,20 @@ final class LifecycleTelemetryRedactionTests: XCTestCase {
     // MARK: - Userinfo / scheme://user:pass@host
 
     func testRedactsHttpsUserinfo() {
-        let line = "Listening: https://nick:hunter2@naive.example.com:443"
+        let line = "Listening: https://alice:hunter2@naive.example.com:443"
         let out = LifecycleTelemetryLogger.redact(line)
         XCTAssertFalse(out.contains("hunter2"), "password leaked: \(out)")
-        XCTAssertFalse(out.contains("nick"), "username leaked: \(out)")
+        XCTAssertFalse(out.contains("alice"), "username leaked: \(out)")
         XCTAssertTrue(out.contains("***:***@naive.example.com"), "shape wrong: \(out)")
     }
 
     func testRedactsSocksVariants() {
         for line in [
-            "socks5://nick:hunter2@proxy.example.com:1080",
-            "socks5h://nick:hunter2@proxy.example.com:1080",
-            "socks://nick:hunter2@proxy.example.com:1080",
-            "socks4://nick:hunter2@proxy.example.com:1080",
-            "socks4a://nick:hunter2@proxy.example.com:1080",
+            "socks5://alice:hunter2@proxy.example.com:1080",
+            "socks5h://alice:hunter2@proxy.example.com:1080",
+            "socks://alice:hunter2@proxy.example.com:1080",
+            "socks4://alice:hunter2@proxy.example.com:1080",
+            "socks4a://alice:hunter2@proxy.example.com:1080",
         ] {
             let out = LifecycleTelemetryLogger.redact(line)
             XCTAssertFalse(out.contains("hunter2"), "password leaked: \(out)")

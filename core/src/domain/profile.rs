@@ -195,7 +195,7 @@ mod tests {
         RawProfile {
             id: "default".to_owned(),
             server: "naive.example.com".to_owned(),
-            username: "nick".to_owned(),
+            username: "alice".to_owned(),
             password: "secret".to_owned(),
             local_port: "1080".to_owned(),
         }
@@ -206,7 +206,7 @@ mod tests {
         let json = serde_json::json!({
             "id": "default",
             "server": "naive.example.com",
-            "username": "nick",
+            "username": "alice",
             "password": "secret",
             "localPort": "1080"
         });

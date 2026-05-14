@@ -562,7 +562,7 @@ mod tests {
             ProfileId::new("default"),
             ServerAddress::parse("naive.example.com").unwrap(),
             Credentials::new(
-                Username::parse("nick").unwrap(),
+                Username::parse("alice").unwrap(),
                 Password::parse("secret").unwrap(),
             ),
             Port::new(1080).unwrap(),

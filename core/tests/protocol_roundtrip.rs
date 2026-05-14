@@ -31,7 +31,7 @@ async fn validate_profile_responds_with_validation_payload() {
             "profile": {
                 "id": "default",
                 "server": "naive.example.com",
-                "username": "nick",
+                "username": "alice",
                 "password": "secret",
                 "localPort": "1080"
             }
@@ -73,7 +73,7 @@ async fn generate_naive_config_returns_pretty_json() {
             "profile": {
                 "id": "default",
                 "server": "naive.example.com",
-                "username": "nick",
+                "username": "alice",
                 "password": "secret",
                 "localPort": "1080"
             }
@@ -88,7 +88,7 @@ async fn generate_naive_config_returns_pretty_json() {
     let body = frame["result"]["json"].as_str().expect("json field");
     let parsed: serde_json::Value = serde_json::from_str(body).expect("body is valid JSON");
     assert_eq!(parsed["listen"], "socks://127.0.0.1:1080");
-    assert_eq!(parsed["proxy"], "https://nick:secret@naive.example.com");
+    assert_eq!(parsed["proxy"], "https://alice:secret@naive.example.com");
 
     harness.shutdown().await;
 }
@@ -143,7 +143,7 @@ async fn frame_exceeding_one_mib_returns_frame_too_large_error() {
             "profile": {
                 "id": "default",
                 "server": "naive.example.com",
-                "username": "nick",
+                "username": "alice",
                 "password": "secret",
                 "localPort": "1080"
             }
@@ -221,7 +221,7 @@ async fn validate_profile_flags_empty_password_with_reason() {
             "profile": {
                 "id": "default",
                 "server": "naive.example.com",
-                "username": "nick",
+                "username": "alice",
                 "password": "",
                 "localPort": "1080"
             }
