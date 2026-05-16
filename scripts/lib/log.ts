@@ -90,3 +90,16 @@ export function err(message: string): void {
         `${colour(process.stderr, RED_OPEN, RESET, "error:")} ${message}\n`,
     );
 }
+
+/**
+ * Non-terminal failure marker — red `!!!` prefix on stderr,
+ * matching `die`'s visual idiom but WITHOUT the `process.exit`.
+ * Use when the script tracks its own failure state and exits
+ * separately at the end (e.g. audit.ts accumulates fail counts
+ * across N checks and exits once at the summary).
+ */
+export function fail(message: string): void {
+    process.stderr.write(
+        `${colour(process.stderr, RED_OPEN, RESET, "!!!")} ${message}\n`,
+    );
+}

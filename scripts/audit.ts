@@ -50,7 +50,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { die, step, warn } from "./lib/log.ts";
+import { die, fail, step, warn } from "./lib/log.ts";
 import { repoRoot } from "./lib/paths.ts";
 import { run } from "./lib/spawn.ts";
 
@@ -218,7 +218,7 @@ interface AuditState {
 }
 
 function failMsg(state: AuditState, message: string): void {
-    process.stderr.write(`\x1b[1;31m!!!\x1b[0m ${message}\n`);
+    fail(message);
     state.status = 1;
 }
 
@@ -235,10 +235,7 @@ function requireOrSkip(
 ): boolean {
     if (which(cmd)) return true;
     if (strict) {
-        process.stderr.write(
-            `\x1b[1;31m!!!\x1b[0m ${label} required (--strict) but not on PATH\n`,
-        );
-        process.exit(2);
+        die(`${label} required (--strict) but not on PATH`, 2);
     }
     warn(`${label} not on PATH — skipping (re-run without --strict to allow)`);
     state.skipped.push(label);
@@ -366,10 +363,10 @@ async function main(): Promise<void> {
             warn("no .swift files found under COOL-TUNNEL/ — nothing to lint");
         }
     } else if (strict) {
-        process.stderr.write(
-            "\x1b[1;31m!!!\x1b[0m swift-format / swift format required (--strict) but neither is on PATH\n",
+        die(
+            "swift-format / swift format required (--strict) but neither is on PATH",
+            2,
         );
-        process.exit(2);
     } else {
         warn(
             "swift-format not available — skipping (install via 'brew install swift-format' or use Xcode 16+)",
@@ -497,9 +494,7 @@ async function main(): Promise<void> {
             warn(`non-strict skips: ${state.skipped.join(" ")}`);
         }
     } else {
-        process.stderr.write(
-            `\x1b[1;31m!!!\x1b[0m audit: FAIL — fix issues above and re-run\n`,
-        );
+        fail("audit: FAIL — fix issues above and re-run");
     }
     process.exit(state.status);
 }
