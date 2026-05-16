@@ -1703,22 +1703,54 @@ public final class TunnelOrchestrator {
             guard case .debugHandshake(let report) = response else {
                 throw OrchestratorError.unexpectedResponse
             }
+            // **post-v2.0.53 — streamlined live-log output.**
+            //
+            // Previously this surface emitted six lines per probe:
+            //
+            //   debug handshake: ✗ server=… target=… connect_ok=true post_connect_recv=0B elapsed=336ms
+            //   debug handshake sent[0..1024]=43 4f 4e 4e 45 43 54 …    (262 bytes of hex)
+            //   debug handshake recv[0..1024]=48 54 54 50 2f 31 2e 31 … (85+ bytes of hex)
+            //   [debug handshake error] post-CONNECT read failed: Connection reset by peer (os error 54)
+            //   (+ naive stdout/stderr passthrough)
+            //
+            // The hex dumps buried the verdict, the verbose key=value
+            // pairs leaked operator infrastructure metadata into the
+            // live log (`server` is the operator's proxy hostname),
+            // and the raw `Connection reset by peer` error told the
+            // operator nothing about the actual remediation path.
+            //
+            // New shape — verdict + actionable hint:
+            //
+            //   debug handshake: ✗ elapsed=336ms
+            //     ↪ Server accepted credentials but cannot reach the destination. … On the VPS run …
+            //
+            // The hex dumps are dropped from the live log entirely.
+            // Operators who need byte-level forensics can read
+            // naive's own stderr passthrough below, which carries
+            // the same wire-level signature from naive's perspective.
             let glyph = report.ok ? "✓" : "✗"
-            appendInfo(
-                "debug handshake: \(glyph) server=\(report.server) target=\(report.target) connect_ok=\(report.connectOk) post_connect_recv=\(report.postConnectReceivedBytes)B elapsed=\(report.elapsedMs)ms"
-            )
-            appendInfo("debug handshake sent[0..1024]=\(report.localSentHex)")
-            appendInfo(
-                "debug handshake recv[0..1024]=\(report.localReceivedHex.isEmpty ? "<empty>" : report.localReceivedHex)"
-            )
+            appendInfo("debug handshake: \(glyph) elapsed=\(report.elapsedMs)ms")
+
+            // Surface the actionable hint (post-v2.0.53 classifier).
+            // Falls back to the raw error string only when the
+            // failure shape is unrecognised — that's the `.other`
+            // branch in `DebugHandshakeFailureClass`, where the
+            // operator genuinely needs to see the verbatim cause.
+            if let classification = report.failureClassification {
+                appendInfo("  ↪ \(classification.operatorHint)")
+                if classification == .other, let error = report.error, !error.isEmpty {
+                    appendLog(source: .stderr, text: "[debug handshake] \(error)")
+                }
+            }
+
+            // Naive's own stdout/stderr stays in the log — it
+            // already carries naive-perspective diagnostics that an
+            // operator may need when the failure mode is unusual.
             for line in report.naiveStdout {
                 appendInfo("debug handshake naive stdout: \(line)")
             }
             for line in report.naiveStderr {
                 appendLog(source: .stderr, text: "[debug handshake naive stderr] \(line)")
-            }
-            if let error = report.error, !error.isEmpty {
-                appendLog(source: .stderr, text: "[debug handshake error] \(error)")
             }
             let total = Self.formatElapsed(since: started)
             // **Redaction (post-v2.0.45):** the `server` and `target`
