@@ -541,6 +541,152 @@ public struct DebugHandshakeReport: Sendable, Codable, Hashable {
     }
 }
 
+/// One-line failure classification derived from a
+/// [`DebugHandshakeReport`]. Lets the orchestrator surface an
+/// actionable banner ("server accepted credentials but cannot
+/// reach the destination — check VPS egress") instead of the
+/// raw byte-level breakdown that requires an operator to read
+/// hex to interpret.
+///
+/// **post-v2.0.52:** added because the existing deterministic
+/// `Local Kernel / ISP / VPS` classifier in
+/// `TunnelOrchestrator.classifyConnectionFailure()` is
+/// reachability-only — it can't distinguish "the VPS dropped my
+/// CONNECT before it answered" (likely auth / unreachable) from
+/// "the VPS accepted CONNECT, said 200 OK, then RSTed the upstream
+/// pipe" (egress-blocked). Both classify as `.localKernel` under
+/// the reachability model because both Apple and the VPS host
+/// respond to TCP probes. The handshake report has the byte-
+/// level evidence the classifier needs, so we read it here and
+/// surface the verdict.
+public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
+    /// TCP / TLS to the proxy did not establish. The classic
+    /// "wrong server", "VPS down", or "ISP-blocking-port-443"
+    /// signature.
+    case connectFailed = "connect_failed"
+
+    /// Proxy answered the CONNECT with HTTP 407 — credentials
+    /// rejected. Distinguishable from `vpsEgressBlocked` because
+    /// the response bytes start with `HTTP/1.1 407` rather than
+    /// `HTTP/1.1 200`.
+    case proxyAuthRejected = "proxy_auth_rejected"
+
+    /// Proxy accepted CONNECT (HTTP 200 OK from forward_proxy /
+    /// NaiveProxy), then the connection RSTed without any bytes
+    /// from the upstream destination. The VPS reached the proxy
+    /// daemon and credentials worked, but the VPS itself can't
+    /// reach the target — egress firewall, ISP-level filter,
+    /// IPv6-only routing to a destination the VPS can't talk
+    /// to, DNS pointing at an unreachable IP, or the
+    /// destination blocked at the VPS's network.
+    case vpsEgressBlocked = "vps_egress_blocked"
+
+    /// Unclassified failure shape — non-2xx response that isn't
+    /// 407, partial bytes received before the error, or a
+    /// failure mode the byte-level evidence doesn't fit. Fall
+    /// through to the raw byte dump for diagnosis.
+    case other = "other"
+
+    /// User-facing one-line explanation. Read by
+    /// `TunnelOrchestrator.runDebugHandshake` to surface as an
+    /// `appendInfo` banner after the byte-level report.
+    public var operatorHint: String {
+        switch self {
+        case .connectFailed:
+            return
+                "Couldn't reach the proxy. Verify the server hostname / port, "
+                + "or test from the VPS shell with: "
+                + "`curl -v --max-time 5 https://<your-domain>`"
+        case .proxyAuthRejected:
+            return
+                "Server rejected the credentials (HTTP 407). If you imported "
+                + "via a subscription URL, try re-importing — the panel may "
+                + "have rotated the password. Otherwise check the Server / "
+                + "Username / Password fields in Settings."
+        case .vpsEgressBlocked:
+            return
+                "Server accepted credentials but cannot reach the destination. "
+                + "This is a VPS-side issue. On the VPS run: "
+                + "`curl -v --max-time 5 https://www.google.com/generate_204` "
+                + "— if it RSTs the same way, your VPS's egress to that "
+                + "destination is blocked (datacenter firewall, ISP filter, "
+                + "IPv6 routing, or a local iptables rule)."
+        case .other:
+            return
+                "Handshake failed in an unrecognised shape. Read the byte "
+                + "dump above for clues; `naive_stderr` lines (if any) are "
+                + "the proxy daemon's own diagnostic output."
+        }
+    }
+}
+
+extension DebugHandshakeReport {
+    /// Classify a non-success handshake report into one of four
+    /// actionable failure modes. Returns `nil` when the handshake
+    /// actually succeeded (`ok == true`); the caller doesn't
+    /// surface a hint in that case.
+    public var failureClassification: DebugHandshakeFailureClass? {
+        guard !ok else { return nil }
+        if !connectOk { return .connectFailed }
+
+        // connectOk == true → look at what came back from the
+        // proxy. The byte format is space-separated lowercase hex
+        // (e.g. "48 54 54 50 2f 31 2e 31 20 32 30 30 …" for
+        // "HTTP/1.1 200 …"). Strip the spaces for a stable
+        // prefix-compare.
+        let hex = localReceivedHex.replacingOccurrences(of: " ", with: "").lowercased()
+
+        // "HTTP/1.1 407" = 48 54 54 50 2f 31 2e 31 20 34 30 37
+        if hex.hasPrefix("485454502f312e3120343037") {
+            return .proxyAuthRejected
+        }
+
+        // "HTTP/1.1 200" = 48 54 54 50 2f 31 2e 31 20 32 30 30
+        // — proxy accepted CONNECT but post_connect_received==0
+        //   AND the error string matches a reset / refused / closed
+        //   pattern → VPS-egress-blocked.
+        let accepted200 = hex.hasPrefix("485454502f312e3120323030")
+        if accepted200,
+            postConnectReceivedBytes == 0,
+            Self.isConnectionResetError(error)
+        {
+            return .vpsEgressBlocked
+        }
+
+        return .other
+    }
+
+    /// True when the error string from a debug-handshake failure
+    /// indicates an upstream-pipe teardown (connection RSTed,
+    /// closed, refused, or aborted). Used by
+    /// `failureClassification` to disambiguate
+    /// `vpsEgressBlocked` from `other`.
+    ///
+    /// Permissive on purpose — the underlying naive / Rust core
+    /// emits the error string verbatim from the OS-level
+    /// `std::io::Error`, and the same root cause (egress
+    /// blocked, destination refused, peer RST) shows up under
+    /// several legitimate strings across macOS / Linux /
+    /// different Rust versions. False positives turn into the
+    /// actionable hint "check VPS egress" — which is still the
+    /// right next operator step even if the underlying issue
+    /// turns out to be something else.
+    nonisolated public static func isConnectionResetError(_ error: String?) -> Bool {
+        guard let error = error else { return false }
+        let lower = error.lowercased()
+        if lower.contains("reset by peer") { return true }
+        if lower.contains("connection reset") { return true }
+        if lower.contains("econnreset") { return true }
+        if lower.contains("os error 54") { return true }  // macOS ECONNRESET
+        if lower.contains("os error 104") { return true }  // Linux ECONNRESET
+        if lower.contains("connection refused") { return true }
+        if lower.contains("connection aborted") { return true }
+        if lower.contains("broken pipe") { return true }
+        if lower.contains("unexpected eof") { return true }
+        return false
+    }
+}
+
 /// Failure detail accompanying [`CoreOutbound.error`].
 public struct ErrorPayload: Sendable, Codable, Error, Hashable {
     public let code: String
