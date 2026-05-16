@@ -4,19 +4,17 @@
 //
 // scripts/audit.test.ts — pure-logic tests for the audit port.
 // The end-to-end suite is exercised every release cut and by every
-// `bin/ct doctor` invocation; this file pins the four pure surfaces
-// (argv parser, xcodebuild output classifier, lipo output parser,
-// schema-field presence check) so a future refactor of any of them
-// fails at `bun test` rather than at release-cut time.
+// `bin/ct doctor` invocation; this file pins the two audit-private
+// pure surfaces (argv parser + schema-field presence check) so a
+// future refactor fails at `bun test` rather than at release-cut
+// time.
+//
+// classifyXcodebuildOutput and parseLipoInfo were lifted to
+// scripts/lib/macho.ts; their tests live in scripts/lib/macho.test.ts.
 
 import { describe, expect, test } from "bun:test";
 
-import {
-    checkSchemaFields,
-    classifyXcodebuildOutput,
-    parseArgs,
-    parseLipoInfo,
-} from "./audit.ts";
+import { checkSchemaFields, parseArgs } from "./audit.ts";
 
 describe("audit parseArgs", () => {
     test("no args → ok, non-strict", () => {
@@ -53,96 +51,6 @@ describe("audit parseArgs", () => {
             expect(out.exitCode).toBe(2);
             expect(out.reason).toContain("unknown arg");
         }
-    });
-});
-
-describe("audit classifyXcodebuildOutput", () => {
-    test("missing test action → no-test-action", () => {
-        const out =
-            "some preamble\n" +
-            "Scheme COOL-TUNNEL is not currently configured for the test action\n" +
-            "tail\n";
-        expect(classifyXcodebuildOutput(out)).toBe("no-test-action");
-    });
-
-    test("TEST FAILED banner → failed", () => {
-        expect(classifyXcodebuildOutput("** TEST FAILED **\n")).toBe("failed");
-    });
-
-    test("Testing failed line → failed", () => {
-        expect(
-            classifyXcodebuildOutput("Testing failed:\n  some-test crashed\n"),
-        ).toBe("failed");
-    });
-
-    test("xcodebuild: error at line start → failed", () => {
-        expect(
-            classifyXcodebuildOutput(
-                "first line\nxcodebuild: error: Unable to find a destination\n",
-            ),
-        ).toBe("failed");
-    });
-
-    test("xcodebuild: error mid-line → NOT failed (anchor on line start)", () => {
-        // The bash grep uses `^xcodebuild: error`; mid-line mentions
-        // (e.g. inside a quoted shell command) shouldn't trip it.
-        expect(
-            classifyXcodebuildOutput(
-                "wrapper ran: xcodebuild: error string from previous run\n",
-            ),
-        ).toBe("ok");
-    });
-
-    test("no-test-action wins over failed shape (order matters)", () => {
-        // If a future xcodebuild version emits both shapes together,
-        // we still treat it as a documented SKIP rather than a hard
-        // failure. Matches bash's elif ordering.
-        const out =
-            "** TEST FAILED **\n" +
-            "Scheme COOL-TUNNEL is not currently configured for the test action\n";
-        expect(classifyXcodebuildOutput(out)).toBe("no-test-action");
-    });
-
-    test("clean output → ok", () => {
-        expect(classifyXcodebuildOutput("** TEST SUCCEEDED **\n")).toBe("ok");
-    });
-});
-
-describe("audit parseLipoInfo", () => {
-    test("universal fat file with arm64 + x86_64 → universal", () => {
-        const out =
-            "Architectures in the fat file: /path/to/naive are: arm64 x86_64 \n";
-        const parsed = parseLipoInfo(out);
-        expect(parsed.universal).toBe(true);
-        expect(parsed.archs).toContain("arm64");
-        expect(parsed.archs).toContain("x86_64");
-    });
-
-    test("thin arm64 binary → not universal", () => {
-        const out = "Non-fat file: /path/to/naive is architecture: arm64\n";
-        const parsed = parseLipoInfo(out);
-        expect(parsed.universal).toBe(false);
-        expect(parsed.archs).toEqual(["arm64"]);
-    });
-
-    test("thin x86_64 binary → not universal", () => {
-        const out = "Non-fat file: /path/to/naive is architecture: x86_64\n";
-        const parsed = parseLipoInfo(out);
-        expect(parsed.universal).toBe(false);
-        expect(parsed.archs).toEqual(["x86_64"]);
-    });
-
-    test("error / unknown output → empty archs, not universal", () => {
-        const parsed = parseLipoInfo("lipo: can't figure out the file type\n");
-        expect(parsed.universal).toBe(false);
-        expect(parsed.archs).toEqual([]);
-    });
-
-    test("ignores words that look like archs but aren't in the known set", () => {
-        const out = "Some bogus line mentioning aarch64 and amd64\n";
-        const parsed = parseLipoInfo(out);
-        expect(parsed.universal).toBe(false);
-        expect(parsed.archs).toEqual([]);
     });
 });
 

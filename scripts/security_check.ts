@@ -38,10 +38,20 @@ import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 
-import { parseLipoInfo } from "./audit.ts";
+import {
+    parseCargoTomlVersion,
+    parseLockfileVersion,
+    parseToolchainChannel,
+} from "./lib/cargo.ts";
 import { die } from "./lib/log.ts";
-import { parseCargoTomlVersion } from "./package_release.ts";
+import { parseLipoInfo } from "./lib/macho.ts";
 import { repoRoot } from "./lib/paths.ts";
+import {
+    looksBinary,
+    posixToJsRegex,
+    scanContentForSecrets,
+    type SecretMatch,
+} from "./lib/secrets.ts";
 import { captureStdout, run } from "./lib/spawn.ts";
 
 // ---------------------------------------------------------------------------
@@ -88,102 +98,6 @@ export function parseArgs(argv: readonly string[]): ArgsParse {
 // ---------------------------------------------------------------------------
 // Pure-logic helpers (exported for tests)
 // ---------------------------------------------------------------------------
-
-export interface SecretMatch {
-    readonly path: string;
-    readonly lineno: number;
-    readonly content: string;
-}
-
-/**
- * Translate the small subset of POSIX-ERE character classes the bash
- * patterns use (`[[:space:]]`, `[[:digit:]]`, `[[:alpha:]]`) into the
- * JS-RegExp equivalents. The rest of the patterns are already
- * cross-compatible.
- */
-export function posixToJsRegex(pattern: string): string {
-    return pattern
-        .replaceAll("[[:space:]]", "\\s")
-        .replaceAll("[[:digit:]]", "\\d")
-        .replaceAll("[[:alpha:]]", "[A-Za-z]")
-        .replaceAll("[[:alnum:]]", "[A-Za-z0-9]");
-}
-
-/**
- * Scan one file's text for any of the given regexes. Each match is
- * reported as `(path, 1-based lineno, line content trimmed)`.
- * Exported so tests can exercise the matcher without disk I/O.
- */
-export function scanContentForSecrets(
-    content: string,
-    relPath: string,
-    regexes: readonly RegExp[],
-): readonly SecretMatch[] {
-    const out: SecretMatch[] = [];
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] ?? "";
-        for (const re of regexes) {
-            if (re.test(line)) {
-                out.push({ path: relPath, lineno: i + 1, content: line });
-                break;
-            }
-        }
-    }
-    return out;
-}
-
-/**
- * Heuristic: a file is "binary" if its first 8 KB contains a null
- * byte. Mirrors `grep --binary-files=without-match`'s effect — we
- * skip such files entirely from the secret scan.
- */
-export function looksBinary(bytes: Uint8Array): boolean {
-    const limit = Math.min(bytes.length, 8192);
-    for (let i = 0; i < limit; i++) {
-        if (bytes[i] === 0) return true;
-    }
-    return false;
-}
-
-/**
- * Extract the version string from a Cargo.lock entry for the named
- * package. Cargo.lock has the shape:
- *
- *   [[package]]
- *   name = "<name>"
- *   version = "X.Y.Z"
- *   ...
- *
- * The bash version used `awk '/^name = "cool-tunnel-core"/{getline; print}'`
- * — find the `name = "<name>"` line, then return the next line. We
- * preserve that exact semantics (next line is the version line) and
- * extract the quoted value from it.
- */
-export function parseLockfileVersion(
-    content: string,
-    name: string,
-): string | null {
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length - 1; i++) {
-        if (lines[i] === `name = "${name}"`) {
-            const next = lines[i + 1] ?? "";
-            const match = /"([^"]+)"/.exec(next);
-            if (match) return match[1] ?? null;
-        }
-    }
-    return null;
-}
-
-/**
- * Extract the `channel = "..."` pin from a rust-toolchain.toml.
- * Anchored to start of line; first match wins.
- */
-export function parseToolchainChannel(content: string): string | null {
-    const re = /^channel\s*=\s*"([^"]*)"/m;
-    const match = re.exec(content);
-    return match ? (match[1] ?? null) : null;
-}
 
 /**
  * Check whether a LICENSE file's content matches the AGPL-3.0 header

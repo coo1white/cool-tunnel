@@ -33,6 +33,7 @@ import { existsSync, statSync } from "node:fs";
 import { cp, mkdir, rm, symlink, writeFile, chmod } from "node:fs/promises";
 import { basename, join } from "node:path";
 
+import { parseCargoTomlVersion } from "./lib/cargo.ts";
 import { die, ok, step } from "./lib/log.ts";
 import { repoRoot } from "./lib/paths.ts";
 import { captureStdout, run } from "./lib/spawn.ts";
@@ -83,19 +84,6 @@ export function parseArgs(argv: readonly string[]): ArgsParse {
 // ---------------------------------------------------------------------------
 // Pure-logic helpers (exported for tests)
 // ---------------------------------------------------------------------------
-
-/**
- * Extract the first `version = "..."` field from a Cargo.toml. The
- * bash version used `awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }'`
- * — first match wins, only top-level `version` (anchored to start of
- * line, so dependency-table `version = "..."` entries don't match).
- * Returns null if no anchored version line is found.
- */
-export function parseCargoTomlVersion(content: string): string | null {
-    const re = /^version\s*=\s*"([^"]*)"/m;
-    const match = re.exec(content);
-    return match ? (match[1] ?? null) : null;
-}
 
 /**
  * Extract the trailing token of `cool-tunnel-core --version`. The

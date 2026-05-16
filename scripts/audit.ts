@@ -51,6 +51,10 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { die, fail, step, warn } from "./lib/log.ts";
+import {
+    classifyXcodebuildOutput,
+    parseLipoInfo,
+} from "./lib/macho.ts";
 import { repoRoot } from "./lib/paths.ts";
 import { run } from "./lib/spawn.ts";
 
@@ -91,65 +95,6 @@ export function parseArgs(argv: readonly string[]): ArgsParse {
         }
     }
     return { ok: true, options: { strict } };
-}
-
-export type XcodebuildVerdict = "no-test-action" | "failed" | "ok";
-
-/**
- * Classify combined stdout+stderr of `xcodebuild test`. The bash
- * version greps for three distinct shapes:
- *   - "is not currently configured for the test action" → scheme has
- *     no XCTest target wired up; treated as a documented SKIP
- *   - "** TEST FAILED **" / "Testing failed" / line starts with
- *     "xcodebuild: error" → real failure
- *   - anything else → success (or warnings we don't gate on)
- * Order matters: the no-test-action probe wins over the failure
- * probe so a scheme without a test action doesn't get mis-classified.
- */
-export function classifyXcodebuildOutput(output: string): XcodebuildVerdict {
-    if (output.includes("is not currently configured for the test action")) {
-        return "no-test-action";
-    }
-    if (
-        output.includes("** TEST FAILED **") ||
-        output.includes("Testing failed") ||
-        /(^|\n)xcodebuild: error/.test(output)
-    ) {
-        return "failed";
-    }
-    return "ok";
-}
-
-/**
- * Parse `lipo -info <path>` output for the architectures it lists.
- * The line looks like `Architectures in the fat file: <path> are: arm64 x86_64`
- * or, for a thin binary, `Non-fat file: <path> is architecture: arm64`.
- * Either shape is matched by tokenising on whitespace and returning
- * the known-arch words. The bash version's universal check (`*x86_64*
- * && *arm64*`) is preserved as `.universal`.
- */
-export function parseLipoInfo(output: string): {
-    readonly archs: readonly string[];
-    readonly universal: boolean;
-} {
-    const known = new Set([
-        "arm64",
-        "arm64e",
-        "x86_64",
-        "x86_64h",
-        "i386",
-        "ppc",
-        "ppc64",
-    ]);
-    const archs = output
-        .split(/\s+/)
-        .map((tok) => tok.trim())
-        .filter((tok) => known.has(tok));
-    const set = new Set(archs);
-    return {
-        archs,
-        universal: set.has("arm64") && set.has("x86_64"),
-    };
 }
 
 /**
