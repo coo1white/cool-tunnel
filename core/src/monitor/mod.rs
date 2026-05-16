@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
-//! Connection monitoring for the running `naive` child.
+//! Connection monitoring for the running `sing-box` child.
 //!
 //! Periodically (driven by the dispatcher) the monitor runs
 //! `lsof -nP -a -p <pid> -iTCP`, parses the output, and decides whether the
 //! observed traffic pattern looks abnormal. An abnormality maps to one of
-//! the [`crate::protocol::AnomalyReason`] variants.
+//! the [`crate::protocol::AnomalyReason`] variants. The flow is binary-
+//! agnostic — only the supervised PID matters — so the rename from
+//! NaiveProxy to sing-box is a comment-only change here.
 
 mod heuristics;
 mod lsof;
@@ -77,7 +79,7 @@ pub async fn run(pid: u32, port: Port) -> Result<TrafficSnapshot, MonitorError> 
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // `lsof -p <pid>` exits 1 when the PID has no matching open
-    // files — a perfectly normal state for a `naive` that hasn't
+    // files — a perfectly normal state for a `sing-box` that hasn't
     // yet accepted a connection. Treating that as an error
     // produced spurious `tracing::warn!` lines on every probe of
     // an idle proxy. Only treat non-zero exit as an error when

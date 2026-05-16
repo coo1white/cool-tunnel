@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
+//
+// Debug handshake: drives one SOCKS5 connect through a temporary
+// `sing-box` child to confirm the VLESS+Reality outbound is wiring
+// up against the configured server. Replaces the v2.x HTTP-CONNECT
+// framing used by NaiveProxy.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -16,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
-use crate::config::NaiveConfig;
+use crate::config::SingboxConfig;
 use crate::domain::Profile;
 use crate::protocol::DebugHandshakeReport;
 use crate::redaction;
@@ -28,6 +33,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_POLL: Duration = Duration::from_millis(50);
 const HEX_CAPTURE_BYTES: usize = 1024;
 const TARGET_HOST: &str = "www.google.com";
+const TARGET_PORT: u16 = 443;
 const TARGET_AUTHORITY: &str = "www.google.com:443";
 const READ_LIMIT_BYTES: usize = HEX_CAPTURE_BYTES;
 const LOG_LINE_LIMIT: usize = 12;
@@ -37,13 +43,15 @@ const LOG_LINE_BYTES: usize = 512;
 enum DebugHandshakeError {
     #[error("failed to choose a temporary listener port: {0}")]
     PickPort(std::io::Error),
-    #[error("failed to spawn naive for debug handshake: {0}")]
+    #[error("failed to spawn sing-box for debug handshake: {0}")]
     Spawn(std::io::Error),
     #[error("failed to write temporary debug handshake config: {0}")]
     ConfigWrite(std::io::Error),
-    #[error("naive did not bind the temporary listener within {0:?}")]
+    #[error("failed to render temporary debug handshake config: {0}")]
+    ConfigRender(serde_json::Error),
+    #[error("sing-box did not bind the temporary listener within {0:?}")]
     StartupTimeout(Duration),
-    #[error("naive exited before binding the temporary listener")]
+    #[error("sing-box exited before binding the temporary listener")]
     ExitedEarly,
 }
 
@@ -72,10 +80,11 @@ async fn run_debug_handshake_inner(
     let port = pick_free_port()
         .await
         .map_err(DebugHandshakeError::PickPort)?;
-    let config =
-        DebugNaiveConfig::write(profile, port).map_err(DebugHandshakeError::ConfigWrite)?;
+    let config = DebugSingboxConfig::write(profile, port)?;
 
     let mut child = Command::new(binary_path)
+        .arg("run")
+        .arg("-c")
         .arg(config.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -87,13 +96,10 @@ async fn run_debug_handshake_inner(
         return Err(DebugHandshakeError::StartupTimeout(STARTUP_TIMEOUT));
     }
 
-    let target = TARGET_AUTHORITY;
-    let connect_request = format!(
-        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: cool-tunnel-debug-handshake\r\nProxy-Connection: keep-alive\r\n\r\n"
-    );
-    let trace = drive_local_connect(
+    let trace = drive_local_socks_connect(
         port,
-        connect_request.as_bytes(),
+        TARGET_HOST,
+        TARGET_PORT,
         &tls_client_hello(TARGET_HOST),
         deadline,
     )
@@ -107,7 +113,7 @@ async fn run_debug_handshake_inner(
 
     let ok = trace.error.is_none() && trace.connect_ok && trace.post_connect_received_bytes > 0;
 
-    let (naive_stdout, naive_stderr) = output.map_or_else(
+    let (singbox_stdout, singbox_stderr) = output.map_or_else(
         || (Vec::new(), Vec::new()),
         |out| (sanitize_lines(&out.stdout), sanitize_lines(&out.stderr)),
     );
@@ -121,23 +127,40 @@ async fn run_debug_handshake_inner(
         elapsed_ms: ms_to_u64(started.elapsed()),
         local_sent_hex: first_hex(&trace.sent),
         local_received_hex: first_hex(&trace.received),
-        naive_stdout,
-        naive_stderr,
+        singbox_stdout,
+        singbox_stderr,
         error: trace.error,
     })
 }
 
-struct DebugNaiveConfig {
+struct DebugSingboxConfig {
     path: PathBuf,
 }
 
-impl DebugNaiveConfig {
-    fn write(profile: &Profile, port: u16) -> Result<Self, std::io::Error> {
-        let proxy = NaiveConfig::from_profile(profile).proxy;
-        let proxy_json = serde_json::to_string(&proxy).map_err(std::io::Error::other)?;
-        let body = format!(
-            "{{\n  \"listen\": \"http://127.0.0.1:{port}\",\n  \"proxy\": {proxy_json}\n}}\n"
-        );
+impl DebugSingboxConfig {
+    fn write(profile: &Profile, listen_port: u16) -> Result<Self, DebugHandshakeError> {
+        // Re-render the canonical client config but force the
+        // local SOCKS listener onto `listen_port`. We can't go
+        // through `Profile::local_port` (the type rejects 0 and
+        // we want to honour whatever ephemeral port we picked) so
+        // we serialize the SingboxConfig produced from `profile`
+        // and then post-process the JSON Value to swap the port.
+        let canonical = SingboxConfig::from_profile(profile);
+        let canonical_json = canonical
+            .to_pretty_json()
+            .map_err(DebugHandshakeError::ConfigRender)?;
+        let mut value: serde_json::Value = serde_json::from_str(&canonical_json)
+            .map_err(DebugHandshakeError::ConfigRender)?;
+        // Swap inbounds[0].listen_port to the ephemeral port.
+        if let Some(port_field) = value
+            .get_mut("inbounds")
+            .and_then(|inbounds| inbounds.get_mut(0))
+            .and_then(|first| first.get_mut("listen_port"))
+        {
+            *port_field = serde_json::Value::from(listen_port);
+        }
+        let body = serde_json::to_string_pretty(&value)
+            .map_err(DebugHandshakeError::ConfigRender)?;
 
         for attempt in 0_u8..16 {
             let path = debug_config_path(attempt);
@@ -148,19 +171,20 @@ impl DebugNaiveConfig {
 
             match options.open(&path) {
                 Ok(mut file) => {
-                    file.write_all(body.as_bytes())?;
-                    file.sync_all()?;
+                    file.write_all(body.as_bytes())
+                        .map_err(DebugHandshakeError::ConfigWrite)?;
+                    file.sync_all().map_err(DebugHandshakeError::ConfigWrite)?;
                     return Ok(Self { path });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(err),
+                Err(err) => return Err(DebugHandshakeError::ConfigWrite(err)),
             }
         }
 
-        Err(std::io::Error::new(
+        Err(DebugHandshakeError::ConfigWrite(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "could not allocate a unique temporary debug handshake config path",
-        ))
+        )))
     }
 
     fn path(&self) -> &Path {
@@ -168,7 +192,7 @@ impl DebugNaiveConfig {
     }
 }
 
-impl Drop for DebugNaiveConfig {
+impl Drop for DebugSingboxConfig {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
@@ -215,15 +239,19 @@ struct LocalConnectTrace {
     error: Option<String>,
 }
 
-async fn drive_local_connect(
+/// Drives a SOCKS5 CONNECT through the temporary sing-box listener
+/// and pushes a TLS ClientHello through it, capturing the first
+/// reply bytes. Bounded by `deadline` end-to-end.
+async fn drive_local_socks_connect(
     port: u16,
-    connect_request: &[u8],
+    target_host: &str,
+    target_port: u16,
     post_connect_payload: &[u8],
     deadline: Duration,
 ) -> LocalConnectTrace {
     match timeout(
         deadline,
-        drive_local_connect_inner(port, connect_request, post_connect_payload),
+        drive_local_socks_connect_inner(port, target_host, target_port, post_connect_payload),
     )
     .await
     {
@@ -238,9 +266,10 @@ async fn drive_local_connect(
     }
 }
 
-async fn drive_local_connect_inner(
+async fn drive_local_socks_connect_inner(
     port: u16,
-    connect_request: &[u8],
+    target_host: &str,
+    target_port: u16,
     post_connect_payload: &[u8],
 ) -> LocalConnectTrace {
     let mut trace = LocalConnectTrace::default();
@@ -252,33 +281,110 @@ async fn drive_local_connect_inner(
         }
     };
 
-    if let Err(err) = stream.write_all(connect_request).await {
-        trace.error = Some(format!("failed to write CONNECT request: {err}"));
+    // ---- SOCKS5 greeting: VER=5, NMETHODS=1, METHODS=[NoAuth(0)].
+    let greeting = [0x05_u8, 0x01, 0x00];
+    if let Err(err) = stream.write_all(&greeting).await {
+        trace.error = Some(format!("failed to write SOCKS5 greeting: {err}"));
         return trace;
     }
-    trace.sent.extend_from_slice(connect_request);
+    append_capture(&mut trace.sent, &greeting);
     if let Err(err) = stream.flush().await {
-        trace.error = Some(format!("failed to flush CONNECT request: {err}"));
+        trace.error = Some(format!("failed to flush SOCKS5 greeting: {err}"));
         return trace;
     }
 
-    if let Err(err) = read_until_connect_response(&mut stream, &mut trace.received).await {
-        trace.error = Some(format!("failed to read CONNECT response: {err}"));
+    // Greeting reply: VER, METHOD. NoAuth ⇒ 0x00.
+    let mut greeting_reply = [0_u8; 2];
+    if let Err(err) = stream.read_exact(&mut greeting_reply).await {
+        trace.error = Some(format!("failed to read SOCKS5 greeting reply: {err}"));
         return trace;
     }
-    let received_text = String::from_utf8_lossy(&trace.received).to_ascii_lowercase();
-    trace.connect_ok =
-        received_text.starts_with("http/1.1 200") || received_text.starts_with("http/1.0 200");
-    if !trace.connect_ok {
-        trace.error = Some("CONNECT did not return HTTP 200".to_owned());
+    append_capture(&mut trace.received, &greeting_reply);
+    if greeting_reply[0] != 0x05 || greeting_reply[1] != 0x00 {
+        trace.error = Some(format!(
+            "SOCKS5 greeting rejected (ver={:#04x}, method={:#04x})",
+            greeting_reply[0], greeting_reply[1]
+        ));
         return trace;
     }
 
+    // ---- SOCKS5 CONNECT request: VER=5, CMD=1 (CONNECT), RSV=0,
+    //      ATYP=3 (domain), DST.LEN, DST.HOST, DST.PORT (BE u16).
+    let host_bytes = target_host.as_bytes();
+    if host_bytes.len() > u8::MAX as usize {
+        trace.error = Some("SOCKS5 target host exceeds 255 bytes".to_owned());
+        return trace;
+    }
+    let mut request = Vec::with_capacity(7 + host_bytes.len());
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03]);
+    request.push(host_bytes.len() as u8);
+    request.extend_from_slice(host_bytes);
+    request.extend_from_slice(&target_port.to_be_bytes());
+    if let Err(err) = stream.write_all(&request).await {
+        trace.error = Some(format!("failed to write SOCKS5 CONNECT: {err}"));
+        return trace;
+    }
+    append_capture(&mut trace.sent, &request);
+    if let Err(err) = stream.flush().await {
+        trace.error = Some(format!("failed to flush SOCKS5 CONNECT: {err}"));
+        return trace;
+    }
+
+    // CONNECT reply: VER, REP, RSV, ATYP, BND.ADDR…, BND.PORT.
+    // Read the fixed prefix, then the variable-length BND.ADDR
+    // based on ATYP.
+    let mut reply_head = [0_u8; 4];
+    if let Err(err) = stream.read_exact(&mut reply_head).await {
+        trace.error = Some(format!("failed to read SOCKS5 CONNECT reply head: {err}"));
+        return trace;
+    }
+    append_capture(&mut trace.received, &reply_head);
+    if reply_head[0] != 0x05 {
+        trace.error = Some(format!(
+            "SOCKS5 reply carried unexpected version {:#04x}",
+            reply_head[0]
+        ));
+        return trace;
+    }
+    if reply_head[1] != 0x00 {
+        trace.error = Some(format!(
+            "SOCKS5 CONNECT failed with REP={:#04x}",
+            reply_head[1]
+        ));
+        return trace;
+    }
+    // ATYP-driven address byte count.
+    let addr_len = match reply_head[3] {
+        0x01 => 4,  // IPv4
+        0x04 => 16, // IPv6
+        0x03 => {
+            let mut len_byte = [0_u8; 1];
+            if let Err(err) = stream.read_exact(&mut len_byte).await {
+                trace.error = Some(format!("failed to read SOCKS5 reply ATYP=domain len: {err}"));
+                return trace;
+            }
+            append_capture(&mut trace.received, &len_byte);
+            usize::from(len_byte[0])
+        }
+        other => {
+            trace.error = Some(format!("SOCKS5 reply carried unknown ATYP {other:#04x}"));
+            return trace;
+        }
+    };
+    let mut tail = vec![0_u8; addr_len + 2];
+    if let Err(err) = stream.read_exact(&mut tail).await {
+        trace.error = Some(format!("failed to read SOCKS5 CONNECT reply tail: {err}"));
+        return trace;
+    }
+    append_capture(&mut trace.received, &tail);
+    trace.connect_ok = true;
+
+    // ---- Push TLS ClientHello through the established tunnel.
     if let Err(err) = stream.write_all(post_connect_payload).await {
         trace.error = Some(format!("failed to write post-CONNECT TLS probe: {err}"));
         return trace;
     }
-    trace.sent.extend_from_slice(post_connect_payload);
+    append_capture(&mut trace.sent, post_connect_payload);
     if let Err(err) = stream.flush().await {
         trace.error = Some(format!("failed to flush post-CONNECT TLS probe: {err}"));
         return trace;
@@ -301,28 +407,9 @@ async fn drive_local_connect_inner(
     trace
 }
 
-async fn read_until_connect_response(
-    stream: &mut TcpStream,
-    received: &mut Vec<u8>,
-) -> Result<(), std::io::Error> {
-    let mut buffer = [0_u8; 512];
-    while !has_header_terminator(received) && received.len() < READ_LIMIT_BYTES {
-        let n = stream.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        append_capture(received, &buffer[..n]);
-    }
-    Ok(())
-}
-
 fn append_capture(out: &mut Vec<u8>, bytes: &[u8]) {
     let remaining = READ_LIMIT_BYTES.saturating_sub(out.len());
     out.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-}
-
-fn has_header_terminator(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|window| window == b"\r\n\r\n")
 }
 
 fn tls_client_hello(host: &str) -> Vec<u8> {
@@ -462,14 +549,17 @@ mod tests {
 
     #[test]
     fn first_hex_caps_and_formats_bytes() {
-        assert_eq!(first_hex(b"CONNECT"), "43 4f 4e 4e 45 43 54");
+        // SOCKS5 greeting payload, hexed.
+        assert_eq!(first_hex(&[0x05, 0x01, 0x00]), "05 01 00");
     }
 
     #[test]
-    fn sanitize_lines_redacts_userinfo() {
-        let lines = sanitize_lines(b"proxy https://user:secret@example.com\n");
+    fn sanitize_lines_redacts_uuid() {
+        let lines = sanitize_lines(
+            b"vless-out using uuid 11111111-2222-3333-4444-555555555555\n",
+        );
         assert_eq!(lines.len(), 1);
-        assert!(!lines[0].contains("secret"));
+        assert!(!lines[0].contains("11111111-2222-3333-4444-555555555555"));
     }
 
     #[test]
@@ -480,11 +570,5 @@ mod tests {
             .windows(b"www.google.com".len())
             .any(|w| w == b"www.google.com"));
         assert!(hello.windows(b"http/1.1".len()).any(|w| w == b"http/1.1"));
-    }
-
-    #[test]
-    fn header_terminator_detects_complete_response() {
-        assert!(!has_header_terminator(b"HTTP/1.1 200 OK\r\n"));
-        assert!(has_header_terminator(b"HTTP/1.1 200 OK\r\n\r\n"));
     }
 }

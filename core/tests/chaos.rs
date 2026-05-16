@@ -388,14 +388,21 @@ async fn chaos_id_correlation_holds_under_interleaved_traffic() {
     };
     // Invalid (port out of range) but well-formed JSON with an id.
     let invalid = |id: u64| {
+        // Same sample_profile shape but with an unparseable
+        // localPort to drive validate_profile into the error branch.
         json!({
             "id": id,
             "method": "validate_profile",
             "params": {"profile": {
                 "id": "x",
-                "server": "naive.example.com",
+                "server": "vless.example.com",
                 "username": "alice",
-                "password": "p",
+                "uuid": "11111111-2222-3333-4444-555555555555",
+                "reality": {
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "dest_host": "www.microsoft.com",
+                    "short_id": ""
+                },
                 "localPort": "999999"
             }},
         })
@@ -1009,11 +1016,19 @@ impl XorShift {
 // ---------------------------------------------------------------------
 
 fn sample_profile() -> serde_json::Value {
+    // v3.0.0 client profile shape: VLESS UUID + Reality block replace
+    // the v2.x basic-auth password. Mirrors the wire shape the Swift
+    // side constructs after a v=2 subscription manifest import.
     json!({
         "id": "default",
-        "server": "naive.example.com",
+        "server": "vless.example.com",
         "username": "alice",
-        "password": "secret",
+        "uuid": "11111111-2222-3333-4444-555555555555",
+        "reality": {
+            "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dest_host": "www.microsoft.com",
+            "short_id": ""
+        },
         "localPort": "1080",
     })
 }

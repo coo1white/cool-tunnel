@@ -204,13 +204,25 @@ fn elapsed_ms(start: Instant) -> f64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::{Credentials, Password, Port, ProfileId, ServerAddress, Username};
+    use crate::domain::{
+        Credentials, Port, ProfileId, Reality, RealityDestHost, RealityPublicKey, RealityShortId,
+        ServerAddress, Username, Uuid,
+    };
 
     fn profile_for(server: &str) -> Profile {
         Profile::new(
             ProfileId::new("test"),
             ServerAddress::parse(server).unwrap(),
-            Credentials::new(Username::parse("u").unwrap(), Password::parse("p").unwrap()),
+            Credentials::new(
+                Username::parse("u").unwrap(),
+                Uuid::parse("11111111-2222-3333-4444-555555555555").unwrap(),
+                Reality::new(
+                    RealityPublicKey::parse("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                        .unwrap(),
+                    RealityDestHost::parse("www.microsoft.com").unwrap(),
+                    RealityShortId::parse("").unwrap(),
+                ),
+            ),
             Port::new(1080).unwrap(),
         )
     }

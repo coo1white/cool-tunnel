@@ -5,12 +5,13 @@
 //!
 //! Same `cool-tunnel-core` binary as the client. Launched with
 //! `--mode server [--listen ADDR] [--allow-public]`. Exposes the
-//! *pure* parts of the engine (config + PAC generation,
+//! *pure* parts of the engine (sing-box config generation + profile
 //! validation) over plain HTTP/1.1 + JSON.
 //!
 //! Intentionally does NOT:
-//!   - spawn `naive` (the server-tier proxy is `forwardproxy@naive`
-//!     under Caddy; the engine just hands out config text);
+//!   - spawn `sing-box` (the server-tier proxy is the standalone
+//!     sing-box container; the engine just hands out client-side
+//!     config text);
 //!   - authenticate (run on `127.0.0.1`, reverse-proxy through
 //!     Caddy/NGINX with whatever auth you already have);
 //!   - persist (stateless — the deployer's DB is the source of
@@ -20,18 +21,13 @@
 //!
 //!   GET  /health             → `{"status":"ok"}`
 //!   GET  /version            → `{"name":"cool-tunnel-core","version":"X.Y.Z"}`
-//!   POST /naive/validate     → body: any JSON; returns `ValidationReport`
-//!   POST /naive/config       → body: `Profile` JSON; returns `{"json":"..."}`
-//!   POST /naive/pac          → body: `{"direct_domains":[…],"port":1080}`
-//!                              returns `{"js":"..."}`
+//!   POST /singbox/validate   → body: any JSON; returns `ValidationReport`
+//!   POST /singbox/config     → body: `Profile` JSON; returns `{"json":"..."}`
 //!
 //! ## Logging policy (do not violate)
 //!
-//! Handlers MUST NOT log the request body, the resolved `Profile`,
-//! or the contents of `ApiError::*` payloads. `Profile` carries
-//! `Password::expose_secret`. Log the *cause* (a
-//! `serde_json::Error`'s `Display` references field paths, not
-//! values) but never the payload itself.
+//! Handlers MUST NOT log the request body or the resolved `Profile`.
+//! `Profile` carries the VLESS UUID and Reality public_key.
 
 use std::net::SocketAddr;
 
@@ -41,10 +37,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use cool_tunnel_core::config::{generate_pac, NaiveConfig};
-use cool_tunnel_core::domain::{Port, Profile, ServerAddress};
+use cool_tunnel_core::config::SingboxConfig;
+use cool_tunnel_core::domain::Profile;
 use cool_tunnel_core::protocol::ValidationReport;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Default listen address. Loopback-only by design.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
@@ -72,8 +68,6 @@ pub async fn run(listen: SocketAddr, allow_public: bool) -> std::io::Result<()> 
         ));
     }
     if !listen.ip().is_loopback() {
-        // Operator opted in — surface the choice prominently
-        // for post-incident review.
         tracing::warn!(
             %listen,
             "binding non-loopback address with --allow-public — \
@@ -113,19 +107,11 @@ async fn shutdown_signal() {
 
 /// Builds the axum router.
 pub fn router() -> Router {
-    // 64 KiB body cap: tight ceiling against slowloris / oversize
-    // bodies (default `Json<T>` cap is 2 MiB).
-    //
-    // `ConcurrencyLimitLayer(64)` caps total in-flight requests.
-    // Bounds the slowloris-via-many-connections path without the
-    // `tower::timeout::TimeoutLayer` boilerplate. A proper
-    // body-read timeout is deferred.
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
-        .route("/naive/validate", post(naive_validate))
-        .route("/naive/config", post(naive_config))
-        .route("/naive/pac", post(naive_pac))
+        .route("/singbox/validate", post(singbox_validate))
+        .route("/singbox/config", post(singbox_config))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .layer(tower::limit::ConcurrencyLimitLayer::new(64))
 }
@@ -154,7 +140,7 @@ async fn version() -> Json<VersionResponse> {
     })
 }
 
-/// `POST /naive/validate` — runs the `Profile` deserializer and
+/// `POST /singbox/validate` — runs the `Profile` deserializer and
 /// reports the outcome.
 ///
 ///   - `Ok(_)`  → `{"ok":true,"reason":null}`
@@ -163,15 +149,13 @@ async fn version() -> Json<VersionResponse> {
 ///
 /// The wire `reason` is intentionally generic so an unauthenticated
 /// caller cannot enumerate the engine's validation rules.
-async fn naive_validate(
+async fn singbox_validate(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Json<ValidationReport> {
     let value = match body {
         Ok(Json(v)) => v,
         Err(rejection) => {
-            // Return structured `ok:false` rather than a 400 so
-            // the contract shape stays consistent.
-            tracing::warn!(error = %rejection, "naive_validate: rejected body envelope");
+            tracing::warn!(error = %rejection, "singbox_validate: rejected body envelope");
             return Json(ValidationReport {
                 ok: false,
                 reason: Some("invalid request body".to_owned()),
@@ -184,7 +168,7 @@ async fn naive_validate(
             reason: None,
         }),
         Err(err) => {
-            tracing::warn!(error = %err, "naive_validate: profile rejected");
+            tracing::warn!(error = %err, "singbox_validate: profile rejected");
             Json(ValidationReport {
                 ok: false,
                 reason: Some("invalid profile".to_owned()),
@@ -194,74 +178,20 @@ async fn naive_validate(
 }
 
 #[derive(Serialize)]
-struct NaiveConfigResponse {
+struct SingboxConfigResponse {
     json: String,
 }
 
-async fn naive_config(
+async fn singbox_config(
     body: Result<Json<Profile>, JsonRejection>,
-) -> Result<Json<NaiveConfigResponse>, ApiError> {
+) -> Result<Json<SingboxConfigResponse>, ApiError> {
     let Json(profile) = body.map_err(|err| ApiError::from_json_rejection(&err))?;
-    let config = NaiveConfig::from_profile(&profile);
+    let config = SingboxConfig::from_profile(&profile);
     let json = config.to_pretty_json().map_err(|err| {
-        tracing::error!(error = %err, "naive_config: serialize failed");
+        tracing::error!(error = %err, "singbox_config: serialize failed");
         ApiError::Internal
     })?;
-    Ok(Json(NaiveConfigResponse { json }))
-}
-
-#[derive(Deserialize)]
-struct NaivePacRequest {
-    direct_domains: Vec<String>,
-    port: Port,
-}
-
-#[derive(Serialize)]
-struct NaivePacResponse {
-    js: String,
-}
-
-/// Cap on `direct_domains` per request. Without this a 64 KiB
-/// body could carry ~16k single-char entries, each forcing a
-/// `to_lowercase()` allocation plus `serde_json::to_string` plus
-/// `format!`. 1024 keeps total work well under 10 ms.
-const MAX_PAC_DOMAINS: usize = 1024;
-/// RFC 1035 hostname byte limit. Delegates to
-/// [`ServerAddress::MAX_LEN`] so both PAC entries and a
-/// `Profile.server` validate against one constant.
-const MAX_PAC_DOMAIN_BYTES: usize = ServerAddress::MAX_LEN;
-
-async fn naive_pac(
-    body: Result<Json<NaivePacRequest>, JsonRejection>,
-) -> Result<Json<NaivePacResponse>, ApiError> {
-    let Json(request) = body.map_err(|err| ApiError::from_json_rejection(&err))?;
-    // Inline caps — `Vec<String>` has no native serde attribute
-    // for max-items / max-byte-len, and a custom `deserialize_with`
-    // would have to duplicate the type.
-    if request.direct_domains.len() > MAX_PAC_DOMAINS {
-        tracing::warn!(
-            count = request.direct_domains.len(),
-            cap = MAX_PAC_DOMAINS,
-            "naive_pac: direct_domains over cap"
-        );
-        return Err(ApiError::BadRequest);
-    }
-    if let Some(too_long) = request
-        .direct_domains
-        .iter()
-        .find(|d| d.len() > MAX_PAC_DOMAIN_BYTES)
-    {
-        tracing::warn!(
-            len = too_long.len(),
-            cap = MAX_PAC_DOMAIN_BYTES,
-            "naive_pac: domain entry over per-entry byte cap"
-        );
-        return Err(ApiError::BadRequest);
-    }
-    // With the caps above, synchronous `generate_pac` runs under
-    // 10 ms — no `spawn_blocking` needed.
-    let js = generate_pac(&request.direct_domains, request.port);
-    Ok(Json(NaivePacResponse { js }))
+    Ok(Json(SingboxConfigResponse { json }))
 }
 
 // MARK: - Error type

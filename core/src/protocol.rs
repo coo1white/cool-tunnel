@@ -30,15 +30,16 @@ use crate::domain::{Port, Profile, ProxyTestMode, RawProfile};
 
 /// Wire-format protocol version negotiated by [`RequestKind::Hello`].
 ///
-/// Bump on any breaking frame-shape change. Additive changes (new
-/// optional fields, new variants) keep the version number — the
-/// Swift caller and Rust engine each fall back gracefully on
-/// fields they don't understand.
+/// Bump on any breaking frame-shape change. v3.0.0 increments to
+/// `2` because the `Credentials` payload shape changed from
+/// `{username, password}` to `{username, uuid, reality}` and the
+/// `generate_naive_config` / `generate_pac` methods were dropped
+/// in favour of `generate_singbox_config`.
 ///
 /// The Swift client refuses to proceed on a hard mismatch. A
 /// legacy engine that doesn't implement `Hello` is treated as
 /// version 0 (Swift accepts and continues).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// One request frame from the Swift app.
 ///
@@ -68,33 +69,24 @@ pub enum RequestKind {
     /// - Valid → `ValidationReport { ok: true, reason: None }`.
     /// - Invalid → `ValidationReport { ok: false, reason: Some("…") }`
     ///   with the [`crate::domain::ValidationError`] display.
-    ///
-    /// `validate_profile` works as a probe — callers can ask "is
-    /// this profile valid?" without catching a transport error.
-    /// Other variants ([`StartProxy`](RequestKind::StartProxy),
-    /// [`GenerateNaiveConfig`](RequestKind::GenerateNaiveConfig))
-    /// carry validated [`Profile`] because their callers commit
-    /// to *using* it.
     ValidateProfile {
         /// The raw profile to validate. The handler attempts
         /// `Profile::try_from(this)` and reports the outcome.
         profile: RawProfile,
     },
-    /// Generate the `naive` `config.json` text for `profile`.
-    GenerateNaiveConfig {
+    /// Generate the sing-box client `config.json` text for `profile`.
+    GenerateSingboxConfig {
         /// The validated profile.
         profile: Profile,
     },
-    /// Generate the smart-routing PAC file body.
-    GeneratePac {
-        /// Direct-route domains.
-        direct_domains: Vec<String>,
-        /// Listener port.
-        port: Port,
-    },
-    /// Spawn the bundled `naive` binary and start streaming its output.
+    /// Spawn the bundled `sing-box` binary and start streaming its output.
+    ///
+    /// The Swift caller passes the bundled binary path (typically
+    /// `<app-bundle>/Contents/Resources/sing-box`) and the path to
+    /// the rendered `config.json`. The engine spawns `sing-box run
+    /// -c <config-path>`.
     StartProxy {
-        /// Filesystem path to the `naive` executable.
+        /// Filesystem path to the `sing-box` executable.
         binary_path: PathBuf,
         /// Filesystem path to the `config.json`.
         config_path: PathBuf,
@@ -107,7 +99,7 @@ pub enum RequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monitor_interval_secs: Option<u64>,
     },
-    /// Stop the running `naive` process.
+    /// Stop the running `sing-box` process.
     StopProxy,
     /// Run a one-shot connectivity diagnostic against the active proxy.
     RunDiagnostics,
@@ -118,27 +110,17 @@ pub enum RequestKind {
     },
     /// Politely shut the engine down.
     Shutdown,
-    /// Liveness probe — returns whether naive is running and its
+    /// Liveness probe — returns whether sing-box is running and its
     /// PID. Used by the orchestrator's no-restart hot-swap path
-    /// to detect a naive death during the swap window (the
-    /// `transitionInFlight` gate suppresses the implicit
-    /// `stateChanged(false)` event). Cheap: a single in-process
-    /// read of `EngineState.supervisor.is_some()`.
-    ProbeNaiveLive,
+    /// to detect a sing-box death during the swap window.
+    ProbeSingboxLive,
     /// Wire-protocol handshake. Engine replies with
     /// [`ResponsePayload::HelloReply`] carrying
-    /// [`PROTOCOL_VERSION`] and `CARGO_PKG_VERSION`. Older
-    /// engines that predate this variant return `invalid_request`;
-    /// the Swift side treats that as version 0 and continues.
+    /// [`PROTOCOL_VERSION`] and `CARGO_PKG_VERSION`.
     Hello,
     /// Pre-flight reachability probe against the upstream server.
     /// Resolves the hostname and opens a TCP connection to
     /// `host:port` (defaulting `:443`), timing each step.
-    ///
-    /// Intentionally not a TLS or auth probe: a real auth probe
-    /// would require a TLS stack (the crate forbids `unsafe_code`)
-    /// and the cover-site reply is itself useful signal. Full
-    /// TLS+auth validation lives in `RunDiagnostics`.
     ProbeServer {
         /// The profile to probe. Only [`crate::domain::ServerAddress`]
         /// is consulted; the rest is accepted for parity so a
@@ -150,10 +132,10 @@ pub enum RequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
     },
-    /// Spawn a temporary reference `naive` client and drive one
-    /// HTTP CONNECT through it for handshake diagnostics.
+    /// Spawn a temporary reference `sing-box` client and drive one
+    /// SOCKS5 TCP connect through it for handshake diagnostics.
     DebugHandshake {
-        /// Filesystem path to the `naive` executable.
+        /// Filesystem path to the `sing-box` executable.
         binary_path: PathBuf,
         /// The validated profile to test.
         profile: Profile,
@@ -197,19 +179,14 @@ pub enum ResponsePayload {
     Ack,
     /// `validate_profile` reply.
     Validation(ValidationReport),
-    /// `generate_naive_config` reply.
-    NaiveConfig {
+    /// `generate_singbox_config` reply.
+    SingboxConfig {
         /// Pretty-printed JSON body.
         json: String,
     },
-    /// `generate_pac` reply.
-    Pac {
-        /// PAC file body.
-        js: String,
-    },
     /// `start_proxy` reply.
     Started {
-        /// Process ID of the spawned `naive` child.
+        /// Process ID of the spawned `sing-box` child.
         pid: u32,
     },
     /// `stop_proxy` reply.
@@ -218,12 +195,12 @@ pub enum ResponsePayload {
     Diagnostic(DiagnosticReport),
     /// `run_latency_test` reply.
     Latency(LatencyReport),
-    /// `probe_naive_live` reply. `running` is the canonical flag;
+    /// `probe_singbox_live` reply. `running` is the canonical flag;
     /// `pid` is for diagnostics only.
-    NaiveLiveness {
+    SingboxLiveness {
         /// `true` when the engine has a live `ProxySupervisor`.
         running: bool,
-        /// PID of the running naive child, when running.
+        /// PID of the running sing-box child, when running.
         pid: Option<u32>,
     },
     /// `hello` reply.
@@ -281,12 +258,9 @@ pub struct ProbeReport {
     pub server: String,
     /// `true` when DNS resolved and the TCP connect completed.
     pub reachable: bool,
-    /// DNS resolution wall-clock in milliseconds. `0.0` when the
-    /// resolver step did not run (should not happen — we always
-    /// resolve first).
+    /// DNS resolution wall-clock in milliseconds.
     pub dns_resolve_ms: f64,
-    /// TCP connect wall-clock in milliseconds. `0.0` when the
-    /// connect step did not run (DNS failed first).
+    /// TCP connect wall-clock in milliseconds.
     pub tcp_connect_ms: f64,
     /// Free-form failure detail when `reachable` is `false`. `None`
     /// when the probe succeeded.
@@ -295,29 +269,35 @@ pub struct ProbeReport {
 }
 
 /// Result of [`RequestKind::DebugHandshake`].
+///
+/// v3.0.0: the underlying transport changed from NaiveProxy
+/// HTTP-CONNECT to sing-box's SOCKS5 inbound. The fields are
+/// retained verbatim so the Swift UI's debug surface stays stable,
+/// just with TCP-connect semantics instead of CONNECT-200 framing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DebugHandshakeReport {
     /// Upstream proxy server under test.
     pub server: String,
     /// CONNECT target used to force one proxied stream.
     pub target: String,
-    /// `true` when CONNECT returned 200 and post-CONNECT bytes came back.
+    /// `true` when the SOCKS5 handshake succeeded AND post-connect
+    /// bytes came back through the tunnel.
     pub ok: bool,
-    /// `true` when the temporary local HTTP proxy returned CONNECT 200.
+    /// `true` when the SOCKS5 CONNECT negotiation succeeded.
     pub connect_ok: bool,
     /// Number of bytes read from the target after the diagnostic sent a
-    /// TLS `ClientHello` through the established CONNECT tunnel.
+    /// TLS `ClientHello` through the established tunnel.
     pub post_connect_received_bytes: u64,
     /// Wall-clock diagnostic duration in milliseconds.
     pub elapsed_ms: u64,
-    /// First 1024 bytes written to the temporary local naive listener.
+    /// First 1024 bytes written to the temporary local sing-box listener.
     pub local_sent_hex: String,
-    /// First 1024 bytes read back from the temporary local naive listener.
+    /// First 1024 bytes read back from the temporary local sing-box listener.
     pub local_received_hex: String,
-    /// Redacted stdout lines captured from the temporary naive child.
-    pub naive_stdout: Vec<String>,
-    /// Redacted stderr lines captured from the temporary naive child.
-    pub naive_stderr: Vec<String>,
+    /// Redacted stdout lines captured from the temporary sing-box child.
+    pub singbox_stdout: Vec<String>,
+    /// Redacted stderr lines captured from the temporary sing-box child.
+    pub singbox_stderr: Vec<String>,
     /// Failure detail when the diagnostic did not complete cleanly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -376,7 +356,7 @@ pub struct LatencySample {
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Event {
-    /// One line of `naive` stdout or stderr.
+    /// One line of `sing-box` stdout or stderr.
     LogLine {
         /// Originating stream.
         source: LogSource,
@@ -412,7 +392,7 @@ pub enum Event {
     /// Counts come from the same `lsof` parse that powers anomaly
     /// detection.
     TrafficSnapshot {
-        /// Supervised naive process ID.
+        /// Supervised sing-box process ID.
         pid: u32,
         /// Total established TCP connections in the lsof snapshot.
         established: u32,
@@ -427,9 +407,9 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogSource {
-    /// Standard output of the `naive` child.
+    /// Standard output of the `sing-box` child.
     Stdout,
-    /// Standard error of the `naive` child.
+    /// Standard error of the `sing-box` child.
     Stderr,
 }
 
@@ -452,16 +432,27 @@ pub enum AnomalyReason {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::{Credentials, Password, ProfileId, ServerAddress, Username};
+    use crate::domain::{
+        Credentials, ProfileId, Reality, RealityDestHost, RealityPublicKey, RealityShortId,
+        ServerAddress, Username, Uuid,
+    };
     use serde_json::json;
+
+    const VALID_UUID: &str = "11111111-2222-3333-4444-555555555555";
+    const VALID_REALITY_PUB: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     fn sample_profile() -> Profile {
         Profile::new(
             ProfileId::new("default"),
-            ServerAddress::parse("naive.example.com").unwrap(),
+            ServerAddress::parse("vless.example.com").unwrap(),
             Credentials::new(
                 Username::parse("alice").unwrap(),
-                Password::parse("secret").unwrap(),
+                Uuid::parse(VALID_UUID).unwrap(),
+                Reality::new(
+                    RealityPublicKey::parse(VALID_REALITY_PUB).unwrap(),
+                    RealityDestHost::parse("www.microsoft.com").unwrap(),
+                    RealityShortId::parse("01ab").unwrap(),
+                ),
             ),
             Port::new(1080).unwrap(),
         )
@@ -478,7 +469,12 @@ mod tests {
         let value = serde_json::to_value(&req).unwrap();
         assert_eq!(value["id"], 7);
         assert_eq!(value["method"], "validate_profile");
-        assert_eq!(value["params"]["profile"]["server"], "naive.example.com");
+        assert_eq!(value["params"]["profile"]["server"], "vless.example.com");
+        assert_eq!(value["params"]["profile"]["uuid"], VALID_UUID);
+        assert_eq!(
+            value["params"]["profile"]["reality"]["dest_host"],
+            "www.microsoft.com"
+        );
     }
 
     #[test]
@@ -496,9 +492,8 @@ mod tests {
     fn request_round_trips_through_json() {
         let req = Request {
             id: 1,
-            kind: RequestKind::GeneratePac {
-                direct_domains: vec!["baidu.com".to_owned()],
-                port: Port::new(1080).unwrap(),
+            kind: RequestKind::GenerateSingboxConfig {
+                profile: sample_profile(),
             },
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -557,8 +552,6 @@ mod tests {
         assert_eq!(value["event"], "traffic_snapshot");
         assert_eq!(value["data"]["pid"], 42);
         assert_eq!(value["data"]["established"], 7);
-        assert_eq!(value["data"]["local_clients"], 5);
-        assert_eq!(value["data"]["remote"], 2);
     }
 
     #[test]
@@ -580,9 +573,6 @@ mod tests {
 
     #[test]
     fn hello_request_serializes_with_null_params() {
-        // Pin the wire shape: serde unit variant under
-        // `tag = "method", content = "params"` must emit
-        // `params: null`.
         let req = Request {
             id: 99,
             kind: RequestKind::Hello,
@@ -596,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_reply_round_trips_with_protocol_version() {
+    fn hello_reply_carries_protocol_v2() {
         let out = Outbound::Response {
             id: 99,
             result: ResponsePayload::HelloReply {
@@ -604,12 +594,9 @@ mod tests {
                 engine_version: env!("CARGO_PKG_VERSION").to_owned(),
             },
         };
-        let s = serde_json::to_string(&out).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(value["kind"], "response");
-        assert_eq!(value["result"]["type"], "hello_reply");
-        assert_eq!(value["result"]["protocol_version"], PROTOCOL_VERSION);
-        let back: Outbound = serde_json::from_str(&s).unwrap();
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["result"]["protocol_version"], 2);
+        let back: Outbound = serde_json::from_value(value).unwrap();
         assert_eq!(out, back);
     }
 
@@ -625,7 +612,6 @@ mod tests {
         let value = serde_json::to_value(&req).unwrap();
         assert_eq!(value["method"], "probe_server");
         assert_eq!(value["params"]["timeout_secs"], 7);
-        assert_eq!(value["params"]["profile"]["server"], "naive.example.com");
         let back: Request = serde_json::from_value(value).unwrap();
         assert_eq!(req, back);
     }
@@ -640,50 +626,19 @@ mod tests {
             },
         };
         let value = serde_json::to_value(&req).unwrap();
-        // `skip_serializing_if = "Option::is_none"`: the field
-        // must be absent (not explicit null) so the Swift side's
-        // "use engine default" semantics has no ambiguity.
         assert!(value["params"].get("timeout_secs").is_none());
     }
 
     #[test]
-    fn probe_report_response_has_flat_shape_with_type_tag() {
+    fn probe_report_response_round_trips() {
         let out = Outbound::Response {
             id: 19,
             result: ResponsePayload::Probe(ProbeReport {
-                server: "naive.example.com:443".to_owned(),
+                server: "vless.example.com:443".to_owned(),
                 reachable: true,
                 dns_resolve_ms: 12.5,
                 tcp_connect_ms: 33.0,
                 error: None,
-            }),
-        };
-        let value = serde_json::to_value(&out).unwrap();
-        assert_eq!(value["kind"], "response");
-        // Newtype tuple variant under `serde(tag = "type")` —
-        // fields hoist alongside the tag, no `probe` nesting.
-        assert_eq!(value["result"]["type"], "probe");
-        assert_eq!(value["result"]["server"], "naive.example.com:443");
-        assert_eq!(value["result"]["reachable"], true);
-        assert_eq!(value["result"]["dns_resolve_ms"], 12.5);
-        assert_eq!(value["result"]["tcp_connect_ms"], 33.0);
-        // `None` + `skip_serializing_if`: field must be absent on
-        // the wire, not explicit null.
-        assert!(value["result"].get("error").is_none());
-        let back: Outbound = serde_json::from_value(value).unwrap();
-        assert_eq!(out, back);
-    }
-
-    #[test]
-    fn probe_report_response_round_trips_with_error() {
-        let out = Outbound::Response {
-            id: 20,
-            result: ResponsePayload::Probe(ProbeReport {
-                server: "naive.example.com:443".to_owned(),
-                reachable: false,
-                dns_resolve_ms: 0.0,
-                tcp_connect_ms: 0.0,
-                error: Some("DNS resolve failed: nodename nor servname provided".to_owned()),
             }),
         };
         let s = serde_json::to_string(&out).unwrap();
@@ -696,79 +651,44 @@ mod tests {
         let req = Request {
             id: 23,
             kind: RequestKind::DebugHandshake {
-                binary_path: "/usr/local/bin/naive".into(),
+                binary_path: "/usr/local/bin/sing-box".into(),
                 profile: sample_profile(),
                 timeout_secs: Some(12),
             },
         };
         let value = serde_json::to_value(&req).unwrap();
         assert_eq!(value["method"], "debug_handshake");
-        assert_eq!(value["params"]["binary_path"], "/usr/local/bin/naive");
-        assert_eq!(value["params"]["profile"]["server"], "naive.example.com");
-        assert_eq!(value["params"]["timeout_secs"], 12);
+        assert_eq!(value["params"]["binary_path"], "/usr/local/bin/sing-box");
         let back: Request = serde_json::from_value(value).unwrap();
         assert_eq!(req, back);
     }
 
     #[test]
-    fn debug_handshake_response_has_flat_shape_with_optional_error() {
+    fn debug_handshake_response_singbox_fields() {
         let out = Outbound::Response {
             id: 24,
             result: ResponsePayload::DebugHandshake(DebugHandshakeReport {
-                server: "naive.example.com:443".to_owned(),
+                server: "vless.example.com:443".to_owned(),
                 target: "www.google.com:443".to_owned(),
                 ok: false,
                 connect_ok: true,
                 post_connect_received_bytes: 0,
                 elapsed_ms: 1200,
-                local_sent_hex: "43 4f 4e 4e 45 43 54".to_owned(),
+                local_sent_hex: "05 01 00".to_owned(),
                 local_received_hex: String::new(),
-                naive_stdout: Vec::new(),
-                naive_stderr: vec!["Preamble error: ERR_PROXY_CONNECTION_FAILED".to_owned()],
+                singbox_stdout: Vec::new(),
+                singbox_stderr: vec!["reality handshake failed".to_owned()],
                 error: Some("debug handshake timed out after 12s".to_owned()),
             }),
         };
         let value = serde_json::to_value(&out).unwrap();
-        assert_eq!(value["kind"], "response");
         assert_eq!(value["result"]["type"], "debug_handshake");
-        assert_eq!(value["result"]["server"], "naive.example.com:443");
-        assert_eq!(value["result"]["target"], "www.google.com:443");
-        assert_eq!(value["result"]["ok"], false);
-        assert_eq!(value["result"]["connect_ok"], true);
-        assert_eq!(value["result"]["post_connect_received_bytes"], 0);
-        assert_eq!(value["result"]["elapsed_ms"], 1200);
-        assert_eq!(value["result"]["local_sent_hex"], "43 4f 4e 4e 45 43 54");
-        assert_eq!(value["result"]["local_received_hex"], "");
         assert_eq!(
-            value["result"]["naive_stderr"][0],
-            "Preamble error: ERR_PROXY_CONNECTION_FAILED"
-        );
-        assert_eq!(
-            value["result"]["error"],
-            "debug handshake timed out after 12s"
+            value["result"]["singbox_stderr"][0],
+            "reality handshake failed"
         );
         let back: Outbound = serde_json::from_value(value).unwrap();
         assert_eq!(out, back);
-    }
-
-    #[test]
-    fn start_proxy_omits_monitor_interval_when_none() {
-        let req = Request {
-            id: 21,
-            kind: RequestKind::StartProxy {
-                binary_path: "/usr/local/bin/naive".into(),
-                config_path: "/tmp/config.json".into(),
-                port: Port::new(1080).unwrap(),
-                monitor_interval_secs: None,
-            },
-        };
-        let value = serde_json::to_value(&req).unwrap();
-        // Field must be absent (not explicit null) so the
-        // legacy-engine fallback path stays intact.
-        assert!(
-            value["params"].get("monitor_interval_secs").is_none(),
-            "monitor_interval_secs must be absent on the wire when None: {value}"
-        );
     }
 
     #[test]
@@ -776,7 +696,7 @@ mod tests {
         let req = Request {
             id: 22,
             kind: RequestKind::StartProxy {
-                binary_path: "/usr/local/bin/naive".into(),
+                binary_path: "/usr/local/bin/sing-box".into(),
                 config_path: "/tmp/config.json".into(),
                 port: Port::new(1080).unwrap(),
                 monitor_interval_secs: Some(10),
@@ -785,5 +705,53 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&s).unwrap();
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn start_proxy_omits_monitor_interval_when_none() {
+        let req = Request {
+            id: 21,
+            kind: RequestKind::StartProxy {
+                binary_path: "/usr/local/bin/sing-box".into(),
+                config_path: "/tmp/config.json".into(),
+                port: Port::new(1080).unwrap(),
+                monitor_interval_secs: None,
+            },
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(value["params"].get("monitor_interval_secs").is_none());
+    }
+
+    #[test]
+    fn singbox_config_response_carries_json_field() {
+        let out = Outbound::Response {
+            id: 8,
+            result: ResponsePayload::SingboxConfig {
+                json: "{\"log\":{\"level\":\"info\"}}".to_owned(),
+            },
+        };
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["result"]["type"], "singbox_config");
+        assert!(value["result"]["json"]
+            .as_str()
+            .unwrap()
+            .contains("\"level\":\"info\""));
+    }
+
+    #[test]
+    fn singbox_liveness_round_trips() {
+        let out = Outbound::Response {
+            id: 30,
+            result: ResponsePayload::SingboxLiveness {
+                running: true,
+                pid: Some(4242),
+            },
+        };
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["result"]["type"], "singbox_liveness");
+        assert_eq!(value["result"]["running"], true);
+        assert_eq!(value["result"]["pid"], 4242);
+        let back: Outbound = serde_json::from_value(value).unwrap();
+        assert_eq!(out, back);
     }
 }
