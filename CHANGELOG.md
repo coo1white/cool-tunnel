@@ -9,6 +9,14 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.57] — 2026-05-16 — Code Streamline Pass 1 — Drop Xcode Previews + Dead Cast
+
+PR #86 drops 91 lines of Xcode-Canvas-only `#Preview` blocks
+(UIComponents.swift × 3, ContentView.swift × 1) and a one-line
+defensive `u64::try_from(usize).unwrap_or(u64::MAX)` cast in
+`debug_handshake.rs` (replaced with infallible `as u64`). No
+runtime behavior change.
+
 ## [2.0.56] — 2026-05-16 — Streamline Pass 3 — ADR + Audit Reports + CONTRIBUTING
 
 PR #83 trims ADR 0001, both 2026-05 audit reports (UI + Code), and
