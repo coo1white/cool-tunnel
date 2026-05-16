@@ -30,7 +30,7 @@ import { join, relative } from "node:path";
 
 import { Glob } from "bun";
 
-import { die, step } from "./lib/log.ts";
+import { die, fail, step } from "./lib/log.ts";
 import { repoRoot } from "./lib/paths.ts";
 
 /**
@@ -152,9 +152,7 @@ async function main(): Promise<void> {
     }
 
     if (actual > TRY_QUESTION_CAP) {
-        process.stderr.write(
-            `\x1b[1;31m!!!\x1b[0m unannotated try? count rose to ${actual} (cap=${TRY_QUESTION_CAP})\n`,
-        );
+        fail(`unannotated try? count rose to ${actual} (cap=${TRY_QUESTION_CAP})`);
         process.stderr.write(
             "    add `// try-ok: <reason>` to the line if this is a legitimate cleanup use,\n",
         );
@@ -172,9 +170,7 @@ async function main(): Promise<void> {
     }
 
     if (actual < TRY_QUESTION_CAP) {
-        process.stderr.write(
-            `\x1b[1;31m!!!\x1b[0m unannotated try? count dropped to ${actual} — lock the win in:\n`,
-        );
+        fail(`unannotated try? count dropped to ${actual} — lock the win in:`);
         process.stderr.write(
             `    set TRY_QUESTION_CAP=${actual} in scripts/try_question_ratchet.ts\n`,
         );
