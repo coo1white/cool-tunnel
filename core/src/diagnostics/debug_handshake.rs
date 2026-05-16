@@ -117,8 +117,7 @@ async fn run_debug_handshake_inner(
         target: TARGET_AUTHORITY.to_owned(),
         ok,
         connect_ok: trace.connect_ok,
-        post_connect_received_bytes: u64::try_from(trace.post_connect_received_bytes)
-            .unwrap_or(u64::MAX),
+        post_connect_received_bytes: trace.post_connect_received_bytes as u64,
         elapsed_ms: ms_to_u64(started.elapsed()),
         local_sent_hex: first_hex(&trace.sent),
         local_received_hex: first_hex(&trace.received),
