@@ -17,7 +17,6 @@ import {
     formatManifest,
     humanBytes,
     parseArgs,
-    parseCargoTomlVersion,
     parseCoreVersionLine,
     substituteVersion,
 } from "./package_release.ts";
@@ -63,38 +62,6 @@ describe("package_release parseArgs", () => {
         const out = parseArgs(["-h"]);
         expect(out.ok).toBe(false);
         if (!out.ok) expect(out.exitCode).toBe(0);
-    });
-});
-
-describe("package_release parseCargoTomlVersion", () => {
-    test("top-level version line → extracted", () => {
-        const toml = '[package]\nname = "cool-tunnel-core"\nversion = "2.0.59"\nedition = "2024"\n';
-        expect(parseCargoTomlVersion(toml)).toBe("2.0.59");
-    });
-
-    test("dependency table version line → not picked", () => {
-        // A bare `version = "x"` inside [dependencies.foo] is NOT
-        // anchored to start-of-line in the original bash awk; the
-        // top-level one always comes first in real Cargo.tomls.
-        const toml = '[dependencies.serde]\nversion = "1.0"\n[package]\nname = "x"\nversion = "2.0.59"\n';
-        expect(parseCargoTomlVersion(toml)).toBe("1.0"); // first anchored match wins
-    });
-
-    test("indented version line → not anchored, skipped", () => {
-        // Indented lines (inside an inline table) should NOT match
-        // the `^version` anchor.
-        const toml = '[dependencies]\n    version = "9.9.9"\n[package]\nversion = "2.0.59"\n';
-        expect(parseCargoTomlVersion(toml)).toBe("2.0.59");
-    });
-
-    test("missing version → null", () => {
-        const toml = '[package]\nname = "x"\nedition = "2024"\n';
-        expect(parseCargoTomlVersion(toml)).toBeNull();
-    });
-
-    test("whitespace tolerated around =", () => {
-        const toml = 'version   =   "1.2.3"\n';
-        expect(parseCargoTomlVersion(toml)).toBe("1.2.3");
     });
 });
 
