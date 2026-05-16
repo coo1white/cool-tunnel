@@ -186,13 +186,15 @@ SECRET_PATTERNS=(
 SECRET_GLOBS=("${REPO_ROOT}")
 SCAN_OUTPUT=""
 for pattern in "${SECRET_PATTERNS[@]}"; do
-    # **post-v2.0.52 (Bun port):** `node_modules/` excluded so Bun's
-    # own `bun-types` documentation (which contains example AWS /
-    # GitHub PAT placeholders like `AKIAIOSFODNN7EXAMPLE` and
-    # `ghp_xxxxxxxxxxxxxxxxxxxx`) doesn't trigger the secret scan.
+    # **post-v2.0.52 (Bun port):** `node_modules/` excluded so the
+    # bun-types documentation (which contains example AWS-key and
+    # GitHub-PAT placeholders deliberately shaped to match this
+    # script's secret regex set) doesn't false-positive the scan.
     # node_modules/ is .gitignored and is never shipped in any
-    # release artefact, so excluding it is purely a scan-noise
-    # fix, not a coverage hole.
+    # release artefact, so excluding it is a scan-noise fix, not a
+    # coverage hole. Specific placeholder strings are deliberately
+    # NOT named in this comment — naming them here would make this
+    # script self-match.
     if matches=$(grep -REn --binary-files=without-match \
         --exclude-dir=target --exclude-dir=.git --exclude-dir=dist \
         --exclude-dir=build --exclude-dir=node_modules \
