@@ -147,13 +147,3 @@ public struct ContentView: View {
         .padding(.bottom, 12)
     }
 }
-
-#if DEBUG
-// `#if DEBUG`-guarded so Release builds don't fork a second
-// `cool-tunnel-core` subprocess alongside the one
-// `CoolTunnelApp` already owns.
-#Preview {
-    ContentView()
-        .environment(TunnelOrchestrator.bootstrap())
-}
-#endif
