@@ -46,7 +46,7 @@ describe("try_question_ratchet scanContent", () => {
     test("bare try? on a line is unannotated", () => {
         const sites = scanContent("let x = try? foo()\n", "Sample.swift");
         expect(sites.length).toBe(1);
-        expect(sites[0].lineno).toBe(1);
+        expect(sites[0]?.lineno).toBe(1);
     });
 
     test("try? + same-line // try-ok: marker is exempt", () => {
@@ -107,11 +107,11 @@ describe("try_question_ratchet scanContent", () => {
             "let unannotated = try? four()\n";
         const sites = scanContent(src, "Sample.swift");
         expect(sites.length).toBe(1);
-        expect(sites[0].lineno).toBe(3);
+        expect(sites[0]?.lineno).toBe(3);
     });
 
     test("path is reflected verbatim in each emitted site", () => {
         const sites = scanContent("let x = try? foo()\n", "Foo/Bar.swift");
-        expect(sites[0].path).toBe("Foo/Bar.swift");
+        expect(sites[0]?.path).toBe("Foo/Bar.swift");
     });
 });
