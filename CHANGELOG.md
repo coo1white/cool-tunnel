@@ -9,6 +9,15 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.58] — 2026-05-16 — Bun Port: try_question_ratchet (third script)
+
+PR #87 ports `try_question_ratchet.sh` (151 lines bash) to
+TypeScript+Bun behind a thin .sh shim, matching the PR #80 (v2.0.53)
+pattern for cut_release + fetch_naive. New `Bun.Glob`-based scanner
++ 12 unit tests on the argv parser and annotation matcher (cap stays
+at 0; bash-compat quirk preserved + pinned). All callers (`bin/ct`,
+`audit.sh`, CI) unchanged; the `try-ratchet` CI job now installs Bun.
+
 ## [2.0.57] — 2026-05-16 — Code Streamline Pass 1 — Drop Xcode Previews + Dead Cast
 
 PR #86 drops 91 lines of Xcode-Canvas-only `#Preview` blocks
