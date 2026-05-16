@@ -9,6 +9,13 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.56] — 2026-05-16 — Streamline Pass 3 — ADR + Audit Reports + CONTRIBUTING
+
+PR #83 trims ADR 0001, both 2026-05 audit reports (UI + Code), and
+CONTRIBUTING.md to core content. Net −483 lines. OPSEC scrub: drops
+a stale reference to a personal-directory path and adjacent-project
+tech stack in the ADR. No code change.
+
 ## [2.0.55] — 2026-05-16 — Doc + Comment Streamline Pass
 
 PR #82 trims remaining docs (SECURITY, SECURITY-WEB3, CONTRIBUTING,
