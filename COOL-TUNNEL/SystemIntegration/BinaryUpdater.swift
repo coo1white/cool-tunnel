@@ -76,7 +76,7 @@ func updaterIsValidReleaseTag(_ tag: String) -> Bool {
 enum BinaryUpdaterCore {
 
     /// Per-pipeline temp dir under `NSTemporaryDirectory()`.
-    /// Caller cleans up via `defer { try? FileManager…removeItem }`.
+    /// Caller is responsible for removing it in a `defer` cleanup.
     static func makeTempDirectory(prefix: String) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(
