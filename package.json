@@ -1,0 +1,18 @@
+{
+  "name": "cool-tunnel-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript+Bun re-implementation of the complex Cool Tunnel maintenance scripts (cut_release, fetch_naive). The other six scripts under scripts/ stay POSIX shell. See scripts/README-bun.md.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "test": "bun test scripts/"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}
