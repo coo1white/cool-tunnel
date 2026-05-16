@@ -4,16 +4,20 @@
 // COOL-TUNNELTests/SubscriptionValidationTests.swift
 //
 // Regression coverage for the two security-trust gates inside
-// `SubscriptionManifestV1`:
+// `SubscriptionManifestV2`:
 //
 //   - `validate(now:)` — enforces every documented invariant on a
 //     panel-imported manifest. Counterfeit / hijacked panels are
-//     an explicit threat model in the file-header comment.
+//     an explicit threat model in the file-header comment. v=2
+//     adds three new gates: missingUuid, missingRealityPublicKey,
+//     missingRealityDestHost — surfaced when a counterfeit /
+//     misconfigured panel serves a manifest with the right shape
+//     but empty credential / Reality fields.
 //
 //   - `isBlockedHost(_:)` — SSRF protection. A counterfeit panel
 //     returning `host: "127.0.0.1:8080"` (or any private / link-
-//     local / loopback shape) would otherwise direct naive at
-//     whatever local service was listening. Recognises hostname
+//     local / loopback shape) would otherwise direct singbox-core
+//     at whatever local service was listening. Recognises hostname
 //     forms (localhost, *.local), IPv4 dotted-quad against every
 //     RFC 1918 / loopback / link-local block, and bracketed IPv6
 //     literals (::1, fe80::, fc00::, fd00::).
@@ -44,14 +48,14 @@ final class SubscriptionValidationTests: XCTestCase {
     /// Builds a manifest with every documented invariant satisfied.
     /// Each test mutates one field to violate one rule.
     private func validManifest(
-        version: UInt32 = 1,
+        version: UInt32 = 2,
         server: String = "proxy.example.com",
-        profiles: [SubscriptionProfileV1]? = nil,
-        capabilities: ServerCapabilitiesV1? = nil,
+        profiles: [SubscriptionProfileV2]? = nil,
+        capabilities: ServerCapabilitiesV2? = nil,
         issuedAt: UInt64? = nil,
         expiresAt: UInt64? = nil
-    ) -> SubscriptionManifestV1 {
-        SubscriptionManifestV1(
+    ) -> SubscriptionManifestV2 {
+        SubscriptionManifestV2(
             version: version,
             server: server,
             profiles: profiles ?? [validProfile()],
@@ -59,18 +63,34 @@ final class SubscriptionValidationTests: XCTestCase {
             issuedAt: issuedAt ?? Self.referenceNowSecs &- 60,  // issued 60s ago
             expiresAt: expiresAt ?? Self.referenceNowSecs &+ (24 * 60 * 60),  // 24h from now
             note: nil,
+            serverSingboxPin: nil,
             signature: nil
         )
     }
 
-    private func validProfile(host: String = "proxy.example.com") -> SubscriptionProfileV1 {
-        SubscriptionProfileV1(
-            host: host, port: 443, username: "user", password: "pwd", label: nil
+    private func validProfile(
+        host: String = "proxy.example.com",
+        uuid: String = "550e8400-e29b-41d4-a716-446655440000",
+        realityPublicKey: String = "test-public-key-base64url",
+        realityDestHost: String = "www.microsoft.com",
+        realityShortId: String = ""
+    ) -> SubscriptionProfileV2 {
+        SubscriptionProfileV2(
+            host: host,
+            port: 443,
+            username: "user",
+            uuid: uuid,
+            reality: RealityV2(
+                publicKey: realityPublicKey,
+                destHost: realityDestHost,
+                shortId: realityShortId
+            ),
+            label: nil
         )
     }
 
-    private func validCapabilities(http3: Bool = false) -> ServerCapabilitiesV1 {
-        ServerCapabilitiesV1(antiTracking: [.hideIp], http3: http3, fakeSiteSlug: nil)
+    private func validCapabilities(http3: Bool = false) -> ServerCapabilitiesV2 {
+        ServerCapabilitiesV2(antiTracking: [.hideIp], http3: http3, fakeSiteSlug: nil)
     }
 
     // MARK: - validate() happy path
@@ -83,15 +103,59 @@ final class SubscriptionValidationTests: XCTestCase {
     // MARK: - validate() — version
 
     func testValidateRejectsUnsupportedVersion() {
-        let manifest = validManifest(version: 2)
+        // v=1 manifests from pre-v0.4.0 cool-tunnel-server are
+        // unreadable on v3.0.0 clients. The opposite direction (v=2
+        // manifest on v2.x client) fails identically — the codec
+        // rejects the wire shape before validation is reached.
+        let manifest = validManifest(version: 1)
         XCTAssertThrowsError(try manifest.validate(now: Self.referenceNow)) { error in
             guard case SubscriptionValidationError.unsupportedVersion(let got, let expected) = error
             else {
                 return XCTFail("expected unsupportedVersion, got \(error)")
             }
-            XCTAssertEqual(got, 2)
-            XCTAssertEqual(expected, 1)
+            XCTAssertEqual(got, 1)
+            XCTAssertEqual(expected, 2)
         }
+    }
+
+    // MARK: - validate() — v=2 credential / Reality fields
+
+    func testValidateRejectsProfileWithEmptyUuid() {
+        let manifest = validManifest(profiles: [validProfile(uuid: "")])
+        XCTAssertThrowsError(try manifest.validate(now: Self.referenceNow)) { error in
+            guard case SubscriptionValidationError.missingUuid(let host) = error else {
+                return XCTFail("expected missingUuid, got \(error)")
+            }
+            XCTAssertEqual(host, "proxy.example.com")
+        }
+    }
+
+    func testValidateRejectsProfileWithEmptyRealityPublicKey() {
+        let manifest = validManifest(profiles: [validProfile(realityPublicKey: "")])
+        XCTAssertThrowsError(try manifest.validate(now: Self.referenceNow)) { error in
+            guard case SubscriptionValidationError.missingRealityPublicKey(let host) = error else {
+                return XCTFail("expected missingRealityPublicKey, got \(error)")
+            }
+            XCTAssertEqual(host, "proxy.example.com")
+        }
+    }
+
+    func testValidateRejectsProfileWithEmptyRealityDestHost() {
+        let manifest = validManifest(profiles: [validProfile(realityDestHost: "")])
+        XCTAssertThrowsError(try manifest.validate(now: Self.referenceNow)) { error in
+            guard case SubscriptionValidationError.missingRealityDestHost(let host) = error else {
+                return XCTFail("expected missingRealityDestHost, got \(error)")
+            }
+            XCTAssertEqual(host, "proxy.example.com")
+        }
+    }
+
+    func testValidateAcceptsProfileWithEmptyRealityShortId() throws {
+        // Empty short_id is the conventional "no short_id challenge"
+        // value the server accepts; only public_key + dest_host are
+        // required.
+        let manifest = validManifest(profiles: [validProfile(realityShortId: "")])
+        XCTAssertNoThrow(try manifest.validate(now: Self.referenceNow))
     }
 
     // MARK: - validate() — profile cardinality
@@ -107,21 +171,21 @@ final class SubscriptionValidationTests: XCTestCase {
 
     func testValidateRejectsProfileFloodAboveCap() {
         let profiles = Array(
-            repeating: validProfile(), count: SubscriptionManifestV1.maxProfiles + 1
+            repeating: validProfile(), count: SubscriptionManifestV2.maxProfiles + 1
         )
         let manifest = validManifest(profiles: profiles)
         XCTAssertThrowsError(try manifest.validate(now: Self.referenceNow)) { error in
             guard case SubscriptionValidationError.tooManyProfiles(let got, let max) = error else {
                 return XCTFail("expected tooManyProfiles, got \(error)")
             }
-            XCTAssertEqual(got, SubscriptionManifestV1.maxProfiles + 1)
-            XCTAssertEqual(max, SubscriptionManifestV1.maxProfiles)
+            XCTAssertEqual(got, SubscriptionManifestV2.maxProfiles + 1)
+            XCTAssertEqual(max, SubscriptionManifestV2.maxProfiles)
         }
     }
 
     func testValidateAcceptsExactlyMaxProfiles() throws {
         let profiles = Array(
-            repeating: validProfile(), count: SubscriptionManifestV1.maxProfiles
+            repeating: validProfile(), count: SubscriptionManifestV2.maxProfiles
         )
         let manifest = validManifest(profiles: profiles)
         XCTAssertNoThrow(try manifest.validate(now: Self.referenceNow))
@@ -211,7 +275,7 @@ final class SubscriptionValidationTests: XCTestCase {
                 return XCTFail("expected validityTooLong, got \(error)")
             }
             XCTAssertGreaterThan(got, max)
-            XCTAssertEqual(max, SubscriptionManifestV1.maxValidity)
+            XCTAssertEqual(max, SubscriptionManifestV2.maxValidity)
         }
     }
 
@@ -219,7 +283,7 @@ final class SubscriptionValidationTests: XCTestCase {
         let issued = Self.referenceNowSecs &- 60
         let manifest = validManifest(
             issuedAt: issued,
-            expiresAt: issued &+ SubscriptionManifestV1.maxValidity
+            expiresAt: issued &+ SubscriptionManifestV2.maxValidity
         )
         XCTAssertNoThrow(try manifest.validate(now: Self.referenceNow))
     }
@@ -272,14 +336,14 @@ final class SubscriptionValidationTests: XCTestCase {
             guard case SubscriptionValidationError.stale(let age) = error else {
                 return XCTFail("expected stale, got \(error)")
             }
-            XCTAssertGreaterThan(age, SubscriptionManifestV1.maxAge)
+            XCTAssertGreaterThan(age, SubscriptionManifestV2.maxAge)
         }
     }
 
     func testValidateAcceptsManifestAtExactlyMaxAge() throws {
         // Exactly maxAge old, not stale (the boundary is `>`, not `>=`).
-        let issued = Self.referenceNowSecs &- UInt64(SubscriptionManifestV1.maxAge)
-        let expiresAt = issued &+ UInt64(SubscriptionManifestV1.maxAge) &+ 60
+        let issued = Self.referenceNowSecs &- UInt64(SubscriptionManifestV2.maxAge)
+        let expiresAt = issued &+ UInt64(SubscriptionManifestV2.maxAge) &+ 60
         let manifest = validManifest(issuedAt: issued, expiresAt: expiresAt)
         XCTAssertNoThrow(try manifest.validate(now: Self.referenceNow))
     }
@@ -287,20 +351,20 @@ final class SubscriptionValidationTests: XCTestCase {
     // MARK: - isBlockedHost — hostname forms
 
     func testIsBlockedHostBlocksLocalhost() {
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("localhost"))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("LOCALHOST"))  // case-insensitive
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("  localhost  "))  // whitespace
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("localhost"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("LOCALHOST"))  // case-insensitive
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("  localhost  "))  // whitespace
     }
 
     func testIsBlockedHostBlocksDotLocalMdns() {
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("myhost.local"))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("apple.tv.local"))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("local"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("myhost.local"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("apple.tv.local"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("local"))
     }
 
     func testIsBlockedHostBlocksEmptyAndWhitespace() {
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost(""))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("   "))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost(""))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("   "))
     }
 
     // MARK: - isBlockedHost — IPv4 private / loopback / link-local
@@ -308,7 +372,7 @@ final class SubscriptionValidationTests: XCTestCase {
     func testIsBlockedHostBlocksLoopbackIPv4() {
         for host in ["127.0.0.1", "127.255.255.254"] {
             XCTAssertTrue(
-                SubscriptionManifestV1.isBlockedHost(host),
+                SubscriptionManifestV2.isBlockedHost(host),
                 "\(host) should be blocked (127/8 loopback)")
         }
     }
@@ -320,28 +384,28 @@ final class SubscriptionValidationTests: XCTestCase {
             "192.168.0.1", "192.168.255.255",  // 192.168/16
         ] {
             XCTAssertTrue(
-                SubscriptionManifestV1.isBlockedHost(host),
+                SubscriptionManifestV2.isBlockedHost(host),
                 "\(host) should be blocked (RFC 1918)")
         }
     }
 
     func testIsBlockedHostBlocksLinkLocalAndUnspecifiedIPv4() {
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("169.254.1.1"))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("0.0.0.0"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("169.254.1.1"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("0.0.0.0"))
     }
 
     /// Boundary check: 172.15.x.x and 172.32.x.x are NOT private
     /// (the 172/12 range is 172.16-31 only). Pre-fix bugs in CIDR
     /// classifiers often expand this range incorrectly.
     func testIsBlockedHostAcceptsAdjacentToPrivate172Range() {
-        XCTAssertFalse(SubscriptionManifestV1.isBlockedHost("172.15.255.255"))
-        XCTAssertFalse(SubscriptionManifestV1.isBlockedHost("172.32.0.0"))
+        XCTAssertFalse(SubscriptionManifestV2.isBlockedHost("172.15.255.255"))
+        XCTAssertFalse(SubscriptionManifestV2.isBlockedHost("172.32.0.0"))
     }
 
     func testIsBlockedHostAcceptsPublicIPv4() {
         for host in ["8.8.8.8", "1.1.1.1", "203.0.113.1", "11.0.0.1"] {
             XCTAssertFalse(
-                SubscriptionManifestV1.isBlockedHost(host),
+                SubscriptionManifestV2.isBlockedHost(host),
                 "\(host) should be allowed (public IPv4)")
         }
     }
@@ -349,23 +413,23 @@ final class SubscriptionValidationTests: XCTestCase {
     // MARK: - isBlockedHost — IPv6 bracketed literals
 
     func testIsBlockedHostBlocksIPv6Loopback() {
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("[::1]"))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("[::]"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("[::1]"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("[::]"))
     }
 
     func testIsBlockedHostBlocksIPv6LinkLocalAndULA() {
         // fe80::/10 — link-local
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("[fe80::1]"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("[fe80::1]"))
         // fc00::/7 — unique local addresses
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("[fc00::1]"))
-        XCTAssertTrue(SubscriptionManifestV1.isBlockedHost("[fd00::1]"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("[fc00::1]"))
+        XCTAssertTrue(SubscriptionManifestV2.isBlockedHost("[fd00::1]"))
     }
 
     func testIsBlockedHostAcceptsPublicIPv6() {
         // Documentation prefix 2001:db8::/32 — globally reserved but
         // not private. Real public IPv6 (Google DNS) follows.
-        XCTAssertFalse(SubscriptionManifestV1.isBlockedHost("[2001:db8::1]"))
-        XCTAssertFalse(SubscriptionManifestV1.isBlockedHost("[2001:4860:4860::8888]"))
+        XCTAssertFalse(SubscriptionManifestV2.isBlockedHost("[2001:db8::1]"))
+        XCTAssertFalse(SubscriptionManifestV2.isBlockedHost("[2001:4860:4860::8888]"))
     }
 
     // MARK: - isBlockedHost — public hostnames
@@ -378,7 +442,7 @@ final class SubscriptionValidationTests: XCTestCase {
             "tunnel-2.example.org",
         ] {
             XCTAssertFalse(
-                SubscriptionManifestV1.isBlockedHost(host),
+                SubscriptionManifestV2.isBlockedHost(host),
                 "\(host) should be allowed (public hostname)")
         }
     }

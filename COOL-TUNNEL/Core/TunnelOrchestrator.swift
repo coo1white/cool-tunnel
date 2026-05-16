@@ -443,7 +443,7 @@ public final class TunnelOrchestrator {
         // so the 4xx/5xx branches fire only when something in front of
         // the panel (CDN, proxy interposition, DNS hijack) returns its
         // own status.
-        let manifest: SubscriptionManifestV1
+        let manifest: SubscriptionManifestV2
         do {
             manifest = try await SubscriptionClient().fetch(from: trimmed)
         } catch let err as SubscriptionClientError {
@@ -474,11 +474,16 @@ public final class TunnelOrchestrator {
                     throw SubscriptionImportError.noProfiles
                 case .tooManyProfiles, .counterfeitCapabilities,
                     .invalidIssuedAt, .malformedExpiry, .validityTooLong,
-                    .blockedHost:
-                    // All six are stub/counterfeit signals with the
-                    // same user action ("do not connect"); collapse
-                    // to one banner. Support can pivot on the
-                    // structured os_log entry if needed.
+                    .blockedHost, .missingUuid, .missingRealityPublicKey,
+                    .missingRealityDestHost:
+                    // All nine are stub/counterfeit signals OR
+                    // operator-side misconfiguration (Reality
+                    // keypair not generated, UUID column empty)
+                    // with the same user action — "do not connect,
+                    // contact operator"; collapse to one banner.
+                    // Support can pivot on the structured os_log
+                    // entry to distinguish the operator-fix
+                    // sub-cases.
                     throw SubscriptionImportError.manifestCounterfeit
                 case .expired:
                     throw SubscriptionImportError.manifestExpired
@@ -500,11 +505,22 @@ public final class TunnelOrchestrator {
         // per-machine UI state. `subscriptionURL` is persisted so
         // the auth-failure auto-sync flow can re-fetch when the
         // upstream rotates credentials.
+        //
+        // v3.0.0 transitional shape: the `Profile.password` field is
+        // still the v2.x basic-auth column, but in v3.0.0 it carries
+        // the VLESS UUID (the per-account credential). The Reality
+        // params live on the imported manifest but aren't wired into
+        // `Profile` yet — that's sub-phase F. For sub-phase B the
+        // imported `Profile` is shape-compatible with the old code
+        // path; the engine driving naive on its other end would just
+        // 401 with the UUID-as-password, which is the right outcome
+        // for an in-flight v3.0.0 branch that hasn't completed the
+        // singbox-core rewire yet.
         let imported = Profile(
             id: selectedProfile?.id ?? UUID().uuidString,
             server: "\(primary.host):\(primary.port)",
             username: primary.username,
-            password: primary.password,
+            password: primary.uuid,
             localPort: selectedProfile?.localPort ?? "1080",
             subscriptionURL: trimmed
         )
