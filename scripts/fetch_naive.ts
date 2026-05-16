@@ -49,7 +49,7 @@
 // Dependencies: bun 1.1+, curl, tar, xz, lipo, shasum, codesign.
 //   --repin also needs `gh` when no TAG argument is given.
 
-import { mkdtemp, rm, chmod, rename, stat } from "node:fs/promises";
+import { mkdtemp, rm, chmod, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -126,7 +126,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
                 mode = "check";
                 i++;
                 break;
-            case "--repin":
+            case "--repin": {
                 mode = "repin";
                 i++;
                 // Optional positional tag argument.
@@ -136,6 +136,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
                     i++;
                 }
                 break;
+            }
             case "-h":
             case "--help":
                 printHelp();
@@ -525,9 +526,5 @@ main().catch((caught) => {
     }
 });
 
-// Re-export key helpers for unit tests. The `stat` import is consumed
-// elsewhere; this keeps the parseArgs + manifest types reachable.
+// Re-export key helpers for unit tests.
 export { parseArgs, readManifest, sha256OfFile, type NaiveManifest };
-// `stat` referenced to keep noUnusedLocals quiet — unused at runtime
-// because Bun.file() handles existence checks; kept as a future hook.
-void stat;
