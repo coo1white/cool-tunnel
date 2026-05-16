@@ -153,9 +153,7 @@ public struct ConnectionFormView: View {
                         }
                     }
                 }
-                .disabled(
-                    subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || isImporting)
+                .disabled(subscriptionURL.isBlank || isImporting)
             } header: {
                 Text("Import from subscription URL")
             } footer: {

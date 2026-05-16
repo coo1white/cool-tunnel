@@ -1479,9 +1479,7 @@ public final class TunnelOrchestrator {
     private func scheduleCredentialAutoSync(reason: String) {
         guard credentialAutoSyncTask == nil else { return }
         guard let profile = selectedProfile else { return }
-        guard let url = profile.subscriptionURL,
-            !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
+        guard let url = profile.subscriptionURL, !url.isBlank else {
             return
         }
         // Cooldown — keeps a continuously-failing engine from
@@ -1861,7 +1859,7 @@ public final class TunnelOrchestrator {
     )
         throws
     {
-        guard profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard profile.password.isBlank else {
             return
         }
         let stored: String
@@ -2086,8 +2084,7 @@ public final class TunnelOrchestrator {
     private static let uiIntentLogger = Logger.cooltunnel("UI.Intent")
 
     private static func profileCanRequestStart(_ profile: Profile) -> Bool {
-        profile.serverValidation == .valid
-            && !profile.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        profile.serverValidation == .valid && !profile.username.isBlank
             && profile.localPortValue != nil
     }
 
@@ -2107,7 +2104,7 @@ public final class TunnelOrchestrator {
             )
             return false
         }
-        if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if profile.password.isBlank {
             // Distinguish credential-store failure from
             // "no password set" so the rejection banner says
             // the right thing — collapsing both produced
@@ -2123,7 +2120,7 @@ public final class TunnelOrchestrator {
                 return false
             }
         }
-        guard !profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !profile.password.isBlank else {
             recordError("Start rejected: enter a password for the selected profile.", layer: .localKernel)
             return false
         }
