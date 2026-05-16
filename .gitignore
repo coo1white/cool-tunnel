@@ -5,3 +5,7 @@ DerivedData/
 .DS_Store
 core/target/
 xcuserdata/
+
+# Bun maintenance-script toolchain (scripts/*.ts)
+node_modules/
+.bun/

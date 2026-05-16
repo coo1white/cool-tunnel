@@ -41,5 +41,13 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
+      # **post-v2.0.52:** the implementation is TypeScript+Bun
+      # under scripts/fetch_naive.ts; the .sh shim shells out to
+      # bun. SHA-pinned to the v2 release as of 2026-05-14 to
+      # match the supply-chain discipline of every other Action
+      # we use.
+      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+        with:
+          bun-version: latest
       - name: scripts/fetch_naive.sh --check-only
         run: bash scripts/fetch_naive.sh --check-only

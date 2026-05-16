@@ -37,6 +37,15 @@ You'll need:
   licences per `core/deny.toml`. CI enforces it; running it
   locally avoids the round-trip when a new crate or feature flag
   trips a rule.
+- [Bun](https://bun.sh) 1.1+ (`brew install bun` or
+  `curl -fsSL https://bun.sh/install | bash`) — the two complex
+  maintenance scripts (`scripts/cut_release.ts` and
+  `scripts/fetch_naive.ts`) are TypeScript+Bun. The other
+  scripts under `scripts/` stay POSIX shell. The legacy
+  `scripts/cut_release.sh` and `scripts/fetch_naive.sh` are
+  thin shims that exec `bun scripts/*.ts`, so all existing
+  invocations keep working — the shims fail with a clear
+  "install Bun" message if `bun` isn't on PATH.
 
 Then:
 

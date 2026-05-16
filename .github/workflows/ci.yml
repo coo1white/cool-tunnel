@@ -4,7 +4,7 @@
 # checks the release script runs locally. If a regression slips
 # through, CI catches it before it reaches a release tag.
 #
-# Six jobs run in parallel on every event:
+# Seven jobs run in parallel on every event:
 #
 #   - rust:        fmt, clippy --pedantic -D warnings, tests
 #   - swift:       swift-format --lint
@@ -16,10 +16,16 @@
 #   - naive-pin:   bundled NaiveProxy binary matches naive.upstream.json
 #                  (no network — just a SHA-256 compare; supply-chain
 #                  audit against the moving upstream tag is the
-#                  separate `naive-pin-audit.yml` workflow).
+#                  separate `naive-pin-audit.yml` workflow). post-v2.0.52
+#                  the verifier itself is TypeScript+Bun, so this job
+#                  installs Bun before invoking the .sh shim.
 #   - try-ratchet: count of `try?` sites in the Swift production tree
 #                  matches the committed cap (M1 robustness-review).
 #                  Fast, no toolchain needed; runs on ubuntu.
+#   - bun-tests:   pure-logic tests for the TypeScript+Bun
+#                  cut_release / fetch_naive ports. Pins the
+#                  argument-parsing shape so a regression there
+#                  fails here rather than at release-cut time.
 #
 # Macs are expensive on Actions, so we only build the universal
 # binary on push to main and on tag pushes — PRs get a host-arch
@@ -221,6 +227,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
+      # **post-v2.0.52:** the verify path lives in
+      # scripts/fetch_naive.ts (TypeScript+Bun). The .sh shim shells
+      # out to `bun`, so Bun must be on PATH before the shim runs.
+      # `oven-sh/setup-bun` is SHA-pinned to the v2 release as of
+      # 2026-05-14 — same supply-chain discipline we apply to every
+      # other third-party Action.
+      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+        with:
+          bun-version: latest
       # Default mode is verify-only: no network, no lipo, no codesign.
       # Just SHA-256 of COOL-TUNNEL/naive vs `merged_universal_sha256`
       # in COOL-TUNNEL/naive.upstream.json. Catches:
@@ -248,3 +263,27 @@ jobs:
       # CI step lightweight (no Swift toolchain, no Rust toolchain).
       - name: Enforce try? cap
         run: bash scripts/try_question_ratchet.sh
+
+  bun-tests:
+    name: Bun tests (cut_release + fetch_naive)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+      # **post-v2.0.52:** the two complex maintenance scripts
+      # (cut_release, fetch_naive) live as TypeScript+Bun under
+      # scripts/*.ts. The pure-logic surfaces (argument parsers
+      # in particular) are unit-tested via `bun test`; this job
+      # runs them on every push and PR so a regression in the
+      # parser shape is caught here, not at release-cut time.
+      #
+      # Action SHA-pinned to the v2 release as of 2026-05-14, same
+      # supply-chain discipline as the rest of the workflow's
+      # third-party uses (actions/checkout, actions/cache,
+      # taiki-e/install-action).
+      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+        with:
+          bun-version: latest
+      - name: bun test scripts/
+        run: bun test scripts/
