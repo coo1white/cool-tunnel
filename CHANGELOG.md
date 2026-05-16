@@ -11,98 +11,22 @@ line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
 ## [2.0.54] — 2026-05-16 — Streamlined Debug-Handshake Log + VPS-Egress Hint Wired
 
-> **Finishes the v2.0.53 VPS-egress classifier and trims the
-> debug-handshake live-log surface from six noisy lines (incl.
-> 350+ bytes of hex dumps and operator-fingerprinting key=value
-> pairs) down to two lines: verdict + actionable hint. PR #79
-> shipped the classifier types; this release actually surfaces
-> them where the operator can see them.**
-
-### Fixed — debug-handshake live log was noisy + leaked operator metadata (#81)
-
-v2.0.53's PR #79 added `DebugHandshakeFailureClass` +
-`operatorHint` to `Protocol.swift`, but the orchestrator's
-debug-handshake completion was never updated to read them. A
-real VPS-egress failure in the field after upgrading to v2.0.53
-still produced:
-
-```
-debug handshake: ✗ server=… target=… connect_ok=true \
-    post_connect_recv=0B elapsed=336ms
-debug handshake sent[0..1024]=43 4f 4e 4e 45 43 54 …  (262 bytes of hex)
-debug handshake recv[0..1024]=48 54 54 50 2f 31 2e 31 …  (85+ bytes of hex)
-[debug handshake error] post-CONNECT read failed: Connection reset by peer (os error 54)
-```
-
-…which buried the verdict, leaked `server=` (operator's proxy
-hostname) into the live log, and gave the operator no
-actionable next step.
-
-The new shape:
+PR #79 (v2.0.53) added `DebugHandshakeFailureClass` + `operatorHint`
+but the orchestrator never read them, so a real VPS-egress failure
+still surfaced as six lines of hex dumps + a raw `Connection reset
+by peer`. PR #81 wires the classifier and trims the live-log shape:
 
 ```
 debug handshake: ✗ elapsed=336ms
   ↪ Server accepted credentials but cannot reach the destination.
     This is a VPS-side issue. On the VPS run:
-    `curl -v --max-time 5 https://www.google.com/generate_204` —
-    if it RSTs the same way, your VPS's egress to that destination
-    is blocked (datacenter firewall, ISP filter, IPv6 routing, or
-    a local iptables rule).
+    `curl -v --max-time 5 https://www.google.com/generate_204` — if it
+    RSTs the same way, your VPS's egress to that destination is blocked.
 ```
 
-**6 lines → 2 lines, with the actionable next-step front and
-center.**
-
-### What dropped from the live log
-
-| Dropped | Why |
-|---|---|
-| 262-byte sent[0..1024] hex dump | Buried the verdict; naive's own stderr passthrough still carries wire evidence |
-| 85+ byte recv[0..1024] hex dump | Same |
-| `server=` / `target=` key=values | Operator-fingerprinting metadata that the v2.0.47 + v2.0.51 OPSEC audits closed in the telemetry surface but never closed in the live log |
-| `connect_ok=` / `post_connect_recv=` key=values | Inputs the classifier already reads — repeating them is noise |
-| Raw `Connection reset by peer` error | Replaced by the actionable hint (kept only when classifier returns `.other`) |
-
-### Hint mapping
-
-| Failure class | Hint surface |
-|---|---|
-| `connectFailed` | "Couldn't reach the proxy. Verify hostname / port, or test from the VPS shell with `curl …`" |
-| `proxyAuthRejected` | "Server rejected credentials (HTTP 407). If you imported via subscription URL, try re-importing — the panel may have rotated the password." |
-| `vpsEgressBlocked` | "Server accepted credentials but cannot reach the destination. … On the VPS run `curl -v --max-time 5 https://www.google.com/generate_204` — if it RSTs the same way, your VPS's egress to that destination is blocked." |
-| `other` | "Handshake failed in an unrecognised shape. Read the byte dump above for clues." (raw error string also kept on this branch) |
-
-### Tests added — 18 new (138 → 156 Swift suite)
-
-`COOL-TUNNELTests/DebugHandshakeClassifierTests.swift` covers
-the four classification branches end-to-end:
-
-  - `ok=true` → nil classification (no false-positive hint)
-  - `connect_ok=false` → connectFailed; hint mentions curl
-  - 407 response shape → proxyAuthRejected; hint mentions
-    subscription re-import
-  - 200 OK + zero post-connect + reset error → vpsEgressBlocked
-    (the operator's actual symptom); hint mentions VPS + egress
-  - macOS errno 54, Linux errno 104, "broken pipe", "unexpected
-    EOF" all match `isConnectionResetError`
-  - 200 OK without error → other
-  - 200 OK + non-zero post-connect bytes → other (mid-stream
-    failure, not egress-blocked)
-  - operatorHint strings are non-empty and contain the right
-    actionable keywords
-
-### Checks
-
-- 156/156 Swift tests pass (was 138, +18 new).
-- 178/178 Rust tests pass (unchanged).
-- 10/10 Bun tests pass (unchanged).
-- GitHub Actions CI on PR #81 — 7/7 jobs green.
-- `xcrun swift-format lint -r --strict` → clean.
-- `bash scripts/try_question_ratchet.sh` → 0 unannotated == cap ✓.
-
-No protocol-wire change — `DebugHandshakeReport` shape is
-unchanged; only the orchestrator's interpretation of it on
-display.
+156/156 Swift (+18 new in `DebugHandshakeClassifierTests`), 178 Rust,
+10 Bun, 7/7 CI. No wire change — `DebugHandshakeReport` shape
+unchanged; only the orchestrator's interpretation on display.
 
 ## [2.0.53] — 2026-05-14 — VPS-Egress Classifier + TypeScript+Bun Maintenance Scripts
 
