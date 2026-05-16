@@ -158,7 +158,7 @@ public struct NaiveBinaryResolver: Sendable {
             throw NaiveResolverError.fileNotFound(url)
         }
 
-        let archs = await Self.runLipoInfo(at: url)
+        let archs = await BinaryInspector.runLipoInfo(at: url)
         guard !archs.isEmpty else {
             throw NaiveResolverError.notAMachO(url)
         }
@@ -167,11 +167,11 @@ public struct NaiveBinaryResolver: Sendable {
         // "Bad CPU type in executable" and waste time.
         let version: String?
         if archs.contains(HostArchitecture.current.machOArchName) {
-            version = await Self.runVersion(at: url)
+            version = await BinaryInspector.runVersion(at: url, binaryName: "naive")
         } else {
             version = nil
         }
-        let signatureValid = await Self.checkSignature(at: url)
+        let signatureValid = await BinaryInspector.checkSignature(at: url)
         return NaiveBinaryDescriptor(
             url: url,
             origin: origin,
@@ -186,98 +186,5 @@ public struct NaiveBinaryResolver: Sendable {
     public static func bundledURL() -> URL {
         Bundle.main.url(forResource: "naive", withExtension: nil)
             ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/naive")
-    }
-
-    // MARK: - Subprocess helpers
-
-    /// Parses `lipo -info <path>` output into a set of arch names.
-    /// Tolerant of both `Non-fat file: … is architecture: arm64` and
-    /// `Architectures in the fat file: … are: x86_64 arm64`.
-    /// Spawns `lipo -info <path>` and delegates output parsing to
-    /// `LipoOutputParser`. The split lets the parser stay
-    /// unit-testable without subprocess spawning; both resolvers
-    /// (Naive and RustCore) share the parser so the
-    /// known-arch allow-list lives in one place.
-    private static func runLipoInfo(at url: URL) async -> Set<String> {
-        let result = await runProcess(
-            executable: URL(fileURLWithPath: "/usr/bin/lipo"),
-            arguments: ["-info", url.path]
-        )
-        guard let output = result else { return [] }
-        return LipoOutputParser.parse(output)
-    }
-
-    /// Runs the candidate with `--version` and returns the first line
-    /// of output that **matches the expected naive version pattern**,
-    /// or `nil` otherwise.
-    ///
-    /// We validate the shape (`naive <semantic-version>`) instead of
-    /// trusting whatever the subprocess prints. A misbehaving binary
-    /// could emit an error message containing a config path, a Mach-O
-    /// load error pointing at a private framework, or an attacker-
-    /// controlled string — all of which would otherwise land in the
-    /// Settings view's monospaced "Version" row.
-    private static func runVersion(at url: URL) async -> String? {
-        let output = await runProcess(
-            executable: url,
-            arguments: ["--version"]
-        )
-        guard let raw = output else { return nil }
-        // `naive 147.0.7727.49` is the canonical upstream format. We
-        // accept `naive` followed by whitespace and a 1-4-segment
-        // dotted numeric version (with optional pre-release suffix
-        // like `-beta1`). Anything else is rejected — the UI will
-        // render "(no --version output)" instead of leaking whatever
-        // junk came back.
-        let pattern = #"^naive\s+\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?\s*$"#
-        for line in raw.split(whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.range(of: pattern, options: .regularExpression) != nil {
-                return trimmed
-            }
-        }
-        return nil
-    }
-
-    /// Returns whether [`CodeSignVerifier`] accepts the binary. Errors
-    /// are swallowed because the descriptor stores the boolean; callers
-    /// re-run the verifier to extract the OSStatus when they need a
-    /// typed error.
-    private static func checkSignature(at url: URL) async -> Bool {
-        do {
-            try await CodeSignVerifier.verifyValid(at: url)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    /// Generic subprocess runner: collects stdout+stderr into one string,
-    /// returns `nil` if the process could not be launched at all. We
-    /// intentionally tolerate non-zero exit codes — `naive --version`
-    /// historically exits 0, but even a non-zero exit accompanied by a
-    /// version line is still informative for the UI.
-    private static func runProcess(
-        executable: URL,
-        arguments: [String]
-    ) async -> String? {
-        // Routed through `Subprocess.run` so a wedged `lipo` /
-        // `naive --version` cannot freeze inspection. 10-second
-        // timeout: `lipo -info` and `naive --version` both
-        // typically return in <100ms; 10s is generous slack for
-        // disk slowness without keeping the user waiting on a
-        // stuck binary.
-        let result: SubprocessResult
-        do {
-            result = try await Subprocess.run(
-                executable: executable,
-                arguments: arguments,
-                timeout: 10
-            )
-        } catch {
-            return nil
-        }
-        let combined = result.stdout.isEmpty ? result.stderr : result.stdout
-        return combined
     }
 }
