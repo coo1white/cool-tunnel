@@ -9,6 +9,26 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.59] — 2026-05-16 — Code Streamline Wave: Updater Consolidation + Bun-Port Sweep + Resolver Refactors
+
+Eleven PRs bundled. **PR #88** removes the DeveloperOverlay feature
+entirely (−613 lines; non-core diagnostic HUD; wire-protocol
+`.trafficSnapshot` event preserved for `cool-tunnel-server`).
+**PR #89** consolidates `NaiveUpdater` + `RustCoreUpdater` shared
+mechanics into `BinaryUpdater.swift` (−262, zero callsite change).
+**PRs #90/#91/#92/#93** port `preflight.sh` / `audit.sh` /
+`package_release.sh` / `security_check.sh` to TypeScript+Bun behind
+thin `.sh` shims, completing the 7-script Bun migration that PR #80
+(v2.0.53) started. **PR #94** lifts the `fail()` helper into
+`lib/log.ts`. **PR #95** extracts `BinaryInspector` to share
+`runProcess` / `runVersion` / `checkSignature` / `runLipoInfo`
+across `NaiveBinaryResolver` + `RustCoreResolver`. **PR #96**
+extracts `String.isBlank` collapsing the
+`.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty` idiom.
+**PR #97** rehomes cross-script pure helpers to `scripts/lib/`.
+**PR #98** closes 7 `noUncheckedIndexedAccess` errors in
+`try_question_ratchet`.
+
 ## [2.0.58] — 2026-05-16 — Bun Port: try_question_ratchet (third script)
 
 PR #87 ports `try_question_ratchet.sh` (151 lines bash) to
