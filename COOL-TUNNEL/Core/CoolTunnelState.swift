@@ -228,7 +228,7 @@ extension CoolTunnelViewState {
             ModeOption(
                 id: .localOnly,
                 label: "Local",
-                help: "Local: run naive on 127.0.0.1; leave the system proxy untouched."
+                help: "Local: run sing-box on 127.0.0.1; leave the system proxy untouched."
             ),
         ]
     }
@@ -297,10 +297,10 @@ extension CoolTunnelViewState {
     }
 
     public struct Resources: Sendable, Equatable {
-        public var activeNaiveDescriptor: NaiveBinaryDescriptor?
+        public var activeSingboxDescriptor: SingboxBinaryDescriptor?
 
-        public init(activeNaiveDescriptor: NaiveBinaryDescriptor?) {
-            self.activeNaiveDescriptor = activeNaiveDescriptor
+        public init(activeSingboxDescriptor: SingboxBinaryDescriptor?) {
+            self.activeSingboxDescriptor = activeSingboxDescriptor
         }
     }
 }

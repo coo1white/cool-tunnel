@@ -29,8 +29,8 @@
 // Sections, top to bottom:
 //
 //   - Direct Domains
-//   - This Mac (rich machine detail)
-//   - Naive Binary  (Test + Update + OK/NG verdict)
+//   - This Mac     (rich machine detail)
+//   - sing-box     (Test + Update + OK/NG verdict)
 //   - Rust Core    (Test + Update + OK/NG verdict, new in v0.1.5.8)
 //   - Behaviour
 //   - About        (app version footer)
@@ -41,7 +41,7 @@ import SwiftUI
 import os
 
 /// Inline Settings panel — direct-domains list, This-Mac hardware
-/// readout, Naive Binary section (Test + Update + OK/NG verdict),
+/// readout, sing-box section (Test + Update + OK/NG verdict),
 /// Rust Core section (same shape), behaviour toggles, and an
 /// About footer with the running app version. Driven by an
 /// `isShowing` binding from `ContentView`; Cmd+W and the Back
@@ -75,11 +75,11 @@ public struct SettingsView: View {
     /// Cleared on the next successful add or on next typing.
     @State private var domainAddError: String?
 
-    // -- Naive Binary state
+    // -- sing-box binary state
     @State private var binaryPickerError: String?
-    @State private var inspection: NaiveBinaryDescriptor?
+    @State private var inspection: SingboxBinaryDescriptor?
     @State private var isInspecting: Bool = false
-    @State private var updater = NaiveUpdater(
+    @State private var updater = SingboxUpdater(
         // try-ok: init throws only when home dir lookup fails; fall back to /tmp
         supportDirectory: (try? AppSupportPaths())?.supportDirectory
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
@@ -98,7 +98,7 @@ public struct SettingsView: View {
     // -- App self-updater (new in v0.1.7.6)
     @State private var appUpdater = AppUpdater()
 
-    private let resolver = NaiveBinaryResolver()
+    private let resolver = SingboxBinaryResolver()
     private let rustResolver = RustCoreResolver()
     private let host = HostMachine.current
     private let appVersion = AppVersion.current
@@ -184,16 +184,16 @@ public struct SettingsView: View {
                     chipDetectionRow
                 }
 
-                Section("Naive Binary") {
-                    naiveBinaryPicker
-                    naiveBinarySummary
+                Section("sing-box") {
+                    singboxBinaryPicker
+                    singboxBinarySummary
                     if let error = binaryPickerError {
                         Text(error)
                             .font(.caption)
                             .foregroundStyle(.red)
                     } else {
                         Text(
-                            "Test runs a full code-signature + host-CPU-slice + --version check. Update downloads the latest NaiveProxy from upstream and lipo-merges arm64 + x86_64 into a single universal binary."
+                            "Test runs a full code-signature + host-CPU-slice + --version check. Update downloads the latest sing-box from upstream (SagerNet) and lipo-merges arm64 + x86_64 into a single universal binary."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -253,15 +253,15 @@ public struct SettingsView: View {
                 orchestrator.persistSettings()
             }
             // **Phase 2.0 Settings Contract (v0.2):** when the
-            // custom naive-binary path changes (Update / Choose…
-            // / Reset), the orchestrator must re-resolve its
-            // cached descriptor — otherwise the Settings verdict
-            // pill keeps showing the previous binary's verdict.
-            // Previously triggered explicitly inside `commit()`;
-            // now wired off the same observable that drives
-            // persistence.
-            .onChange(of: bindable.settings.customNaiveBinaryPath) { _, _ in
-                Task { await orchestrator.refreshNaiveDescriptor() }
+            // custom sing-box-binary path changes (Update /
+            // Choose… / Reset), the orchestrator must re-resolve
+            // its cached descriptor — otherwise the Settings
+            // verdict pill keeps showing the previous binary's
+            // verdict. Previously triggered explicitly inside
+            // `commit()`; now wired off the same observable that
+            // drives persistence.
+            .onChange(of: bindable.settings.customSingboxBinaryPath) { _, _ in
+                Task { await orchestrator.refreshSingboxDescriptor() }
             }
         }
         .padding(16)
@@ -291,15 +291,15 @@ public struct SettingsView: View {
             // needs hydration on appear so the verdict pill
             // shows the orchestrator's last result before the
             // user clicks Test.
-            inspection = orchestrator.activeNaiveDescriptor
+            inspection = orchestrator.activeSingboxDescriptor
         }
         .task {
             // Lazy first inspection — see the long comment in the
             // bootstrap path docs for why the launch flow stays clean
             // and inspection happens here instead.
-            if orchestrator.activeNaiveDescriptor == nil {
-                await orchestrator.refreshNaiveDescriptor()
-                inspection = orchestrator.activeNaiveDescriptor
+            if orchestrator.activeSingboxDescriptor == nil {
+                await orchestrator.refreshSingboxDescriptor()
+                inspection = orchestrator.activeSingboxDescriptor
             }
             // Initial inspection of the active Rust core too, so the
             // verdict line shows real data without a click.
@@ -326,8 +326,9 @@ public struct SettingsView: View {
     // MARK: - Chip detection — rich machine detail
 
     /// Renders "This Mac" with everything the user likely wants to
-    /// see when triaging a "naive won't spawn" issue: brand string,
-    /// performance + efficiency cores, memory, model identifier.
+    /// see when triaging a "sing-box won't spawn" issue: brand
+    /// string, performance + efficiency cores, memory, model
+    /// identifier.
     @ViewBuilder
     private var chipDetectionRow: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -374,15 +375,15 @@ public struct SettingsView: View {
     private func chipDetectionSubtitle(for host: HostArchitecture) -> String {
         switch host {
         case .appleSilicon:
-            return "Replace the bundled naive with an arm64 or universal build."
+            return "Replace the bundled sing-box with an arm64 or universal build."
         case .intel:
-            return "Replace the bundled naive with an x86_64 or universal build."
+            return "Replace the bundled sing-box with an x86_64 or universal build."
         case .unknown:
             return "Could not determine CPU architecture; spawning may fail."
         }
     }
 
-    // MARK: - Naive binary summary
+    // MARK: - sing-box binary summary
 
     /// Live readout for whichever binary is currently selected. New
     /// in v0.1.5.6: an OK / NG verdict line above the row breakdown
@@ -392,7 +393,7 @@ public struct SettingsView: View {
     /// race the .disabled re-render and queue a second inspection
     /// or update.
     @ViewBuilder
-    private var naiveBinarySummary: some View {
+    private var singboxBinarySummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button(isInspecting ? "Testing…" : "Test") {
@@ -480,7 +481,7 @@ public struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         } else if let descriptor = inspection {
-            let verdict = naiveVerdict(for: descriptor)
+            let verdict = singboxVerdict(for: descriptor)
             VerdictPill(
                 kind: verdict.ok ? .ok : .ng,
                 tag: verdict.ok ? "OK" : "NG",
@@ -578,12 +579,12 @@ public struct SettingsView: View {
     private var updaterMessage: String? {
         switch updater.state {
         case .idle: nil
-        case .checking: "Checking upstream NaiveProxy releases…"
+        case .checking: "Checking upstream sing-box releases…"
         case .upToDate(let current, _):
             "You're on the latest version (\(current))."
         case .available(let tag, _):
             "Update available: \(tag)."
-        case .resolvingTag: "Resolving latest upstream NaiveProxy tag…"
+        case .resolvingTag: "Resolving latest upstream sing-box tag…"
         case .downloading(let p) where p > 0: "Downloading… \(Int(p * 100))%"
         case .downloading: "Downloading arm64 + x86_64 builds…"
         case .extracting: "Extracting tarballs…"
@@ -606,7 +607,7 @@ public struct SettingsView: View {
         SummaryRow(label: label, value: value, monospaced: monospaced, labelWidth: 90)
     }
 
-    private func hostSliceRow(descriptor: NaiveBinaryDescriptor) -> some View {
+    private func hostSliceRow(descriptor: SingboxBinaryDescriptor) -> some View {
         let host = HostArchitecture.current
         let ok = descriptor.supportsHostArchitecture
         return HStack(alignment: .firstTextBaseline) {
@@ -626,7 +627,7 @@ public struct SettingsView: View {
         }
     }
 
-    private func signatureRow(descriptor: NaiveBinaryDescriptor) -> some View {
+    private func signatureRow(descriptor: SingboxBinaryDescriptor) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text("Signature")
                 .font(.caption)
@@ -648,7 +649,7 @@ public struct SettingsView: View {
     /// reason. The Test button populates this; the Settings UI shows
     /// it above the per-row breakdown so the user can grok the
     /// outcome at a glance.
-    private func naiveVerdict(for descriptor: NaiveBinaryDescriptor) -> (ok: Bool, message: String) {
+    private func singboxVerdict(for descriptor: SingboxBinaryDescriptor) -> (ok: Bool, message: String) {
         if !descriptor.supportsHostArchitecture {
             return (
                 false,
@@ -688,18 +689,18 @@ public struct SettingsView: View {
         defer { isInspecting = false }
 
         let url: URL
-        let origin: NaiveBinaryDescriptor.Origin
-        if orchestrator.settings.customNaiveBinaryPath.isEmpty {
-            url = NaiveBinaryResolver.bundledURL()
+        let origin: SingboxBinaryDescriptor.Origin
+        if orchestrator.settings.customSingboxBinaryPath.isEmpty {
+            url = SingboxBinaryResolver.bundledURL()
             origin = .bundled
         } else {
-            url = URL(fileURLWithPath: orchestrator.settings.customNaiveBinaryPath)
+            url = URL(fileURLWithPath: orchestrator.settings.customSingboxBinaryPath)
             origin = .userSupplied
         }
         do {
             inspection = try await resolver.inspect(url: url, origin: origin)
             binaryPickerError = nil
-        } catch let error as NaiveResolverError {
+        } catch let error as SingboxResolverError {
             binaryPickerError = error.localizedDescription
             inspection = nil
         } catch {
@@ -717,7 +718,7 @@ public struct SettingsView: View {
         guard let installedURL = await updater.update() else {
             return  // Failure is surfaced via `updater.state` already.
         }
-        orchestrator.settings.customNaiveBinaryPath = installedURL.path
+        orchestrator.settings.customSingboxBinaryPath = installedURL.path
         // Owned re-inspection — set the flag synchronously here so
         // the button stays disabled across the post-update probe.
         isInspecting = true
@@ -736,14 +737,14 @@ public struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var naiveBinaryPicker: some View {
+    private var singboxBinaryPicker: some View {
         HStack(alignment: .firstTextBaseline) {
             Group {
-                if orchestrator.settings.customNaiveBinaryPath.isEmpty {
+                if orchestrator.settings.customSingboxBinaryPath.isEmpty {
                     Text("Bundled (default)")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(orchestrator.settings.customNaiveBinaryPath)
+                    Text(orchestrator.settings.customSingboxBinaryPath)
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -754,13 +755,13 @@ public struct SettingsView: View {
             // Disable Choose during inspection / update — same
             // rationale as the Rust Core picker: avoid stacking an
             // NSOpenPanel modal on top of in-flight probe work.
-            Button("Choose…") { chooseNaiveBinary() }
+            Button("Choose…") { chooseSingboxBinary() }
                 .disabled(isInspecting || updaterIsBusy)
 
-            if !orchestrator.settings.customNaiveBinaryPath.isEmpty {
+            if !orchestrator.settings.customSingboxBinaryPath.isEmpty {
                 Button("Reset") {
                     guard !isInspecting && !updaterIsBusy else { return }
-                    orchestrator.settings.customNaiveBinaryPath = ""
+                    orchestrator.settings.customSingboxBinaryPath = ""
                     binaryPickerError = nil
                 }
                 .disabled(isInspecting || updaterIsBusy)
@@ -829,7 +830,7 @@ public struct SettingsView: View {
     // MARK: - App self-updater section (new in v0.1.7.6)
 
     /// "Cool Tunnel" Settings row — current version display +
-    /// Check / Update buttons, mirroring the Naive Binary and
+    /// Check / Update buttons, mirroring the sing-box and
     /// Rust Core sections. Drives `AppUpdater`, which fetches
     /// `releases/latest` from GitHub, verifies the .zip against
     /// the SHA-256 manifest the same release publishes, ditto-
@@ -1058,7 +1059,7 @@ public struct SettingsView: View {
     private var domainList: some View {
         // Cap the inline list height so very long direct-domain
         // lists (smart-mode users with hundreds of entries) don't
-        // push every section below — Naive Binary, Rust Core,
+        // push every section below — sing-box, Rust Core,
         // About — off-screen. The inner ScrollView keeps the
         // entries reachable while the surrounding Form keeps the
         // section structure stable.
@@ -1148,17 +1149,17 @@ public struct SettingsView: View {
 
     /// Opens an `NSOpenPanel`, validates the selected file's code
     /// signature up front, and only accepts paths that pass.
-    private func chooseNaiveBinary() {
+    private func chooseSingboxBinary() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.title = "Select naive binary"
+        panel.title = "Select sing-box binary"
         panel.message = "The selected file must be a code-signed Mach-O executable."
         panel.prompt = "Use"
         panel.treatsFilePackagesAsDirectories = true
-        if !orchestrator.settings.customNaiveBinaryPath.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: orchestrator.settings.customNaiveBinaryPath)
+        if !orchestrator.settings.customSingboxBinaryPath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: orchestrator.settings.customSingboxBinaryPath)
                 .deletingLastPathComponent()
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -1179,9 +1180,9 @@ public struct SettingsView: View {
                 binaryPickerError = "Rejected: code signature is invalid or missing."
                 return
             }
-            orchestrator.settings.customNaiveBinaryPath = url.path
+            orchestrator.settings.customSingboxBinaryPath = url.path
             binaryPickerError = nil
-        } catch let error as NaiveResolverError {
+        } catch let error as SingboxResolverError {
             binaryPickerError = "Rejected: \(error.localizedDescription)"
             inspection = nil
         } catch {
@@ -1207,7 +1208,7 @@ public struct SettingsView: View {
 
     // MARK: - Rust Core section
 
-    /// Path picker + Reset for the Rust core. Mirrors the naive
+    /// Path picker + Reset for the Rust core. Mirrors the sing-box
     /// picker so the two sections read as siblings.
     @ViewBuilder
     private var rustCorePicker: some View {
@@ -1247,8 +1248,8 @@ public struct SettingsView: View {
 
     /// Live readout for the Rust core: arch slices, version, code
     /// signature, OK/NG verdict, plus Test + Update buttons. Same
-    /// synchronous-busy-flag pattern as the naive section above —
-    /// see the comment over `naiveBinarySummary` for the audit
+    /// synchronous-busy-flag pattern as the sing-box section above
+    /// — see the comment over `singboxBinarySummary` for the audit
     /// rationale.
     @ViewBuilder
     private var rustCoreSummary: some View {
@@ -1262,8 +1263,8 @@ public struct SettingsView: View {
                 .disabled(isRustInspecting || rustUpdaterIsBusy)
 
                 Button(rustUpdaterButtonTitle) {
-                    // **v2.0.2:** state-aware action — see naive
-                    // section above for the rationale.
+                    // **v2.0.2:** state-aware action — see
+                    // sing-box section above for the rationale.
                     guard !rustUpdaterIsBusy && !isRustInspecting else { return }
                     if case .available = rustUpdater.state {
                         Task { await runRustUpdate() }
@@ -1348,7 +1349,7 @@ public struct SettingsView: View {
                 switch rustUpdater.state {
                 case .downloading(let p) where p > 0:
                     ProgressView(value: p).controlSize(.small)
-                // v2.0.4 hotfix — see naive `updaterRow` above.
+                // v2.0.4 hotfix — see sing-box `updaterRow` above.
                 case .succeeded, .failed, .idle, .upToDate, .available:
                     EmptyView()
                 default:
@@ -1361,7 +1362,7 @@ public struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(rustUpdaterMessageColor)
                     .lineLimit(2)
-                    // Same hover-and-select treatment as the naive
+                    // Same hover-and-select treatment as the sing-box
                     // updater message — long failure strings stay
                     // copyable for support tickets.
                     .help(message)
@@ -1384,7 +1385,7 @@ public struct SettingsView: View {
     }
 
     /// **v2.0.2:** see `updaterButtonTitle` for the morphing
-    /// rationale. Same shape for the engine binary.
+    /// rationale. Same shape for the Rust engine binary.
     private var rustUpdaterButtonTitle: String {
         switch rustUpdater.state {
         case .checking: "Checking…"
@@ -1483,10 +1484,10 @@ public struct SettingsView: View {
         return (true, "Ready to use · \(archDesc) · \(descriptor.version ?? "")")
     }
 
-    /// Same shim as the naive side: callers from non-button entry
-    /// points (initial `.task`, post-Choose adopt path, post-Update
-    /// re-inspection) flip the busy flag here. The button itself
-    /// already set the flag synchronously.
+    /// Same shim as the sing-box side: callers from non-button
+    /// entry points (initial `.task`, post-Choose adopt path,
+    /// post-Update re-inspection) flip the busy flag here. The
+    /// button itself already set the flag synchronously.
     private func runRustInspection() async {
         if !isRustInspecting {
             isRustInspecting = true
@@ -1527,7 +1528,7 @@ public struct SettingsView: View {
     }
 
     /// **v2.0.2:** lightweight upstream check for the Rust core.
-    /// See `runCheckForUpdates` (naive equivalent) for shape.
+    /// See `runCheckForUpdates` (sing-box equivalent) for shape.
     private func runRustCheckForUpdates() async {
         let currentVersion = rustInspection?.version ?? ""
         await rustUpdater.checkForUpdates(currentVersion: currentVersion)

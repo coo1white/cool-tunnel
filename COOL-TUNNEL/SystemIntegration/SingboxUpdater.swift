@@ -1,35 +1,43 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
-// SystemIntegration/NaiveUpdater.swift
+// SystemIntegration/SingboxUpdater.swift
 //
-// Downloads the latest upstream NaiveProxy macOS build (arm64 + x64),
+// Downloads the latest upstream sing-box macOS build (arm64 + x64),
 // lipo-merges the two slices into one universal Mach-O, ad-hoc signs
 // it, and drops it into `~/Library/Application Support/COOL-TUNNEL/
-// naive-managed` so the orchestrator can adopt it as a custom binary
-// path. Mirrors `scripts/fetch_naive.sh` but lives in-app so the
-// Settings "Update naive" button works on an installed `.app`
-// (where bundled `Contents/Resources/naive` is read-only and re-
-// signing it would invalidate the app's own signature).
+// singbox-managed` so the orchestrator can adopt it as a custom binary
+// path. Mirrors `scripts/fetch_singbox-core.ts` but lives in-app so
+// the Settings "Update sing-box" button works on an installed `.app`
+// (where the bundled `Contents/Resources/sing-box` is read-only and
+// re-signing it would invalidate the app's own signature).
 //
-// **v2.0.51 consolidation:** the shared mechanics (download
-// wrapper with host-trust + size-cap error mapping, atomic
-// install, ad-hoc sign, subprocess helper, tag-vs-binary
+// **v3.0.0:** renamed from `NaiveUpdater`. The download target moved
+// from `klzgrad/naiveproxy` (HTTP/2 basic-auth) to `SagerNet/sing-box`
+// (VLESS+Reality). The asset shape changed from
+// `naiveproxy-<tag>-mac-<arch>.tar.xz` to
+// `sing-box-<stem>-darwin-<arch>.tar.gz` (gzip, not xz; `darwin-amd64`
+// not `mac-x64-x64`). The internal tarball binary is now `sing-box`
+// instead of `naive`.
+//
+// **v2.0.51 consolidation (preserved):** the shared mechanics
+// (download wrapper with host-trust + size-cap error mapping,
+// atomic install, ad-hoc sign, subprocess helper, tag-vs-binary
 // comparison, GitHub API fetch boilerplate, lastInstalledTag
-// self-heal) live in `BinaryUpdater.swift` alongside the
-// matching extractions out of `RustCoreUpdater`. This file
-// keeps the naive-specific state machine + lipo / extract
-// pipeline steps that the Rust core has no counterpart for.
+// self-heal) live in `BinaryUpdater.swift` alongside the matching
+// extractions out of `RustCoreUpdater`. This file keeps the
+// singbox-specific state machine + lipo / extract pipeline steps
+// that the Rust core has no counterpart for.
 
 import Foundation
 import Observation
 import os
 
-private let naiveUpdaterLogger = Logger.cooltunnel("NaiveUpdater")
+private let singboxUpdaterLogger = Logger.cooltunnel("SingboxUpdater")
 
 @MainActor
 @Observable
-final class NaiveUpdater {
+final class SingboxUpdater {
 
     /// What the updater is doing right now. **v2.0.2:** `checking`
     /// / `upToDate` / `available` mirror AppUpdater's check-then-
@@ -53,7 +61,7 @@ final class NaiveUpdater {
     var lastInstalledTag: String? { tagStore.value }
 
     private let tagStore = UpdaterTagStore(
-        key: "NaiveUpdater.lastInstalledTag")
+        key: "SingboxUpdater.lastInstalledTag")
     private let supportDirectory: URL
 
     init(supportDirectory: URL) {
@@ -66,15 +74,15 @@ final class NaiveUpdater {
 
     var installedURL: URL {
         supportDirectory.appendingPathComponent(
-            "naive-managed", isDirectory: false)
+            "singbox-managed", isDirectory: false)
     }
 
     /// **v2.0.2:** query upstream for the latest stable tag and
     /// compare against the installed binary. Caller passes the
-    /// binary's `--version` line so cosmetic upstream `-N` patch
-    /// suffixes don't trip a redundant download. Re-running while
-    /// a previous run is in flight is a no-op so the state machine
-    /// stays monotonic.
+    /// binary's `version` line so cosmetic upstream patch suffixes
+    /// don't trip a redundant download. Re-running while a previous
+    /// run is in flight is a no-op so the state machine stays
+    /// monotonic.
     func checkForUpdates(currentVersion: String) async {
         guard !isBusy else { return }
         // **v2.0.27 hotfix (parity with v2.0.24's RustCoreUpdater
@@ -129,8 +137,8 @@ final class NaiveUpdater {
                 tag = try await Self.resolveLatestStableTag()
             }
             // Defence in depth before interpolating into a URL
-            // path: GitHub release tags are typically `vN.N.N-N`
-            // but the API returns whatever upstream pushed, and
+            // path: GitHub release tags are typically `vN.N.N` but
+            // the API returns whatever upstream pushed, and
             // characters like `..`, spaces, `?`, `#`, `/` would
             // produce a URL pointing outside the intended release
             // directory.
@@ -141,7 +149,7 @@ final class NaiveUpdater {
             }
 
             let tempRoot = try BinaryUpdaterCore.makeTempDirectory(
-                prefix: "cool-tunnel-naive-update")
+                prefix: "cool-tunnel-singbox-update")
             // try-ok: defer-block tempdir teardown
             defer { try? FileManager.default.removeItem(at: tempRoot) }
 
@@ -152,30 +160,30 @@ final class NaiveUpdater {
             let x64URL = try Self.assetURL(tag: tag, arch: .x64)
             async let arm64Tarball = BinaryUpdaterCore.download(
                 url: arm64URL,
-                to: tempRoot.appendingPathComponent("arm64.tar.xz"),
-                logger: naiveUpdaterLogger
+                to: tempRoot.appendingPathComponent("arm64.tar.gz"),
+                logger: singboxUpdaterLogger
             )
             async let x64Tarball = BinaryUpdaterCore.download(
                 url: x64URL,
-                to: tempRoot.appendingPathComponent("x64.tar.xz"),
-                logger: naiveUpdaterLogger
+                to: tempRoot.appendingPathComponent("x64.tar.gz"),
+                logger: singboxUpdaterLogger
             )
             let arm64Path = try await arm64Tarball
             let x64Path = try await x64Tarball
             state = .downloading(progress: 1.0)
 
             state = .extracting
-            async let arm64BinAsync = Self.extractNaive(
+            async let arm64BinAsync = Self.extractSingbox(
                 from: arm64Path,
                 into: tempRoot.appendingPathComponent("arm64"))
-            async let x64BinAsync = Self.extractNaive(
+            async let x64BinAsync = Self.extractSingbox(
                 from: x64Path,
                 into: tempRoot.appendingPathComponent("x64"))
             let arm64Bin = try await arm64BinAsync
             let x64Bin = try await x64BinAsync
 
             state = .merging
-            let merged = tempRoot.appendingPathComponent("naive-universal")
+            let merged = tempRoot.appendingPathComponent("sing-box-universal")
             try await Self.lipoCreate(
                 arm64: arm64Bin, x64: x64Bin, output: merged)
             try await BinaryUpdaterCore.adhocSign(at: merged)
@@ -211,15 +219,24 @@ final class NaiveUpdater {
         }
     }
 
-    // MARK: - Naive-specific pipeline steps (off-main)
+    // MARK: - sing-box-specific pipeline steps (off-main)
 
     private enum Arch { case arm64, x64 }
 
+    /// Strip the leading `v` from a release tag for the asset
+    /// filename. Upstream tags are `vX.Y.Z`; release assets are
+    /// `sing-box-X.Y.Z-darwin-<arch>.tar.gz`. Mirrors the
+    /// `tagToAssetStem` helper in `scripts/fetch_singbox-core.ts`.
+    private static func tagToAssetStem(_ tag: String) -> String {
+        tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+    }
+
     private static func assetURL(tag: String, arch: Arch) throws -> URL {
-        let archToken = arch == .arm64 ? "arm64-arm64" : "x64-x64"
-        let asset = "naiveproxy-\(tag)-mac-\(archToken).tar.xz"
+        let stem = tagToAssetStem(tag)
+        let archToken = arch == .arm64 ? "arm64" : "amd64"
+        let asset = "sing-box-\(stem)-darwin-\(archToken).tar.gz"
         let urlString =
-            "https://github.com/klzgrad/naiveproxy/releases/download/\(tag)/\(asset)"
+            "https://github.com/SagerNet/sing-box/releases/download/\(tag)/\(asset)"
         // Thrown error rather than `fatalError` so a future
         // interpolation bug surfaces as a friendly UI error
         // rather than a process crash.
@@ -247,14 +264,14 @@ final class NaiveUpdater {
         guard
             let apiURL = URL(
                 string:
-                    "https://api.github.com/repos/klzgrad/naiveproxy/releases?per_page=20"
+                    "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20"
             )
         else {
             throw UpdaterError.message(
                 "internal error: invalid hardcoded GitHub API URL")
         }
         let data = try await BinaryUpdaterCore.fetchReleaseJSON(
-            apiURL: apiURL, apiKind: "NaiveProxy")
+            apiURL: apiURL, apiKind: "sing-box")
         struct Release: Decodable {
             let tagName: String
             let prerelease: Bool
@@ -268,29 +285,33 @@ final class NaiveUpdater {
             let stable = releases.first(where: { !$0.prerelease })
                 ?? releases.first
         else {
-            throw UpdaterError.message("no NaiveProxy releases found upstream")
+            throw UpdaterError.message("no sing-box releases found upstream")
         }
         return stable.tagName
     }
 
-    /// Extracts a `.tar.xz` and returns the path to the inner
-    /// `naive` binary (strips the leading single-component dir).
-    nonisolated private static func extractNaive(
+    /// Extracts a `.tar.gz` and returns the path to the inner
+    /// `sing-box` binary (strips the leading single-component dir).
+    nonisolated private static func extractSingbox(
         from archive: URL, into target: URL
     ) async throws -> URL {
         try FileManager.default.createDirectory(
             at: target, withIntermediateDirectories: true)
+        // sing-box ships gzip-compressed tarballs (.tar.gz), so -z
+        // (not -J like the v2.x naive .tar.xz path used).
+        // --strip-components=1 drops the leading
+        // `sing-box-<stem>-darwin-<arch>/` directory.
         try await BinaryUpdaterCore.runProcess(
             executable: "/usr/bin/tar",
             arguments: [
-                "-xJf", archive.path, "-C", target.path,
+                "-xzf", archive.path, "-C", target.path,
                 "--strip-components=1",
             ]
         )
-        let binary = target.appendingPathComponent("naive")
+        let binary = target.appendingPathComponent("sing-box")
         guard FileManager.default.fileExists(atPath: binary.path) else {
             throw UpdaterError.message(
-                "The downloaded NaiveProxy archive looked incomplete. Try Update again — the previous download was probably interrupted."
+                "The downloaded sing-box archive looked incomplete. Try Update again — the previous download was probably interrupted."
             )
         }
         return binary

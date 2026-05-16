@@ -4,12 +4,14 @@
 // SystemIntegration/UpdaterError.swift
 //
 // Shared error type for the three Cool Tunnel updaters
-// (`AppUpdater`, `NaiveUpdater`, `RustCoreUpdater`). Prior
+// (`AppUpdater`, `SingboxUpdater`, `RustCoreUpdater`). Prior
 // to v0.1.7.15 each updater had its own error enum with the
 // same shape:
 //
-//   - AppUpdater.UpdaterError       (nested in class)
-//   - NaiveUpdater.UpdaterError     (file-scope, naive's file)
+//   - AppUpdater.UpdaterError          (nested in class)
+//   - NaiveUpdater.UpdaterError        (file-scope, naive's file
+//                                       — renamed to SingboxUpdater
+//                                       in v3.0.0 sub-phase E)
 //   - RustCoreUpdater.RustUpdaterError (file-scope, rust's file)
 //
 // All three were `enum X: Error, Sendable, Equatable {

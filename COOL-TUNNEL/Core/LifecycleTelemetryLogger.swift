@@ -156,6 +156,12 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
     /// stripped rather than leaving the tail visible. Schemes
     /// matched case-insensitively to catch curl's occasional
     /// upper-cased error output.
+    ///
+    /// The `naive` scheme is retained verbatim — v2.x-shaped
+    /// userinfo URLs may still appear in handed-down support
+    /// transcripts; sub-phase F will add `vless` once the wire
+    /// rename lands. False positives are a structural no-op (the
+    /// redactor doesn't touch non-credential URLs).
     private static let userinfoPattern =
         #"(?i)((?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^/\s]+@"#
 
@@ -198,10 +204,10 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
     /// past both separators, clobbering subsequent
     /// non-credential query parameters / URL fragments AND
     /// re-matching the already-redacted `token=***` produced by
-    /// the query-string rule below. Bare-token dumps in `naive`
-    /// config-load errors and curl `-v` output don't include
-    /// `&` or `#` as a value separator, so this is a strict
-    /// tightening.
+    /// the query-string rule below. Bare-token dumps in
+    /// proxy config-load errors and curl `-v` output don't
+    /// include `&` or `#` as a value separator, so this is a
+    /// strict tightening.
     private static let jsonBareCredPattern = #"""
         (?ix)
         (

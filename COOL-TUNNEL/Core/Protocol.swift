@@ -67,7 +67,7 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
 
     public static let `default` = Profile(
         id: "default",
-        server: "naive.example.com",
+        server: "proxy.example.com",
         username: "user",
         password: "",
         localPort: "1080"
@@ -78,9 +78,10 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
     /// button's enabled state in `ControlPanelView` so the user
     /// can't launch the engine against a half-filled or
     /// malformed profile (the engine would otherwise spawn
-    /// `naive` with garbage input, fail to authenticate or bind,
-    /// and surface as a generic `× upstream_via_socks` in the
-    /// diagnostics — confusing the user about what went wrong).
+    /// `sing-box` with garbage input, fail to authenticate or
+    /// bind, and surface as a generic `× upstream_via_socks` in
+    /// the diagnostics — confusing the user about what went
+    /// wrong).
     ///
     /// Whitespace-only entries count as empty. Password is also
     /// trimmed: a password of pure whitespace is almost always a
@@ -105,13 +106,13 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
     /// a `UInt16` in the range `[1024, 65535]`. Returns `nil` for
     /// any non-numeric, out-of-range, or blank input.
     ///
-    /// We refuse ports below 1024 because `naive` binding to a
-    /// well-known port requires `setuid root` privileges the app
+    /// We refuse ports below 1024 because `sing-box` binding to
+    /// a well-known port requires `setuid root` privileges the app
     /// neither has nor should have; the system proxy
     /// `networksetup` happily accepts any port, so without this
     /// gate the operator would see "Connected" while every
-    /// browser request silently failed. The standard NaiveProxy
-    /// client port is 1080.
+    /// browser request silently failed. The conventional local
+    /// SOCKS port is 1080.
     public var localPortValue: UInt16? {
         let trimmed = localPort.trimmingCharacters(in: .whitespaces)
         guard let port = UInt16(trimmed), port >= 1024 else {
@@ -121,10 +122,11 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
     }
 
     /// **v2.0.30 (Defensive Input Logic):** validates the `server`
-    /// field against NaiveProxy's wire-shape contract — bare host
-    /// or `host:port`, no scheme, no path. Returns the verdict so
-    /// the UI can render a precise inline caption ("remove the
-    /// https:// prefix") instead of a generic "bad server."
+    /// field against the upstream proxy's wire-shape contract —
+    /// bare host or `host:port`, no scheme, no path. Returns the
+    /// verdict so the UI can render a precise inline caption
+    /// ("remove the https:// prefix") instead of a generic
+    /// "bad server."
     ///
     /// Pairs with [`Profile.normaliseServer`], which auto-strips
     /// the scheme and path on paste so the operator's "Good Deed"
@@ -149,7 +151,7 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
         // Strip optional `:port` suffix before hostname-shape
         // check. The port part itself is NOT what `localPort`
         // gates on — that one is the local SOCKS port; this is
-        // the upstream NaiveProxy server's port. Engine accepts
+        // the upstream proxy server's port. Engine accepts
         // either form.
         let host: String
         if let lastColon = trimmed.lastIndex(of: ":") {
@@ -164,7 +166,7 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
         }
         // Loose RFC-1123 hostname check — labels are separated by
         // dots, alphanumerics + hyphens, no leading/trailing dot,
-        // total ≤ 253 chars. NaiveProxy's own resolver will
+        // total ≤ 253 chars. The engine's own resolver will
         // reject anything bizarre at start; we just want to catch
         // obvious typos here.
         guard !host.isEmpty,
@@ -359,8 +361,11 @@ public enum CoreResponse: Sendable, Hashable {
     case diagnostic(DiagnosticReport)
     case latency(LatencyReport)
     /// `probe_naive_live` reply (UX-F#7 / v2.0.15): `running`
-    /// is the canonical "is naive alive" flag the orchestrator
-    /// routes on; `pid` is for diagnostic logging only.
+    /// is the canonical "is the engine still alive" flag the
+    /// orchestrator routes on; `pid` is for diagnostic logging
+    /// only. The wire tag predates the v3.0.0 sing-box pivot and
+    /// is preserved verbatim until sub-phase F renames the
+    /// JSON-over-stdio shape in lock-step with the Rust side.
     case naiveLiveness(running: Bool, pid: UInt32?)
     /// `hello` reply carrying the engine's compiled-in
     /// `protocolVersion` and `engineVersion`. The Swift caller
@@ -580,6 +585,14 @@ public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
     /// IPv6-only routing to a destination the VPS can't talk
     /// to, DNS pointing at an unreachable IP, or the
     /// destination blocked at the VPS's network.
+    ///
+    /// **v3.0.0:** the classifier reads byte-level evidence from
+    /// debug_handshake replies whose 200/407 HTTP shape predates
+    /// the sing-box pivot. Sub-phase F will retune this case for
+    /// the VLESS+Reality handshake's byte shape; until then the
+    /// existing HTTP-shaped patterns still match anything that
+    /// passes through an HTTP-shaped reverse proxy in front of a
+    /// v2.x server.
     case vpsEgressBlocked = "vps_egress_blocked"
 
     /// Unclassified failure shape — non-2xx response that isn't
@@ -663,15 +676,15 @@ extension DebugHandshakeReport {
     /// `failureClassification` to disambiguate
     /// `vpsEgressBlocked` from `other`.
     ///
-    /// Permissive on purpose — the underlying naive / Rust core
-    /// emits the error string verbatim from the OS-level
-    /// `std::io::Error`, and the same root cause (egress
-    /// blocked, destination refused, peer RST) shows up under
-    /// several legitimate strings across macOS / Linux /
-    /// different Rust versions. False positives turn into the
-    /// actionable hint "check VPS egress" — which is still the
-    /// right next operator step even if the underlying issue
-    /// turns out to be something else.
+    /// Permissive on purpose — the underlying engine emits the
+    /// error string verbatim from the OS-level `std::io::Error`,
+    /// and the same root cause (egress blocked, destination
+    /// refused, peer RST) shows up under several legitimate
+    /// strings across macOS / Linux / different Rust versions.
+    /// False positives turn into the actionable hint "check VPS
+    /// egress" — which is still the right next operator step
+    /// even if the underlying issue turns out to be something
+    /// else.
     nonisolated public static func isConnectionResetError(_ error: String?) -> Bool {
         guard let error = error else { return false }
         let lower = error.lowercased()
@@ -741,8 +754,8 @@ public enum CoreRequest: Sendable, Hashable {
     case validateProfile(Profile)
     case generateNaiveConfig(Profile)
     case generatePac(directDomains: [String], port: UInt16)
-    /// Spawn the bundled `naive` binary and start streaming its
-    /// output. `monitorIntervalSecs` overrides the engine's
+    /// Spawn the bundled `sing-box` binary and start streaming
+    /// its output. `monitorIntervalSecs` overrides the engine's
     /// connection-monitor poll cadence (clamped server-side to
     /// `[1, 60]`); pass `nil` to keep the historical 5-second
     /// default.
@@ -754,14 +767,16 @@ public enum CoreRequest: Sendable, Hashable {
     case runDiagnostics
     case runLatencyTest(mode: ProxyTestMode)
     case shutdown
-    /// Asks the engine whether naive is currently alive.
-    /// Used by the orchestrator's no-restart hot-swap path
-    /// (UX-F#7 / v2.0.15) to detect a naive crash that
-    /// happened during the swap window — the
+    /// Asks the engine whether its supervised proxy binary is
+    /// currently alive. Used by the orchestrator's no-restart
+    /// hot-swap path (UX-F#7 / v2.0.15) to detect a proxy crash
+    /// that happened during the swap window — the
     /// `transitionInFlight` gate suppresses the engine's
     /// usual `stateChanged(false)` event so without an
     /// explicit probe the orchestrator would declare success
-    /// over a dead engine.
+    /// over a dead engine. The wire-protocol method name
+    /// `probe_naive_live` is preserved verbatim — sub-phase F
+    /// owns the rename in lock-step with the Rust side.
     case probeNaiveLive
     /// Wire-protocol handshake. Sent by `CoreClient.start()`
     /// immediately after the subprocess spawns; the engine

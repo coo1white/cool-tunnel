@@ -3,29 +3,31 @@
 // See LICENSE for full terms.
 // SystemIntegration/BinaryUpdater.swift
 //
-// Shared mechanics for `NaiveUpdater` and `RustCoreUpdater`.
+// Shared mechanics for `SingboxUpdater` and `RustCoreUpdater`.
 // Both follow the same outer shape: GET `/releases` JSON, pick
 // a release, resolve asset URL(s), download into a temp dir
 // (host-validated, redirect-guarded, size-capped via
 // `GitHubRedirectGuard`), run a per-updater verification +
-// prepare step (lipo + ad-hoc sign for naive; SHA-256 pin +
+// prepare step (lipo + ad-hoc sign for sing-box; SHA-256 pin +
 // ad-hoc sign for rust), atomically install into Application
 // Support, stamp `lastInstalledTag` (UserDefaults).
 //
 // Before v2.0.51 these mechanics lived twice — diverging
-// slowly (the v2.0.27 self-heal in `NaiveUpdater.checkForUpdates`
-// was lifted from the v2.0.24 RustCoreUpdater self-heal three
-// releases earlier; `runProcess`, `atomicallyInstall`,
-// `tagIsConsideredCurrent`, the host-trusted download wrapper,
-// and the GitHub API request boilerplate were already
-// byte-identical). Consolidating removes the recurring "fix
-// landed in one updater, slipped in the other" pattern.
+// slowly (the v2.0.27 self-heal in
+// `NaiveUpdater.checkForUpdates` — renamed to `SingboxUpdater`
+// in v3.0.0 — was lifted from the v2.0.24 RustCoreUpdater
+// self-heal three releases earlier; `runProcess`,
+// `atomicallyInstall`, `tagIsConsideredCurrent`, the
+// host-trusted download wrapper, and the GitHub API request
+// boilerplate were already byte-identical). Consolidating
+// removes the recurring "fix landed in one updater, slipped in
+// the other" pattern.
 //
 // The two updaters keep their own `@Observable` classes
 // because their `State` enums differ — `.resolvingTag` vs
-// `.resolvingRelease`, plus `.extracting`/`.merging` for naive
-// only — and `SettingsView` exhaustively switches on those
-// literal case names.
+// `.resolvingRelease`, plus `.extracting`/`.merging` for the
+// sing-box updater only — and `SettingsView` exhaustively
+// switches on those literal case names.
 
 import Foundation
 import os
@@ -58,7 +60,7 @@ func updaterTagIsConsideredCurrent(
 }
 
 /// Whether `tag` matches the canonical release-tag shape used
-/// by NaiveProxy + cool-tunnel: `v` + 1-4 numeric segments +
+/// by sing-box + cool-tunnel: `v` + 1-4 numeric segments +
 /// optional `-N` suffix. Defence in depth before URL
 /// interpolation — characters like `..`, spaces, `?`, `#`, `/`
 /// would produce a URL pointing outside the release directory.
@@ -70,7 +72,7 @@ func updaterIsValidReleaseTag(_ tag: String) -> Bool {
 
 // MARK: - BinaryUpdaterCore
 
-/// I/O primitives shared by `NaiveUpdater` and `RustCoreUpdater`.
+/// I/O primitives shared by `SingboxUpdater` and `RustCoreUpdater`.
 /// Everything `nonisolated` so the updaters' `@MainActor`
 /// orchestrators can call them from `Task.detached` blocks.
 enum BinaryUpdaterCore {
@@ -191,7 +193,7 @@ enum BinaryUpdaterCore {
     /// `Cool-Tunnel-Updater` UA, SEC-F#11 `Cache-Control: no-cache`)
     /// and the `GitHubRedirectGuard.shared` per-task delegate
     /// (R-F#4) constraining any HTTP redirect to trusted hosts.
-    /// `apiKind` ("NaiveProxy" / "Cool Tunnel") goes into the
+    /// `apiKind` ("sing-box" / "Cool Tunnel") goes into the
     /// user-facing error so support can read it.
     nonisolated static func fetchReleaseJSON(
         apiURL: URL, apiKind: String
@@ -235,7 +237,7 @@ enum BinaryUpdaterCore {
 /// tag and the panel says "You're on the latest version (X)"
 /// while the binary is in fact missing — the contradictory
 /// NG/OK shape RustCoreUpdater hit until 2.0.24 and
-/// NaiveUpdater until 2.0.27.
+/// (then-named) NaiveUpdater hit until 2.0.27.
 @MainActor
 final class UpdaterTagStore {
     private let key: String

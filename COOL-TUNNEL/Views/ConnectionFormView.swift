@@ -171,13 +171,13 @@ public struct ConnectionFormView: View {
                     TextField(
                         "Server",
                         text: binding(for: \.server, of: profile),
-                        prompt: Text("naive.example.com")
+                        prompt: Text("proxy.example.com")
                     )
                     .textContentType(.URL)
                     .autocorrectionDisabled()
                     // **v2.0.30 (Defensive Input Logic — "Good
                     // Deed"):** auto-strip a scheme prefix
-                    // (`https://`, `naive+https://`, …) and any
+                    // (`https://`, `vless://`, …) and any
                     // trailing path on paste. The runloop tick that
                     // immediately follows the binding update fires
                     // this `.onChange`; if the normaliser changes
@@ -232,7 +232,7 @@ public struct ConnectionFormView: View {
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("naive runs on 127.0.0.1 at the local port; the system proxy points there.")
+                    Text("sing-box runs on 127.0.0.1 at the local port; the system proxy points there.")
                 }
             }
         }
@@ -243,7 +243,7 @@ public struct ConnectionFormView: View {
 
     private var firstRunFooter: some View {
         Label(
-            "First time? Replace the template values below with your NaiveProxy server, username, and password. Local port can stay at 1080.",
+            "First time? Replace the template values below with your Cool Tunnel server, username, and password. Local port can stay at 1080.",
             systemImage: "lightbulb"
         )
         .labelStyle(.titleAndIcon)
@@ -254,7 +254,7 @@ public struct ConnectionFormView: View {
     /// placeholder values from `Profile.default` — i.e. the user
     /// hasn't customised it yet.
     private func isPlaceholderProfile(_ profile: Profile) -> Bool {
-        profile.server == "naive.example.com"
+        profile.server == "proxy.example.com"
             || profile.server.isEmpty
             || profile.username.isEmpty
             || profile.password.isEmpty
@@ -355,7 +355,7 @@ public struct ConnectionFormView: View {
             return "Local port must be a number (e.g. 1080)."
         }
         if value < 1024 {
-            return "Local port must be ≥ 1024 — `naive` can't bind below that without root."
+            return "Local port must be ≥ 1024 — `sing-box` can't bind below that without root."
         }
         return nil
     }

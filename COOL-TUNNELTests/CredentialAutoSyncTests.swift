@@ -31,7 +31,7 @@ final class CredentialAutoSyncTests: XCTestCase {
     func testProfileSubscriptionURLRoundTripsThroughJSON() throws {
         let original = Profile(
             id: "test",
-            server: "naive.example.com",
+            server: "proxy.example.com",
             username: "alice",
             password: "test-password-do-not-use",
             localPort: "1080",
@@ -55,7 +55,7 @@ final class CredentialAutoSyncTests: XCTestCase {
         let legacyJSON = """
             {
               "id": "default",
-              "server": "naive.example.com",
+              "server": "proxy.example.com",
               "username": "alice",
               "password": "test-password-do-not-use",
               "localPort": "1080"

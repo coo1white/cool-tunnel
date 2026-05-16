@@ -48,6 +48,13 @@ public struct KeychainStore: Sendable {
     /// Default service identifier used to namespace this app's keychain
     /// items. Bundle id plus a stable suffix so multiple credential kinds
     /// can share the keychain in the future without collision.
+    ///
+    /// **v3.0.0:** the `.naive.` segment is preserved verbatim —
+    /// this string is the persistence anchor for every existing
+    /// installation's stored credentials. Renaming it would
+    /// orphan v2.x users' saved passwords. Matches the
+    /// `PRODUCT_BUNDLE_IDENTIFIER` constant in `project.pbxproj`,
+    /// which is the same persistence-tied identifier.
     public static let defaultService = "space.coolwhite.naive.proxy-credentials"
 
     private let service: String

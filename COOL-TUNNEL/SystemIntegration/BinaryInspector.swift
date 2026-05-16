@@ -4,7 +4,7 @@
 // SystemIntegration/BinaryInspector.swift
 //
 // Stateless utility that owns the four subprocess + verification
-// helpers shared between `NaiveBinaryResolver` and
+// helpers shared between `SingboxBinaryResolver` and
 // `RustCoreResolver`. Pre-extraction, both files carried near-
 // verbatim copies of every helper here — same flow, same timeout,
 // same regex shape, only the binary name in the version pattern
@@ -23,7 +23,7 @@ public enum BinaryInspector {
     /// Spawns `lipo -info <path>` and parses the output through
     /// `LipoOutputParser`. Returns an empty set if `lipo` failed,
     /// the file isn't a Mach-O, or no recognised arch was named.
-    /// Identical to the pre-lift `NaiveBinaryResolver.runLipoInfo`
+    /// Identical to the pre-lift `SingboxBinaryResolver.runLipoInfo`
     /// and `RustCoreResolver.runLipoInfo`.
     static func runLipoInfo(at url: URL) async -> Set<String> {
         let result = await runProcess(
@@ -48,10 +48,10 @@ public enum BinaryInspector {
     /// "Version" row.
     ///
     /// `binaryName` is the leading literal token the regex anchors
-    /// on — `"naive"` or `"cool-tunnel-core"` today. Caller must
-    /// pass a value that's safe to embed in a regex (the resolvers
-    /// pass compile-time string literals; this is not an external
-    /// input).
+    /// on — `"sing-box"` or `"cool-tunnel-core"` today. Caller
+    /// must pass a value that's safe to embed in a regex (the
+    /// resolvers pass compile-time string literals; this is not
+    /// an external input).
     static func runVersion(
         at url: URL,
         binaryName: String
@@ -83,7 +83,7 @@ public enum BinaryInspector {
 
     /// Generic subprocess runner: collects stdout+stderr into one
     /// string, returns `nil` if the process could not be launched
-    /// at all. Tolerates non-zero exit codes — `naive --version`
+    /// at all. Tolerates non-zero exit codes — `sing-box version`
     /// and `cool-tunnel-core --version` both exit 0 in practice,
     /// but even a non-zero exit accompanied by a version line is
     /// still informative for the UI.

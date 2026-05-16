@@ -15,7 +15,7 @@ public struct AppSupportPaths: Sendable {
 
     /// `~/Library/Application Support/COOL-TUNNEL`.
     public let supportDirectory: URL
-    /// JSON config path the engine hands to the bundled `naive` binary.
+    /// JSON config path the engine hands to the bundled `sing-box` binary.
     public let configFile: URL
     /// Smart-routing PAC file path referenced by `networksetup`.
     public let pacFile: URL

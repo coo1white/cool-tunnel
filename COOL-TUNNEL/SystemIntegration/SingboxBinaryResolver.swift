@@ -1,24 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
-// SystemIntegration/NaiveBinaryResolver.swift
+// SystemIntegration/SingboxBinaryResolver.swift
 //
-// Centralises everything we need to know about the `naive` Mach-O before
-// we hand its path to the Rust supervisor: where it lives, which CPU
-// architectures it contains, what version it reports, and whether its
-// code signature is intact.
+// Centralises everything we need to know about the bundled `sing-box`
+// Mach-O before we hand its path to the Rust supervisor: where it
+// lives, which CPU architectures it contains, what version it
+// reports, and whether its code signature is intact.
 //
 // The resolver is the single place that knows how a custom user-supplied
 // binary differs from the bundled default. The orchestrator just asks
 // `resolve(...)` and gets back a descriptor it can either spawn from or
 // surface as an error in the UI.
+//
+// **v3.0.0:** renamed from `NaiveBinaryResolver`. The v2.x naive era
+// is gone — the bundled binary the engine spawns is now upstream
+// `sing-box` (SagerNet), wrapping the VLESS+Reality transport that
+// replaced HTTP/2 basic-auth.
 
 import Foundation
 
-/// Snapshot of a single naive binary candidate. All fields are populated
-/// by [`NaiveBinaryResolver.inspect`] so the Settings view can render the
-/// full picture without firing extra subprocesses.
-public struct NaiveBinaryDescriptor: Sendable, Equatable {
+/// Snapshot of a single sing-box binary candidate. All fields are
+/// populated by [`SingboxBinaryResolver.inspect`] so the Settings
+/// view can render the full picture without firing extra subprocesses.
+public struct SingboxBinaryDescriptor: Sendable, Equatable {
     public enum Origin: Sendable, Equatable {
         /// The binary that ships inside `Cool Tunnel.app/Contents/Resources/`.
         case bundled
@@ -31,8 +36,8 @@ public struct NaiveBinaryDescriptor: Sendable, Equatable {
     /// Mach-O architecture slices found in the file (e.g. `arm64`,
     /// `x86_64`). Empty if `lipo -info` failed.
     public let architectures: Set<String>
-    /// Version line reported by `naive --version`, e.g.
-    /// `naive 147.0.7727.49`. `nil` if the binary refused to print one.
+    /// Version line reported by `sing-box version`, e.g.
+    /// `sing-box 1.13.12`. `nil` if the binary refused to print one.
     public let version: String?
     /// `true` once `SecStaticCodeCheckValidity` accepts the file.
     public let isCodeSignatureValid: Bool
@@ -68,7 +73,7 @@ public struct NaiveBinaryDescriptor: Sendable, Equatable {
 /// diagnosis still has the full path via the wrapped `URL` value
 /// — callers that want it can inspect the associated value
 /// directly.
-public enum NaiveResolverError: LocalizedError, Sendable, Equatable {
+public enum SingboxResolverError: LocalizedError, Sendable, Equatable {
     /// The candidate path does not exist or is not a regular file.
     case fileNotFound(URL)
     /// `lipo` failed to read the file as a Mach-O.
@@ -83,7 +88,7 @@ public enum NaiveResolverError: LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .fileNotFound(let url):
-            "naive binary '\(url.lastPathComponent)' not found."
+            "sing-box binary '\(url.lastPathComponent)' not found."
         case .notAMachO(let url):
             "'\(url.lastPathComponent)' is not a Mach-O executable."
         case .missingHostSlice(let url, let host, let found):
@@ -97,24 +102,24 @@ public enum NaiveResolverError: LocalizedError, Sendable, Equatable {
 }
 
 /// Stateless façade that finds, inspects, and validates the active
-/// `naive` binary. Designed so the orchestrator never touches `Bundle`
-/// or `lipo` directly.
-public struct NaiveBinaryResolver: Sendable {
+/// `sing-box` binary. Designed so the orchestrator never touches
+/// `Bundle` or `lipo` directly.
+public struct SingboxBinaryResolver: Sendable {
 
     public init() {}
 
     // MARK: - Public API
 
     /// Returns the descriptor for whichever binary the app should spawn,
-    /// honouring the user's `customNaiveBinaryPath` override and falling
+    /// honouring the user's `customSingboxBinaryPath` override and falling
     /// back to the bundled default. Validates host-arch presence and
     /// code signature; surfaces a typed error if either fails so the UI
     /// can render an actionable message.
-    public func resolve(settings: AppSettings) async throws -> NaiveBinaryDescriptor {
+    public func resolve(settings: AppSettings) async throws -> SingboxBinaryDescriptor {
         let url: URL
-        let origin: NaiveBinaryDescriptor.Origin
-        if !settings.customNaiveBinaryPath.isEmpty {
-            url = URL(fileURLWithPath: settings.customNaiveBinaryPath)
+        let origin: SingboxBinaryDescriptor.Origin
+        if !settings.customSingboxBinaryPath.isEmpty {
+            url = URL(fileURLWithPath: settings.customSingboxBinaryPath)
             origin = .userSupplied
         } else {
             url = Self.bundledURL()
@@ -124,7 +129,7 @@ public struct NaiveBinaryResolver: Sendable {
         let descriptor = try await inspect(url: url, origin: origin)
 
         guard descriptor.supportsHostArchitecture else {
-            throw NaiveResolverError.missingHostSlice(
+            throw SingboxResolverError.missingHostSlice(
                 url,
                 host: HostArchitecture.current,
                 found: descriptor.architectures
@@ -140,7 +145,7 @@ public struct NaiveBinaryResolver: Sendable {
                 try await CodeSignVerifier.verifyValid(at: url)
                 return descriptor
             } catch let error as CodeSignError {
-                throw NaiveResolverError.codeSignatureInvalid(url, error)
+                throw SingboxResolverError.codeSignatureInvalid(url, error)
             }
         }
         return descriptor
@@ -152,27 +157,27 @@ public struct NaiveBinaryResolver: Sendable {
     /// the UI can render a full diagnostic panel.
     public func inspect(
         url: URL,
-        origin: NaiveBinaryDescriptor.Origin
-    ) async throws -> NaiveBinaryDescriptor {
+        origin: SingboxBinaryDescriptor.Origin
+    ) async throws -> SingboxBinaryDescriptor {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw NaiveResolverError.fileNotFound(url)
+            throw SingboxResolverError.fileNotFound(url)
         }
 
         let archs = await BinaryInspector.runLipoInfo(at: url)
         guard !archs.isEmpty else {
-            throw NaiveResolverError.notAMachO(url)
+            throw SingboxResolverError.notAMachO(url)
         }
-        // We only attempt `--version` if the binary contains the host
+        // We only attempt `version` if the binary contains the host
         // slice. Spawning a foreign-arch executable would just print
         // "Bad CPU type in executable" and waste time.
         let version: String?
         if archs.contains(HostArchitecture.current.machOArchName) {
-            version = await BinaryInspector.runVersion(at: url, binaryName: "naive")
+            version = await BinaryInspector.runVersion(at: url, binaryName: "sing-box")
         } else {
             version = nil
         }
         let signatureValid = await BinaryInspector.checkSignature(at: url)
-        return NaiveBinaryDescriptor(
+        return SingboxBinaryDescriptor(
             url: url,
             origin: origin,
             architectures: archs,
@@ -181,10 +186,12 @@ public struct NaiveBinaryResolver: Sendable {
         )
     }
 
-    /// Path to the naive binary inside the running app bundle's
-    /// `Contents/Resources/` directory.
+    /// Path to the bundled sing-box binary inside the running app
+    /// bundle's `Contents/Resources/` directory. Mirrors the
+    /// `scripts/fetch_singbox-core.ts` `DEST` constant — both ends
+    /// agree on `COOL-TUNNEL/sing-box` as the bundled path.
     public static func bundledURL() -> URL {
-        Bundle.main.url(forResource: "naive", withExtension: nil)
-            ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/naive")
+        Bundle.main.url(forResource: "sing-box", withExtension: nil)
+            ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/sing-box")
     }
 }

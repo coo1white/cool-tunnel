@@ -6,8 +6,9 @@
 // — the JSON shape served at
 // `GET https://<panel-domain>/api/v1/subscription/<token>`.
 //
-// v3.0.0 pivots the wire protocol from NaiveProxy basic-auth to
-// sing-box VLESS+Reality. The manifest shape evolves accordingly:
+// v3.0.0 pivots the wire protocol from the v2.x NaiveProxy
+// basic-auth shape to sing-box VLESS+Reality. The manifest shape
+// evolves accordingly:
 //
 //   - `version` bumps `1 → 2`.
 //   - `profiles[*].password` (cleartext basic-auth password) is
@@ -16,10 +17,11 @@
 //   - Each profile gains a `reality: { public_key, dest_host,
 //     short_id }` block carrying the Reality handshake params the
 //     client plugs into its sing-box vless outbound.
-//   - Top-level `server_naive_pin` is renamed to
+//   - The v=1 top-level `server_naive_pin` is renamed to
 //     `server_singbox_pin` with a single `upstream_tag` field; the
-//     client compares against its own embedded singbox.upstream.json
-//     for cross-end binary-identity confirmation.
+//     client compares against its own embedded
+//     singbox-core.upstream.json for cross-end binary-identity
+//     confirmation.
 //
 // The v=1 manifest shape is incompatible — v2.x clients fetching a
 // v=2 manifest fail at decode time (the `password` field is missing).
@@ -217,7 +219,7 @@ public enum AntiTrackingFeature: Sendable, Codable, Hashable {
 extension SubscriptionManifestV2 {
     /// The manifest schema version this client speaks. Bumped from
     /// `1` (v2.x clients on NaiveProxy basic-auth) to `2` for the
-    /// VLESS+Reality cut.
+    /// v3.0.0 VLESS+Reality cut.
     public static let supportedVersion: UInt32 = 2
 
     /// Maximum manifest age the client accepts (7 days). Matches
