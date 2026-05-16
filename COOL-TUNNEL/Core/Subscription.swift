@@ -266,8 +266,8 @@ extension SubscriptionManifestV1 {
 
 /// Reasons a manifest fetched from the panel is unusable.
 ///
-/// Routed through `TunnelOrchestrator.translate(_:)` into
-/// `SubscriptionImportError` for the UI; conforms to
+/// Routed through `TunnelOrchestrator.importFromSubscriptionURL(_:)`
+/// into `SubscriptionImportError` for the UI; conforms to
 /// `LocalizedError` so any direct render path also reads cleanly.
 public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
     /// Manifest's `version` field is not `1`.

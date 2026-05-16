@@ -54,7 +54,6 @@ public final class TunnelOrchestrator {
     public private(set) var firewallState: FirewallState = .unknown
     public private(set) var lastDiagnosticReport: DiagnosticReport?
     public private(set) var lastLatencyReport: LatencyReport?
-    public private(set) var developerMetrics: DeveloperMetrics = .idle
     public private(set) var lastError: String?
 
     /// Layer attribution for the most recent connection failure.
@@ -91,7 +90,6 @@ public final class TunnelOrchestrator {
     /// auto-stop. Defeats the queued-stop race on a burst.
     private var autoStopTask: Task<Void, Never>?
     private var selfHealTask: Task<Void, Never>?
-    private var vpsHealthTask: Task<Void, Never>?
     /// Single-flight guard for credential auto-sync. A burst of
     /// HTTP-407-shaped stderr lines from one failed start would
     /// otherwise queue duplicate re-fetches against the panel.
@@ -102,7 +100,6 @@ public final class TunnelOrchestrator {
     private var lastCredentialAutoSyncAt: ContinuousClock.Instant?
     /// Lower bound between auto-sync attempts.
     private static let credentialAutoSyncCooldown: Duration = .seconds(30)
-    private var lastTrafficSnapshot: TrafficSnapshotState?
     private var pendingLogEntries: [LogEntry] = []
     private var logFlushTask: Task<Void, Never>?
     private let logFlushIntervalNanos: UInt64 = PerformanceProfile.current.logFlushIntervalNanos
@@ -276,8 +273,6 @@ public final class TunnelOrchestrator {
         isShuttingDown = true
         selfHealTask?.cancel()
         selfHealTask = nil
-        vpsHealthTask?.cancel()
-        vpsHealthTask = nil
         credentialAutoSyncTask?.cancel()
         credentialAutoSyncTask = nil
         flushPendingLogs()
@@ -294,14 +289,6 @@ public final class TunnelOrchestrator {
         await core.stop()
         activeMode = .stopped
         isRunning = false
-        developerMetrics = .idle
-        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-            pid: nil,
-            naiveRunning: false,
-            firewallState: firewallState,
-            status: "Stopped"
-        )
-        lastTrafficSnapshot = nil
         recordTelemetry("shutdown.success")
     }
 
@@ -452,11 +439,54 @@ public final class TunnelOrchestrator {
         let host = url.host.flatMap { $0.isEmpty ? nil : $0 } ?? "<unknown>"
         appendInfo("subscription: fetching \(host)…")
 
+        // The panel itself answers every error with a 200 cover-site,
+        // so the 4xx/5xx branches fire only when something in front of
+        // the panel (CDN, proxy interposition, DNS hijack) returns its
+        // own status.
         let manifest: SubscriptionManifestV1
         do {
             manifest = try await SubscriptionClient().fetch(from: trimmed)
         } catch let err as SubscriptionClientError {
-            throw Self.translate(err)
+            switch err {
+            case .malformedURL, .nonHTTPSURL:
+                throw SubscriptionImportError.invalidURL
+            case .transportFailed(let msg):
+                throw SubscriptionImportError.networkError(msg)
+            case .httpStatus(let code):
+                switch code {
+                case 401: throw SubscriptionImportError.subscriptionRevoked
+                case 404, 422: throw SubscriptionImportError.tokenInvalid
+                case 429: throw SubscriptionImportError.rateLimited
+                case 500...599: throw SubscriptionImportError.serverError(status: code)
+                default: throw SubscriptionImportError.unexpectedStatus(code)
+                }
+            case .malformedManifest, .unexpectedContentType:
+                // Cover-site path for any rejected token — UI shows
+                // "URL didn't match an account".
+                throw SubscriptionImportError.tokenInvalid
+            case .oversizeBody(let cap):
+                throw SubscriptionImportError.manifestTooLarge(cap: cap)
+            case .manifestRejected(let validation):
+                switch validation {
+                case .unsupportedVersion(let got, _):
+                    throw SubscriptionImportError.unsupportedVersion(got: got)
+                case .noProfiles:
+                    throw SubscriptionImportError.noProfiles
+                case .tooManyProfiles, .counterfeitCapabilities,
+                    .invalidIssuedAt, .malformedExpiry, .validityTooLong,
+                    .blockedHost:
+                    // All six are stub/counterfeit signals with the
+                    // same user action ("do not connect"); collapse
+                    // to one banner. Support can pivot on the
+                    // structured os_log entry if needed.
+                    throw SubscriptionImportError.manifestCounterfeit
+                case .expired:
+                    throw SubscriptionImportError.manifestExpired
+                case .stale(let ageSeconds):
+                    let days = max(1, Int(ageSeconds / (24 * 60 * 60)))
+                    throw SubscriptionImportError.manifestStale(daysOld: days)
+                }
+            }
         }
 
         // Defence-in-depth — `manifest.validate` already
@@ -483,55 +513,6 @@ public final class TunnelOrchestrator {
         // the engine's redaction) or `host:port` (operator-
         // fingerprinting infrastructure metadata).
         appendInfo("subscription: imported new credentials")
-    }
-
-    /// Translates `SubscriptionClientError` (transport shape) to
-    /// `SubscriptionImportError` (UI failure mode). The panel
-    /// itself answers every error with a 200 cover-site, so the
-    /// 4xx/5xx branches fire only when something in front of the
-    /// panel (CDN, proxy interposition, DNS hijack) returns its
-    /// own status.
-    private static func translate(_ err: SubscriptionClientError) -> SubscriptionImportError {
-        switch err {
-        case .malformedURL, .nonHTTPSURL:
-            return .invalidURL
-        case .transportFailed(let msg):
-            return .networkError(msg)
-        case .httpStatus(let code):
-            switch code {
-            case 401: return .subscriptionRevoked
-            case 404, 422: return .tokenInvalid
-            case 429: return .rateLimited
-            case 500...599: return .serverError(status: code)
-            default: return .unexpectedStatus(code)
-            }
-        case .malformedManifest, .unexpectedContentType:
-            // Cover-site path for any rejected token — UI shows
-            // "URL didn't match an account".
-            return .tokenInvalid
-        case .oversizeBody(let cap):
-            return .manifestTooLarge(cap: cap)
-        case .manifestRejected(let validation):
-            switch validation {
-            case .unsupportedVersion(let got, _):
-                return .unsupportedVersion(got: got)
-            case .noProfiles:
-                return .noProfiles
-            case .tooManyProfiles, .counterfeitCapabilities,
-                .invalidIssuedAt, .malformedExpiry, .validityTooLong,
-                .blockedHost:
-                // All six are stub/counterfeit signals with the
-                // same user action ("do not connect"); collapse
-                // to one banner. Support can pivot on the
-                // structured os_log entry if needed.
-                return .manifestCounterfeit
-            case .expired:
-                return .manifestExpired
-            case .stale(let ageSeconds):
-                let days = max(1, Int(ageSeconds / (24 * 60 * 60)))
-                return .manifestStale(daysOld: days)
-            }
-        }
     }
 
     // MARK: - Mode switching
@@ -638,14 +619,6 @@ public final class TunnelOrchestrator {
                 // Engine genuinely dead — restore truthful state.
                 activeMode = .stopped
                 isRunning = false
-                developerMetrics = .idle
-                developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-                    pid: nil,
-                    naiveRunning: false,
-                    firewallState: firewallState,
-                    status: "Start failed"
-                )
-                lastTrafficSnapshot = nil
                 recordTelemetry(
                     "switch.failure",
                     message: error.localizedDescription,
@@ -739,7 +712,6 @@ public final class TunnelOrchestrator {
         // Single observable transition: `isRunning` stays true,
         // only the mode chip changes.
         activeMode = newMode
-        updateDeveloperKernelHealth(pid: lastTrafficSnapshot?.pid)
         recordTelemetry(
             "switch.hotswap.applied",
             details: ["to_mode": newMode.rawValue]
@@ -775,14 +747,6 @@ public final class TunnelOrchestrator {
         if publishStoppedState {
             activeMode = .stopped
             isRunning = false
-            developerMetrics = .idle
-            developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-                pid: nil,
-                naiveRunning: false,
-                firewallState: firewallState,
-                status: "Stopped"
-            )
-            lastTrafficSnapshot = nil
         }
         recordTelemetry(
             "stop.quiet.success",
@@ -926,8 +890,6 @@ public final class TunnelOrchestrator {
 
             activeMode = mode
             isRunning = true
-            updateDeveloperKernelHealth(pid: naivePID)
-            startVPSHealthLoop()
             // Capture which profile the engine started with —
             // `selectedProfile.set` compares to detect edits.
             activeProfileID = selectedProfileID
@@ -969,8 +931,6 @@ public final class TunnelOrchestrator {
         recordTelemetry("stop.begin")
         selfHealTask?.cancel()
         selfHealTask = nil
-        vpsHealthTask?.cancel()
-        vpsHealthTask = nil
         // Cancel auto-sync — Stop means tunnel down, not a
         // background re-spawn half a second later.
         credentialAutoSyncTask?.cancel()
@@ -993,14 +953,6 @@ public final class TunnelOrchestrator {
         }
         activeMode = .stopped
         isRunning = false
-        developerMetrics = .idle
-        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-            pid: nil,
-            naiveRunning: false,
-            firewallState: firewallState,
-            status: "Stopped"
-        )
-        lastTrafficSnapshot = nil
         appendInfo("stopped")
         recordTelemetry("stop.success")
     }
@@ -1243,7 +1195,6 @@ public final class TunnelOrchestrator {
             let response = try await core.send(.runLatencyTest(mode: mode))
             if case .latency(let report) = response {
                 lastLatencyReport = report
-                updateEncryptionOverhead(from: report)
                 // Per-sample DNS / connect / TLS / first-byte
                 // split into the live log alongside the total.
                 for sample in report.samples {
@@ -1412,16 +1363,6 @@ public final class TunnelOrchestrator {
             at: ProxyActiveFlag.path(in: paths.supportDirectory))
         isRunning = false
         activeMode = .stopped
-        developerMetrics = .idle
-        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-            pid: nil,
-            naiveRunning: false,
-            firewallState: firewallState,
-            status: "Engine exited"
-        )
-        lastTrafficSnapshot = nil
-        vpsHealthTask?.cancel()
-        vpsHealthTask = nil
         didBootstrap = false
         if shouldRecover {
             scheduleSelfHeal(
@@ -1693,16 +1634,6 @@ public final class TunnelOrchestrator {
             )
             if !running {
                 activeMode = .stopped
-                developerMetrics = .idle
-                developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-                    pid: nil,
-                    naiveRunning: false,
-                    firewallState: firewallState,
-                    status: "Stopped"
-                )
-                lastTrafficSnapshot = nil
-                vpsHealthTask?.cancel()
-                vpsHealthTask = nil
                 // `!userStopInFlight` keeps an intentional Stop's
                 // own `stateChanged(false)` from triggering a
                 // phantom "naive stopped unexpectedly" banner.
@@ -1744,13 +1675,10 @@ public final class TunnelOrchestrator {
             } else {
                 appendInfo("\(glyph) \(step) (\(elapsedMs)ms)")
             }
-        case .trafficSnapshot(let pid, let established, let localClients, let remote):
-            updateDeveloperTraffic(
-                pid: pid,
-                established: established,
-                localClients: localClients,
-                remote: remote
-            )
+        case .trafficSnapshot:
+            // Live throughput is no longer rendered; the engine still
+            // emits these on every lsof tick. Ignore.
+            break
         }
     }
 
@@ -1914,130 +1842,6 @@ public final class TunnelOrchestrator {
         }
     }
 
-    private func updateDeveloperTraffic(
-        pid: UInt32,
-        established: UInt32,
-        localClients: UInt32,
-        remote: UInt32
-    ) {
-        let now = Date()
-        let snapshot = TrafficSnapshotState(
-            sampledAt: now,
-            pid: pid,
-            established: established,
-            localClients: localClients,
-            remote: remote
-        )
-        let prior = lastTrafficSnapshot
-        lastTrafficSnapshot = snapshot
-
-        let elapsed = prior.map { max(0.001, now.timeIntervalSince($0.sampledAt)) } ?? 0
-        let inboundDelta =
-            prior.map {
-                Int(localClients.saturatingDifference(from: $0.localClients))
-            } ?? 0
-        let outboundDelta =
-            prior.map {
-                Int(remote.saturatingDifference(from: $0.remote))
-            } ?? 0
-        let inboundBps =
-            elapsed > 0 ? Int((Double(inboundDelta) * 64_000.0 / elapsed).rounded()) : 0
-        let outboundBps =
-            elapsed > 0 ? Int((Double(outboundDelta) * 96_000.0 / elapsed).rounded()) : 0
-
-        developerMetrics.sampledAt = now
-        developerMetrics.throughput = DeveloperMetrics.Throughput(
-            inboundBytesPerSecond: inboundBps,
-            outboundBytesPerSecond: outboundBps,
-            status: established == 0 ? "No active flows" : "\(established) TCP flows"
-        )
-        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-            pid: pid,
-            naiveRunning: true,
-            firewallState: firewallState,
-            status: "PID \(pid) supervised"
-        )
-    }
-
-    private func updateDeveloperKernelHealth(pid: UInt32?) {
-        developerMetrics.sampledAt = Date()
-        developerMetrics.localKernel = DeveloperMetrics.LocalKernelHealth(
-            pid: pid,
-            naiveRunning: isRunning,
-            firewallState: firewallState,
-            status: isRunning ? (pid.map { "PID \($0) starting" } ?? "Supervisor starting") : "Idle"
-        )
-    }
-
-    private func startVPSHealthLoop() {
-        vpsHealthTask?.cancel()
-        guard isRunning else { return }
-        guard var profile = selectedProfile else {
-            developerMetrics.vps = .idle
-            return
-        }
-        // Distinguish credential-store failure from "no password
-        // set": the latter probes with empty password (server
-        // rejects — diagnostic we want); the former labels the
-        // metric so the operator isn't misrouted into an
-        // empty-password fix.
-        do {
-            try hydratePasswordIfNeeded(&profile)
-        } catch {
-            developerMetrics.vps = DeveloperMetrics.VPSHealth(
-                server: profile.server,
-                reachable: nil,
-                dnsMs: nil,
-                tcpMs: nil,
-                status: "Credential read failed: \(error.localizedDescription)",
-                checkedAt: Date()
-            )
-            return
-        }
-
-        let server = profile.server
-        developerMetrics.vps = DeveloperMetrics.VPSHealth(
-            server: server,
-            reachable: nil,
-            dnsMs: nil,
-            tcpMs: nil,
-            status: "Checking",
-            checkedAt: nil
-        )
-
-        vpsHealthTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.vpsHealthTask = nil }
-            while !Task.isCancelled, self.isRunning {
-                await self.refreshVPSHealth(profile: profile)
-                try? await Task.sleep(nanoseconds: 15_000_000_000)  // try-ok: sleep cancellation
-            }
-        }
-    }
-
-    private func refreshVPSHealth(profile: Profile) async {
-        do {
-            let report = try await core.probe(profile: profile, timeoutSecs: 3)
-            developerMetrics.vps = DeveloperMetrics.VPSHealth(
-                server: report.server,
-                reachable: report.reachable,
-                dnsMs: report.dnsResolveMs,
-                tcpMs: report.tcpConnectMs,
-                status: report.reachable ? "Reachable" : (report.error ?? "Unreachable"),
-                checkedAt: Date()
-            )
-        } catch {
-            developerMetrics.vps = DeveloperMetrics.VPSHealth(
-                server: profile.server,
-                reachable: false,
-                dnsMs: nil,
-                tcpMs: nil,
-                status: error.localizedDescription,
-                checkedAt: Date()
-            )
-        }
-    }
-
     /// Fills the password from the credential store when the
     /// in-memory copy is empty. Delegates to the static form.
     private func hydratePasswordIfNeeded(_ profile: inout Profile) throws {
@@ -2069,33 +1873,6 @@ public final class TunnelOrchestrator {
         if !stored.isEmpty {
             profile.password = stored
         }
-    }
-
-    private func updateEncryptionOverhead(from report: LatencyReport) {
-        guard report.samples.count >= 2 else {
-            developerMetrics.encryption = .idle
-            return
-        }
-        let direct = report.samples[0]
-        let proxied = report.samples[1]
-        guard direct.ok || proxied.ok else {
-            developerMetrics.encryption = DeveloperMetrics.EncryptionOverhead(
-                directHandshakeMs: direct.tlsMs,
-                proxiedHandshakeMs: proxied.tlsMs,
-                overheadMs: nil,
-                status: "Handshake probe failed",
-                sampledAt: Date()
-            )
-            return
-        }
-        let overhead = max(0, proxied.tlsMs - direct.tlsMs)
-        developerMetrics.encryption = DeveloperMetrics.EncryptionOverhead(
-            directHandshakeMs: direct.tlsMs,
-            proxiedHandshakeMs: proxied.tlsMs,
-            overheadMs: overhead,
-            status: "\(Self.formatMs(overhead)) TLS delta",
-            sampledAt: Date()
-        )
     }
 
     private func recordTelemetry(
@@ -2207,7 +1984,6 @@ public final class TunnelOrchestrator {
                 lastDiagnosticReport: lastDiagnosticReport,
                 lastLatencyReport: lastLatencyReport
             ),
-            developer: CoolTunnelViewState.Developer(metrics: developerMetrics),
             settings: settings,
             resources: CoolTunnelViewState.Resources(
                 activeNaiveDescriptor: activeNaiveDescriptor
@@ -2447,20 +2223,6 @@ public enum SleepWakeState: String, Sendable, Codable, Equatable {
     /// `didWakeNotification` fired; the orchestrator is re-spawning
     /// the engine and reapplying the pre-sleep `ProxyMode`.
     case recovering
-}
-
-private struct TrafficSnapshotState: Sendable, Equatable {
-    let sampledAt: Date
-    let pid: UInt32
-    let established: UInt32
-    let localClients: UInt32
-    let remote: UInt32
-}
-
-extension UInt32 {
-    fileprivate func saturatingDifference(from prior: UInt32) -> UInt32 {
-        self >= prior ? self - prior : 0
-    }
 }
 
 /// Conforms to `LocalizedError` so the

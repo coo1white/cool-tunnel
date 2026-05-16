@@ -281,7 +281,8 @@ public enum CoreEvent: Sendable, Hashable {
     /// Defaults to 0 when the engine omits it (older binaries).
     case diagnosticProgress(step: String, ok: Bool, elapsedMs: UInt64)
     /// Lightweight monitor snapshot emitted by the engine on each
-    /// successful lsof tick. Powers the developer overlay.
+    /// successful lsof tick. Currently ignored client-side; retained
+    /// because the engine still emits it.
     case trafficSnapshot(pid: UInt32, established: UInt32, localClients: UInt32, remote: UInt32)
 
     private enum Tag: String, Decodable {

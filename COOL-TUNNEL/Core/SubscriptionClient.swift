@@ -21,8 +21,8 @@
 import Foundation
 import os
 
-/// Errors raised by [`SubscriptionClient`]. Translated by
-/// `TunnelOrchestrator.translate(_:)` into
+/// Errors raised by [`SubscriptionClient`]. Translated in
+/// `TunnelOrchestrator.importFromSubscriptionURL(_:)` into
 /// `SubscriptionImportError` for the UI.
 public enum SubscriptionClientError: LocalizedError, Sendable, Equatable {
     /// The URL string couldn't be parsed.

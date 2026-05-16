@@ -8,7 +8,6 @@ import SwiftUI
 public struct ContentView: View {
     @Environment(TunnelOrchestrator.self) private var orchestrator
     @State private var isShowingSettings = false
-    @State private var isShowingDeveloperOverlay = false
     /// Local draft state owned by SwiftUI; folded into
     /// `CoolTunnelUIState` before rendering so the screen still
     /// has one explicit schema.
@@ -29,21 +28,8 @@ public struct ContentView: View {
                 SettingsView(isShowing: $isShowingSettings)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-
-            if isShowingDeveloperOverlay && !state.ui.isShowingSettings {
-                VStack {
-                    Spacer()
-                    DeveloperOverlayView(metrics: state.developer.metrics)
-                        .padding(.bottom, 18)
-                }
-                .padding(.horizontal, 18)
-                .allowsHitTesting(false)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .zIndex(2)
-            }
         }
         .animation(.easeInOut(duration: 0.25), value: isShowingSettings)
-        .animation(.easeInOut(duration: 0.18), value: isShowingDeveloperOverlay)
         // Appearance driven through AppKit-level `NSApp.appearance`
         // rather than SwiftUI's `.preferredColorScheme(_:)`: the
         // SwiftUI form toggles view structure and invalidates the
@@ -133,7 +119,6 @@ public struct ContentView: View {
                 state: state.controlPanel,
                 pendingMode: $pendingMode,
                 isShowingSettings: $isShowingSettings,
-                isShowingDeveloperOverlay: $isShowingDeveloperOverlay,
                 onIntent: send
             )
             .layoutPriority(1)
