@@ -9,6 +9,118 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.53] — 2026-05-14 — VPS-Egress Classifier + TypeScript+Bun Maintenance Scripts
+
+> **Two unrelated improvements bundled in one release:**
+> **(1)** A new actionable error class — `vpsEgressBlocked` — that
+> recognises the "server accepted CONNECT but RSTed the upstream
+> pipe" signature and tells the operator to investigate VPS-side
+> egress rather than walk through the same useless retry loop.
+> **(2)** TypeScript+Bun port of the two complex maintenance
+> scripts (`cut_release` + `fetch_naive`) for cross-repo toolchain
+> consolidation. Hybrid scope: 7 simpler scripts stay POSIX shell.
+> All existing `bash scripts/X.sh` invocations continue to work
+> unchanged.
+
+### Added — `DebugHandshakeFailureClass` actionable classifier (#79)
+
+The existing reachability-only `Local Kernel / ISP / VPS`
+classifier in `TunnelOrchestrator.classifyConnectionFailure()`
+can't distinguish "the VPS dropped my CONNECT before answering"
+(unreachable / wrong server) from "the VPS accepted CONNECT, said
+HTTP 200 OK, then RSTed the upstream pipe" (egress-blocked). Both
+classify as `.localKernel` under the reachability model because
+both Apple and the VPS host respond to TCP probes.
+
+`DebugHandshakeReport` now carries a `failureClassification`
+computed property that reads the byte-level evidence the engine
+already collected and projects it onto four actionable classes:
+
+  - `connectFailed` — TCP/TLS to the proxy didn't establish
+  - `proxyAuthRejected` — server returned HTTP 407
+  - `vpsEgressBlocked` — server returned 200 OK but the upstream
+    pipe was reset/refused/closed without bytes from the target
+  - `other` — unrecognised failure shape
+
+Each class carries an `operatorHint` string with a one-line
+explanation and a specific next investigation step (e.g. for
+`vpsEgressBlocked`: "On the VPS run `curl -v --max-time 5
+https://www.google.com/generate_204` — if it RSTs the same way,
+your VPS's egress to that destination is blocked").
+
+The classifier is `nonisolated` and pure — testable from
+outside `@MainActor` and exposed for unit tests.
+
+### Refactored — TypeScript+Bun port of `cut_release` + `fetch_naive` (#80)
+
+Driver: cross-repo TS/Bun consolidation (cool-tunnel-server etc).
+Hybrid scope: only the two complex scripts that benefit most
+from real string handling + structured errors are ported. The
+other 7 scripts (`audit`, `build_rust_core`, `package_release`,
+`preflight`, `security_check`, `try_question_ratchet`, `bin/ct`)
+stay POSIX shell.
+
+**New files:**
+
+  - `scripts/cut_release.ts` — port of cut_release.sh
+  - `scripts/fetch_naive.ts` — port of fetch_naive.sh
+  - `scripts/lib/{log,spawn,paths}.ts` — shared helpers (coloured
+    output matching the `==>` / `Error:` / `ok:` bash conventions,
+    typed `Bun.spawn` wrappers, repo-root resolution)
+  - `scripts/cut_release.test.ts` + `scripts/fetch_naive.test.ts`
+    — 10 argv-parser tests across both scripts, run by the new
+    `bun-tests` CI job
+  - `package.json` + `tsconfig.json` + `bun.lock` — Bun workspace
+    with strict TS settings (noUncheckedIndexedAccess,
+    noImplicitOverride, verbatimModuleSyntax)
+
+**Backwards-compat preserved:** `scripts/cut_release.sh` and
+`scripts/fetch_naive.sh` become thin shims (~26 lines each)
+that exec `bun scripts/X.ts "$@"`. Every existing `bash scripts/X.sh`
+invocation continues to work; the shims fail loudly with
+`!!! bun not found in PATH — install with: brew install bun`
+if Bun is missing. Exit-code contracts preserved exactly.
+
+**CI:** new `bun-tests` job (7 jobs total, was 6) runs `bun
+test scripts/` on every push and PR. The `naive-pin` job +
+the daily `naive-pin-audit.yml` workflow now install Bun
+before invoking the .sh shim.
+
+**Test-friendly main-guard:** both .ts files use
+`if (import.meta.main)` to gate top-level `main()` so tests
+can import the parsers without triggering the full pipeline.
+
+### Why Hybrid (not 100% rewrite)
+
+v2.0.50 deliberately removed Ruby to **minimize** the toolchain
+to Swift + Rust + POSIX shell. A 100% TS rewrite walks that
+back; Hybrid only adds Bun where it actually buys something.
+The simple scripts are stable + tested by every release cut;
+rewriting them is churn without benefit. `bin/ct` (v2.0.52) is
+bash and doesn't need TS — it's a pure-dispatch wrapper.
+
+### Dogfood
+
+This release was cut using the new TypeScript+Bun
+`cut_release.ts` (via `bin/ct release 2.0.53` → `bash
+scripts/cut_release.sh` → `bun scripts/cut_release.ts`). The
+TS port drove its own publication pipeline end-to-end on its
+first real release.
+
+### Checks
+
+- 138/138 Swift tests pass.
+- 178/178 Rust tests pass.
+- 10/10 Bun tests pass (5 fetch_naive + 5 cut_release argv parsers).
+- GitHub Actions CI on PR #80 — 7/7 jobs green (Rust, Swift
+  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy
+  pin verification, `try?` ratchet, **bun-tests**).
+- `bunx tsc --noEmit` → clean (strict mode).
+- `shellcheck bin/ct scripts/*.sh` → clean.
+- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
+  Swift format lint, Release build, bundled-binary
+  verification, and package security checks.
+
 ## [2.0.52] — 2026-05-14 — bin/ct — Brew-Style Maintenance Wrapper
 
 > **Adds a single discoverable entry point over the existing
