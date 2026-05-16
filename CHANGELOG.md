@@ -9,6 +9,14 @@ The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 The **v2.0.x** series is the current Long-Term Servicing Channel
 line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
+## [2.0.55] — 2026-05-16 — Doc + Comment Streamline Pass
+
+PR #82 trims remaining docs (SECURITY, SECURITY-WEB3, CONTRIBUTING,
+Disclaimer, NaiveProxy_Server_Setup) and verbose code comments across
+9 hot Swift / Rust files. Net −2642 lines, no runtime change. Threat-
+model and legal clauses, SAFETY blocks, and WHY-non-obvious invariants
+preserved. 156 Swift, 178 Rust, 10 Bun, 7/7 CI.
+
 ## [2.0.54] — 2026-05-16 — Streamlined Debug-Handshake Log + VPS-Egress Hint Wired
 
 PR #79 (v2.0.53) shipped `DebugHandshakeFailureClass` + `operatorHint`
