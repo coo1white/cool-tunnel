@@ -96,10 +96,10 @@ export function scanContent(
     const lines = content.split("\n");
     const out: UnannotatedSite[] = [];
     for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
+        const line = lines[i] ?? "";
         if (!TRY_QUESTION_RE.test(line)) continue;
         if (line.includes(TRY_OK_MARKER)) continue;
-        if (i > 0 && lines[i - 1].includes(TRY_OK_MARKER)) continue;
+        if (i > 0 && (lines[i - 1] ?? "").includes(TRY_OK_MARKER)) continue;
         out.push({ path: relPath, lineno: i + 1, content: line });
     }
     return out;
