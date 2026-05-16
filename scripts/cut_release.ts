@@ -54,7 +54,7 @@
 //   6  audit suite failed (pre-flight 4)
 //   7  security_check failed (pre-package 8b)
 
-import { readdir, mkdir } from "node:fs/promises";
+import { readdir, mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -261,6 +261,12 @@ async function buildXcodeRelease(): Promise<string> {
     // Locate the freshly-built .app. Xcode DerivedData paths are
     // constrained (scheme name + fixed-alphabet hash, no spaces).
     // Pick the most-recently-modified COOL-TUNNEL-* directory.
+    //
+    // **NB:** uses `node:fs/promises stat` rather than
+    // `Bun.file(path).stat()` because the latter is a file-only
+    // surface — it returns false for directory existence and
+    // throws on .stat() against a directory. Both DerivedData
+    // entries AND the .app bundle are directories.
     const ddRoot = join(homedir(), "Library", "Developer", "Xcode", "DerivedData");
     let candidates: { path: string; mtimeMs: number }[];
     try {
@@ -269,7 +275,7 @@ async function buildXcodeRelease(): Promise<string> {
         candidates = await Promise.all(
             matched.map(async (e) => {
                 const full = join(ddRoot, e);
-                const s = await Bun.file(full).stat();
+                const s = await stat(full);
                 return { path: full, mtimeMs: s.mtimeMs };
             }),
         );
@@ -285,7 +291,12 @@ async function buildXcodeRelease(): Promise<string> {
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
     const dd = candidates[0]!.path;
     const app = join(dd, "Build", "Products", "Release", "Cool Tunnel.app");
-    if (!(await Bun.file(app).exists())) {
+    try {
+        const s = await stat(app);
+        if (!s.isDirectory()) {
+            die(`expected .app bundle at ${app} but it's not a directory`, 4);
+        }
+    } catch {
         die(`expected .app at ${app} but it doesn't exist`, 4);
     }
     return app;
