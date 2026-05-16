@@ -3,27 +3,28 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/fetch_naive.ts — TypeScript+Bun port of fetch_naive.sh.
+// scripts/fetch_singbox-core.ts — TypeScript+Bun port of the legacy
+// fetch_naive flow, adapted for the v3.0.0 sing-box pivot.
 //
-// Authoritative pin enforcement for the bundled NaiveProxy binary.
+// Authoritative pin enforcement for the bundled sing-box binary.
 //
-// The file `COOL-TUNNEL/naive.upstream.json` is the **pin**: it
-// records the upstream tag this repo claims to ship and the
+// The file `COOL-TUNNEL/singbox-core.upstream.json` is the **pin**:
+// it records the upstream tag this repo claims to ship and the
 // SHA-256 of the arm64 tarball, the x64 tarball, and the merged
-// universal binary. The bundled binary at `COOL-TUNNEL/naive`
+// universal binary. The bundled binary at `COOL-TUNNEL/sing-box`
 // MUST match the pin. Drift in either direction (binary changed,
 // or upstream tag rewrote) is a supply-chain regression signal —
 // this script refuses to silently absorb either.
 //
 // Modes:
 //
-//   fetch_naive.ts
+//   fetch_singbox-core.ts
 //       Verify-only (no network). Computes the SHA-256 of the
-//       bundled `COOL-TUNNEL/naive` and compares it against
+//       bundled `COOL-TUNNEL/sing-box` and compares it against
 //       `merged_universal_sha256` in the committed manifest.
 //       Fast (< 100 ms). This is what `cut_release.ts` calls.
 //
-//   fetch_naive.ts --check-only
+//   fetch_singbox-core.ts --check-only
 //       Audit mode (requires network). Re-downloads the upstream
 //       tarballs at the **pinned** tag and recomputes all SHAs.
 //       Reports drift in tarball SHAs (upstream tag rewrite),
@@ -31,7 +32,7 @@
 //       bundled binary (local tampering). Suitable for a daily CI
 //       gate.
 //
-//   fetch_naive.ts --repin [TAG]
+//   fetch_singbox-core.ts --repin [TAG]
 //       Explicit re-pin (requires network). Resolves the tag (gh
 //       latest if omitted, else the argument), downloads the
 //       upstream tarballs, lipo-merges, ad-hoc-signs, and prints
@@ -46,7 +47,7 @@
 //   3  pin verification failed (drop-dead supply-chain signal)
 //   4  --repin requested but CT_REPIN_CONFIRM=1 not set
 //
-// Dependencies: bun 1.1+, curl, tar, xz, lipo, shasum, codesign.
+// Dependencies: bun 1.1+, curl, tar, gzip, lipo, shasum, codesign.
 //   --repin also needs `gh` when no TAG argument is given.
 
 import { mkdtemp, rm, chmod, rename } from "node:fs/promises";
@@ -58,14 +59,14 @@ import { captureStdout, runOrDie } from "./lib/spawn.ts";
 import { repoRoot } from "./lib/paths.ts";
 
 const REPO_ROOT = repoRoot(import.meta.url);
-const DEST = join(REPO_ROOT, "COOL-TUNNEL", "naive");
-const MANIFEST = join(REPO_ROOT, "COOL-TUNNEL", "naive.upstream.json");
+const DEST = join(REPO_ROOT, "COOL-TUNNEL", "sing-box");
+const MANIFEST = join(REPO_ROOT, "COOL-TUNNEL", "singbox-core.upstream.json");
 
 // ---------------------------------------------------------------------------
 // Manifest helpers
 // ---------------------------------------------------------------------------
 
-interface NaiveManifest {
+interface SingboxCoreManifest {
     upstream_tag: string;
     arm64_tarball_sha256: string;
     x64_tarball_sha256: string;
@@ -73,15 +74,15 @@ interface NaiveManifest {
     fetched_at?: string;
 }
 
-async function readManifest(): Promise<NaiveManifest> {
+async function readManifest(): Promise<SingboxCoreManifest> {
     const file = Bun.file(MANIFEST);
     if (!(await file.exists())) {
         err(`${MANIFEST} not found.`);
-        err(`       Run scripts/fetch_naive.ts --repin to establish the initial pin.`);
+        err(`       Run scripts/fetch_singbox-core.ts --repin to establish the initial pin.`);
         process.exit(3);
     }
     try {
-        return (await file.json()) as NaiveManifest;
+        return (await file.json()) as SingboxCoreManifest;
     } catch (caught) {
         err(`manifest is not valid JSON: ${(caught as Error).message}`);
         process.exit(3);
@@ -152,12 +153,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
 
 function printHelp(): void {
     process.stdout.write(`\
-fetch_naive.ts — bundled NaiveProxy pin enforcement
+fetch_singbox-core.ts — bundled sing-box pin enforcement
 
 Usage:
-    bun scripts/fetch_naive.ts                     # verify (default)
-    bun scripts/fetch_naive.ts --check-only        # audit pin against upstream
-    bun scripts/fetch_naive.ts --repin [TAG]       # explicit re-pin
+    bun scripts/fetch_singbox-core.ts                     # verify (default)
+    bun scripts/fetch_singbox-core.ts --check-only        # audit pin against upstream
+    bun scripts/fetch_singbox-core.ts --repin [TAG]       # explicit re-pin
 
 See top-of-file comment for details and exit codes.
 `);
@@ -175,11 +176,21 @@ interface UpstreamArtefacts {
     workDir: string;
 }
 
+/**
+ * Strip the leading `v` from a release tag for the asset filename.
+ * Upstream tags are `vX.Y.Z`; release assets are
+ * `sing-box-X.Y.Z-darwin-<arch>.tar.gz`.
+ */
+function tagToAssetStem(tag: string): string {
+    return tag.startsWith("v") ? tag.slice(1) : tag;
+}
+
 async function downloadAndBuildUniversal(tag: string): Promise<UpstreamArtefacts> {
-    const workDir = await mkdtemp(join(tmpdir(), "cool-tunnel-naive-"));
-    const arm64Asset = `naiveproxy-${tag}-mac-arm64-arm64.tar.xz`;
-    const x64Asset = `naiveproxy-${tag}-mac-x64-x64.tar.xz`;
-    const baseUrl = `https://github.com/klzgrad/naiveproxy/releases/download/${tag}`;
+    const workDir = await mkdtemp(join(tmpdir(), "cool-tunnel-singbox-"));
+    const stem = tagToAssetStem(tag);
+    const arm64Asset = `sing-box-${stem}-darwin-arm64.tar.gz`;
+    const x64Asset = `sing-box-${stem}-darwin-amd64.tar.gz`;
+    const baseUrl = `https://github.com/SagerNet/sing-box/releases/download/${tag}`;
 
     info(`fetching ${arm64Asset}`);
     info(`fetching ${x64Asset}`);
@@ -222,19 +233,22 @@ async function downloadAndBuildUniversal(tag: string): Promise<UpstreamArtefacts
     info(`x64   tarball sha256: ${tarX64Sha}`);
 
     await runOrDie(["mkdir", "-p", join(workDir, "arm64"), join(workDir, "x64")]);
+    // sing-box ships gzip-compressed tarballs (.tar.gz), so -z (not -J).
+    // --strip-components=1 drops the leading `sing-box-X.Y.Z-darwin-<arch>/`
+    // directory so the binary lands directly under arm64/ and x64/.
     await runOrDie(
-        ["tar", "-xJf", join(workDir, arm64Asset), "-C", join(workDir, "arm64"), "--strip-components=1"],
+        ["tar", "-xzf", join(workDir, arm64Asset), "-C", join(workDir, "arm64"), "--strip-components=1"],
         { failMessage: `tar extract failed for arm64`, exitCode: 2 },
     );
     await runOrDie(
-        ["tar", "-xJf", join(workDir, x64Asset), "-C", join(workDir, "x64"), "--strip-components=1"],
+        ["tar", "-xzf", join(workDir, x64Asset), "-C", join(workDir, "x64"), "--strip-components=1"],
         { failMessage: `tar extract failed for x64`, exitCode: 2 },
     );
 
-    const arm64Bin = join(workDir, "arm64", "naive");
-    const x64Bin = join(workDir, "x64", "naive");
+    const arm64Bin = join(workDir, "arm64", "sing-box");
+    const x64Bin = join(workDir, "x64", "sing-box");
     if (!(await Bun.file(arm64Bin).exists()) || !(await Bun.file(x64Bin).exists())) {
-        err(`extracted tarball did not contain a 'naive' executable`);
+        err(`extracted tarball did not contain a 'sing-box' executable`);
         process.exit(2);
     }
 
@@ -244,7 +258,7 @@ async function downloadAndBuildUniversal(tag: string): Promise<UpstreamArtefacts
     info(`arm64 input → ${(await captureStdout(["lipo", "-info", arm64Bin])).trim()}`);
     info(`x64   input → ${(await captureStdout(["lipo", "-info", x64Bin])).trim()}`);
 
-    const mergedPath = join(workDir, "naive-universal");
+    const mergedPath = join(workDir, "sing-box-universal");
     await runOrDie(
         ["lipo", "-create", arm64Bin, x64Bin, "-output", mergedPath],
         { failMessage: `lipo merge failed`, exitCode: 2 },
@@ -291,16 +305,16 @@ async function modeVerify(): Promise<void> {
 
     const actual = await sha256OfFile(DEST);
     if (actual !== manifest.merged_universal_sha256) {
-        err(`bundled naive does not match the committed pin.`);
+        err(`bundled sing-box does not match the committed pin.`);
         err(`       expected: ${manifest.merged_universal_sha256} (upstream ${manifest.upstream_tag})`);
         err(`       actual  : ${actual}`);
         err(`       Either the bundled binary was tampered with, or the manifest is out of date.`);
-        err(`       Roll the pin explicitly with: scripts/fetch_naive.ts --repin`);
+        err(`       Roll the pin explicitly with: scripts/fetch_singbox-core.ts --repin`);
         process.exit(3);
     }
 
     ok(
-        `bundled naive matches pin (upstream ${manifest.upstream_tag}, sha256 ${manifest.merged_universal_sha256})`,
+        `bundled sing-box matches pin (upstream ${manifest.upstream_tag}, sha256 ${manifest.merged_universal_sha256})`,
     );
 }
 
@@ -384,7 +398,7 @@ async function modeRepin(requestedTag: string): Promise<void> {
                 "release",
                 "list",
                 "--repo",
-                "klzgrad/naiveproxy",
+                "SagerNet/sing-box",
                 "--exclude-pre-releases",
                 "--limit",
                 "1",
@@ -403,7 +417,7 @@ async function modeRepin(requestedTag: string): Promise<void> {
                     "release",
                     "list",
                     "--repo",
-                    "klzgrad/naiveproxy",
+                    "SagerNet/sing-box",
                     "--limit",
                     "1",
                     "--json",
@@ -414,15 +428,15 @@ async function modeRepin(requestedTag: string): Promise<void> {
                 tag = stdout.trim();
             } catch {
                 err(`--repin without TAG requires \`gh\` to resolve the latest release.`);
-                err(`       Either install gh, or pass a tag: scripts/fetch_naive.ts --repin vX.Y.Z`);
+                err(`       Either install gh, or pass a tag: scripts/fetch_singbox-core.ts --repin vX.Y.Z`);
                 process.exit(1);
             }
         }
         if (!tag) {
-            err(`could not resolve latest naiveproxy tag via gh`);
+            err(`could not resolve latest sing-box tag via gh`);
             process.exit(1);
         }
-        info(`resolved latest naiveproxy tag → ${tag}`);
+        info(`resolved latest sing-box tag → ${tag}`);
     }
 
     const artefacts = await downloadAndBuildUniversal(tag);
@@ -453,10 +467,10 @@ async function modeRepin(requestedTag: string): Promise<void> {
         process.stdout.write("\n");
 
         if (process.env["CT_REPIN_CONFIRM"] !== "1") {
-            warn(`Re-pinning would rewrite both COOL-TUNNEL/naive and naive.upstream.json.`);
+            warn(`Re-pinning would rewrite both COOL-TUNNEL/sing-box and singbox-core.upstream.json.`);
             warn(`To proceed, re-run with CT_REPIN_CONFIRM=1 set in the environment:`);
             warn("");
-            warn(`    CT_REPIN_CONFIRM=1 scripts/fetch_naive.ts --repin ${tag}`);
+            warn(`    CT_REPIN_CONFIRM=1 scripts/fetch_singbox-core.ts --repin ${tag}`);
             warn("");
             warn(
                 `The change MUST land as a single commit (binary + manifest) that names the old → new tag transition in the message.`,
@@ -475,7 +489,7 @@ async function modeRepin(requestedTag: string): Promise<void> {
         // here (no "same SHAs → preserve fetched_at" guard) because
         // reaching this branch requires CT_REPIN_CONFIRM=1.
         const fetchedAt = new Date().toISOString().replace(/\.\d+Z$/, "Z");
-        const newManifest: NaiveManifest = {
+        const newManifest: SingboxCoreManifest = {
             upstream_tag: tag,
             arm64_tarball_sha256: artefacts.tarArm64Sha,
             x64_tarball_sha256: artefacts.tarX64Sha,
@@ -485,12 +499,12 @@ async function modeRepin(requestedTag: string): Promise<void> {
         await Bun.write(MANIFEST, `${JSON.stringify(newManifest, null, 2)}\n`);
 
         process.stdout.write("\n");
-        ok(`wrote universal naive to ${DEST}`);
-        ok(`wrote pin manifest to  ${MANIFEST}`);
+        ok(`wrote universal sing-box to ${DEST}`);
+        ok(`wrote pin manifest to     ${MANIFEST}`);
         process.stdout.write(`    tag    : ${tag}\n`);
         process.stdout.write(`    sha256 : ${artefacts.mergedSha}\n\n`);
         process.stdout.write(`Next: commit both files together. Suggested message:\n`);
-        process.stdout.write(`  chore(naive): repin to ${tag}\n`);
+        process.stdout.write(`  chore(singbox-core): repin to ${tag}\n`);
     } finally {
         await rm(artefacts.workDir, { recursive: true, force: true });
     }
@@ -526,12 +540,12 @@ async function main(): Promise<void> {
 if (import.meta.main) {
     main().catch((caught) => {
         if (caught instanceof Error) {
-            die(`fetch_naive: ${caught.message}`);
+            die(`fetch_singbox-core: ${caught.message}`);
         } else {
-            die(`fetch_naive: unknown failure: ${String(caught)}`);
+            die(`fetch_singbox-core: unknown failure: ${String(caught)}`);
         }
     });
 }
 
 // Re-export key helpers for unit tests.
-export { parseArgs, readManifest, sha256OfFile, type NaiveManifest };
+export { parseArgs, readManifest, sha256OfFile, type SingboxCoreManifest };

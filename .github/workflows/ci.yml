@@ -13,17 +13,19 @@
 #                  coverage for H2/H3/M1 and future Swift unit tests).
 #   - shellcheck:  every script under scripts/ + the brew-style
 #                  bin/ct maintenance wrapper
-#   - naive-pin:   bundled NaiveProxy binary matches naive.upstream.json
-#                  (no network — just a SHA-256 compare; supply-chain
-#                  audit against the moving upstream tag is the
-#                  separate `naive-pin-audit.yml` workflow). post-v2.0.52
-#                  the verifier itself is TypeScript+Bun, so this job
+#   - singbox-core-pin:
+#                  bundled sing-box binary matches
+#                  singbox-core.upstream.json (no network — just a
+#                  SHA-256 compare; supply-chain audit against the
+#                  moving upstream tag is the separate
+#                  `singbox-core-pin-audit.yml` workflow). The
+#                  verifier itself is TypeScript+Bun, so this job
 #                  installs Bun before invoking the .sh shim.
 #   - try-ratchet: count of `try?` sites in the Swift production tree
 #                  matches the committed cap (M1 robustness-review).
 #                  Fast, no toolchain needed; runs on ubuntu.
 #   - bun-tests:   pure-logic tests for the TypeScript+Bun
-#                  cut_release / fetch_naive ports. Pins the
+#                  cut_release / fetch_singbox-core ports. Pins the
 #                  argument-parsing shape so a regression there
 #                  fails here rather than at release-cut time.
 #
@@ -220,32 +222,32 @@ jobs:
       - name: shellcheck scripts/*.sh bin/ct
         run: shellcheck scripts/*.sh bin/ct
 
-  naive-pin:
-    name: NaiveProxy pin verification
+  singbox-core-pin:
+    name: sing-box pin verification
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
-      # **post-v2.0.52:** the verify path lives in
-      # scripts/fetch_naive.ts (TypeScript+Bun). The .sh shim shells
-      # out to `bun`, so Bun must be on PATH before the shim runs.
-      # `oven-sh/setup-bun` is SHA-pinned to the v2 release as of
-      # 2026-05-14 — same supply-chain discipline we apply to every
-      # other third-party Action.
+      # The verify path lives in scripts/fetch_singbox-core.ts
+      # (TypeScript+Bun). The .sh shim shells out to `bun`, so Bun
+      # must be on PATH before the shim runs. `oven-sh/setup-bun`
+      # is SHA-pinned to the v2 release as of 2026-05-14 — same
+      # supply-chain discipline we apply to every other third-party
+      # Action.
       - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
         with:
           bun-version: latest
       # Default mode is verify-only: no network, no lipo, no codesign.
-      # Just SHA-256 of COOL-TUNNEL/naive vs `merged_universal_sha256`
-      # in COOL-TUNNEL/naive.upstream.json. Catches:
+      # Just SHA-256 of COOL-TUNNEL/sing-box vs `merged_universal_sha256`
+      # in COOL-TUNNEL/singbox-core.upstream.json. Catches:
       #   - a PR that edits the binary without updating the pin,
       #   - a PR that edits the pin without rolling the binary, or
       #   - any drift introduced by a botched merge.
       # The cross-check against the actual upstream tag lives in
-      # naive-pin-audit.yml (scheduled, macOS, needs lipo + codesign).
-      - name: Verify bundled naive matches naive.upstream.json
-        run: bash scripts/fetch_naive.sh
+      # singbox-core-pin-audit.yml (scheduled, macOS, needs lipo + codesign).
+      - name: Verify bundled sing-box matches singbox-core.upstream.json
+        run: bash scripts/fetch_singbox-core.sh
 
   try-ratchet:
     name: try? ratchet (M1)
@@ -270,14 +272,14 @@ jobs:
         run: bash scripts/try_question_ratchet.sh
 
   bun-tests:
-    name: Bun tests (cut_release + fetch_naive + try_question_ratchet)
+    name: Bun tests (cut_release + fetch_singbox-core + try_question_ratchet)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
       # **post-v2.0.52:** maintenance scripts live as TypeScript+Bun
-      # under scripts/*.ts (cut_release, fetch_naive, and the
+      # under scripts/*.ts (cut_release, fetch_singbox-core, and the
       # try? ratchet as of v2.0.58). The pure-logic surfaces
       # (argument parsers, regex matchers) are unit-tested via
       # `bun test`; this job runs them on every push and PR so a

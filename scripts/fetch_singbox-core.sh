@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# scripts/fetch_naive.sh — thin shim over the TypeScript+Bun port.
+# scripts/fetch_singbox-core.sh — thin shim over the TypeScript+Bun port.
 #
-# The implementation lives in scripts/fetch_naive.ts. This file
-# preserves the legacy invocation path so existing CI workflows,
-# documentation, the bin/ct wrapper, and operator muscle-memory all
-# keep working unchanged when calling `bash scripts/fetch_naive.sh`.
+# The implementation lives in scripts/fetch_singbox-core.ts. This file
+# preserves a shell entry point so existing CI workflows, documentation,
+# the bin/ct wrapper, and operator muscle-memory all keep working
+# unchanged when calling `bash scripts/fetch_singbox-core.sh`.
 #
 # Forwards every argument; preserves the child's exit code so the
 # documented exit-code contract (0 success / 1 invocation /
@@ -23,4 +23,4 @@ if ! command -v bun >/dev/null 2>&1; then
     exit 1
 fi
 
-exec bun "${REPO_ROOT}/scripts/fetch_naive.ts" "$@"
+exec bun "${REPO_ROOT}/scripts/fetch_singbox-core.ts" "$@"

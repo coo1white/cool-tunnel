@@ -51,7 +51,7 @@ export function ok(message: string): void {
 
 /**
  * Plain info line — no prefix, no colour. Matches the bash
- * `echo "info: …"` shape that fetch_naive emits.
+ * `echo "info: …"` shape that fetch_singbox-core emits.
  */
 export function info(message: string): void {
     process.stdout.write(`info: ${message}\n`);
@@ -71,7 +71,7 @@ export function warn(message: string): void {
 /**
  * Fatal error. Matches `printf '\033[1;31m!!!\033[0m %s\n'` from
  * the legacy bash `die()` helper. Exits with the supplied code
- * (default 1, matching `die` in cut_release.sh / fetch_naive.sh).
+ * (default 1, matching `die` in cut_release.sh / fetch_singbox-core.sh).
  */
 export function die(message: string, exitCode = 1): never {
     process.stderr.write(

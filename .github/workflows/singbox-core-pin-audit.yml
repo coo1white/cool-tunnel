@@ -1,11 +1,12 @@
-# .github/workflows/naive-pin-audit.yml
+# .github/workflows/singbox-core-pin-audit.yml
 #
-# Daily supply-chain audit for the bundled NaiveProxy binary.
+# Daily supply-chain audit for the bundled sing-box binary.
 #
-# `scripts/fetch_naive.sh --check-only` re-downloads the upstream
-# tarballs at the **pinned** tag and verifies that the tarball SHAs
-# AND the lipo-merged universal SHA still match the committed pin
-# in COOL-TUNNEL/naive.upstream.json. A failure here means one of:
+# `scripts/fetch_singbox-core.sh --check-only` re-downloads the
+# upstream tarballs at the **pinned** tag and verifies that the
+# tarball SHAs AND the lipo-merged universal SHA still match the
+# committed pin in COOL-TUNNEL/singbox-core.upstream.json. A failure
+# here means one of:
 #
 #   - upstream re-published the tag with different bytes (account
 #     compromise, malicious release re-tag, registry replay), or
@@ -20,7 +21,7 @@
 # and codesign; the PR-time verify job in ci.yml runs on Linux and
 # is content with shasum alone.
 
-name: NaiveProxy pin audit
+name: sing-box pin audit
 
 on:
   schedule:
@@ -41,13 +42,13 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
-      # **post-v2.0.52:** the implementation is TypeScript+Bun
-      # under scripts/fetch_naive.ts; the .sh shim shells out to
+      # The implementation is TypeScript+Bun under
+      # scripts/fetch_singbox-core.ts; the .sh shim shells out to
       # bun. SHA-pinned to the v2 release as of 2026-05-14 to
       # match the supply-chain discipline of every other Action
       # we use.
       - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
         with:
           bun-version: latest
-      - name: scripts/fetch_naive.sh --check-only
-        run: bash scripts/fetch_naive.sh --check-only
+      - name: scripts/fetch_singbox-core.sh --check-only
+        run: bash scripts/fetch_singbox-core.sh --check-only

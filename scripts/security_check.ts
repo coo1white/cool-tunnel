@@ -18,8 +18,8 @@
 // Checks (each one is a hard fail unless marked "advisory"):
 //   1. App bundle exists and contains the expected Mach-O helpers
 //   2. Code signature is intact for the .app and every embedded Mach-O
-//   3. naive and cool-tunnel-core are both *universal* (arm64 + x86_64)
-//   4. naive matches the upstream NaiveProxy SHA-256 we recorded
+//   3. sing-box and cool-tunnel-core are both *universal* (arm64 + x86_64)
+//   4. sing-box matches the upstream sing-box SHA-256 we recorded
 //   5. Info.plist version matches the git tag we are about to release
 //   6. No source file contains hard-coded credentials or API keys
 //   7. LICENSE / NOTICE / Disclaimer.md present at the repo root
@@ -225,13 +225,13 @@ async function main(): Promise<void> {
 
     const state: CheckState = { pass: 0, fail: 0, warn: 0 };
 
-    const naiveBin = join(app, "Contents", "Resources", "naive");
+    const singboxBin = join(app, "Contents", "Resources", "sing-box");
     const coreBin = join(app, "Contents", "Resources", "cool-tunnel-core");
     const appBin = join(app, "Contents", "MacOS", "Cool tunnel");
 
     // --- 1. Bundle layout -----------------------------------------------
     heading("1. Bundle layout");
-    for (const f of [appBin, naiveBin, coreBin]) {
+    for (const f of [appBin, singboxBin, coreBin]) {
         if (existsSync(f) && statSync(f).isFile()) {
             ok(state, `found ${basename(f)}`);
         } else {
@@ -246,7 +246,7 @@ async function main(): Promise<void> {
     } else {
         fail(state, "app bundle signature verification failed");
     }
-    for (const f of [appBin, naiveBin, coreBin]) {
+    for (const f of [appBin, singboxBin, coreBin]) {
         if (!existsSync(f)) continue;
         if (await verifySignature(f, false)) {
             ok(state, `${basename(f)} signature verifies`);
@@ -259,7 +259,7 @@ async function main(): Promise<void> {
     heading("3. Universal binaries (arm64 + x86_64)");
     for (const [label, p] of [
         ["Cool tunnel", appBin] as const,
-        ["naive", naiveBin] as const,
+        ["sing-box", singboxBin] as const,
         ["cool-tunnel-core", coreBin] as const,
     ]) {
         if (!existsSync(p)) {
@@ -280,11 +280,11 @@ async function main(): Promise<void> {
         }
     }
 
-    // --- 4. naive matches upstream manifest -----------------------------
-    heading("4. naive matches upstream manifest");
-    const manifest = join(root, "COOL-TUNNEL", "naive.upstream.json");
-    if (existsSync(manifest)) {
-        const manifestJson = JSON.parse(await readFile(manifest, "utf8")) as {
+    // --- 4. sing-box matches upstream manifest --------------------------
+    heading("4. sing-box matches upstream manifest");
+    const singboxManifest = join(root, "COOL-TUNNEL", "singbox-core.upstream.json");
+    if (existsSync(singboxManifest)) {
+        const manifestJson = JSON.parse(await readFile(singboxManifest, "utf8")) as {
             merged_universal_sha256?: string;
         };
         const expected = manifestJson.merged_universal_sha256;
@@ -296,16 +296,16 @@ async function main(): Promise<void> {
                     "shasum",
                     "-a",
                     "256",
-                    naiveBin,
+                    singboxBin,
                 ]);
                 const actual = shasumOut.split(/\s+/)[0] ?? "";
                 if (actual === expected) {
-                    ok(state, `naive sha256 matches manifest (${expected})`);
+                    ok(state, `sing-box sha256 matches manifest (${expected})`);
                 } else {
                     // Ad-hoc signing rewrites bytes inside the Mach-O
                     // after the universal merge, so a hash mismatch is
                     // *expected* here — surface both for the audit log.
-                    warn(state, "bundled naive differs from manifest (likely re-signed)");
+                    warn(state, "bundled sing-box differs from manifest (likely re-signed)");
                     warn(state, `  manifest: ${expected}`);
                     warn(state, `  bundled : ${actual}`);
                 }
@@ -314,7 +314,7 @@ async function main(): Promise<void> {
             }
         }
     } else {
-        warn(state, "no naive.upstream.json manifest — cannot verify upstream provenance");
+        warn(state, "no singbox-core.upstream.json manifest — cannot verify upstream provenance");
     }
 
     // --- 5. Info.plist version sanity -----------------------------------

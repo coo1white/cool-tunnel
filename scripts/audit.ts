@@ -23,7 +23,7 @@
 //   3b. cargo deny check                — license/ban/duplicate policy
 //   4. swift format lint --strict       — Swift formatter drift
 //   5. xcodebuild test (Debug)          — Swift XCTest suites
-//   6. naive arch guard                 — bundled binary is universal
+//   6. sing-box arch guard              — bundled binary is universal
 //   7. schema sync probe                — engine + Swift Codable
 //                                          shapes still match a known
 //                                          good wire fixture
@@ -354,31 +354,31 @@ async function main(): Promise<void> {
         }
     }
 
-    // --- 6. naive arch guard ---------------------------------------------
-    const naivePath = join(root, "COOL-TUNNEL", "naive");
-    if (existsSync(naivePath) && statSync(naivePath).isFile()) {
-        step(`naive arch guard: lipo on ${naivePath}`);
+    // --- 6. sing-box arch guard ------------------------------------------
+    const singboxPath = join(root, "COOL-TUNNEL", "sing-box");
+    if (existsSync(singboxPath) && statSync(singboxPath).isFile()) {
+        step(`sing-box arch guard: lipo on ${singboxPath}`);
         const { output: lipoOut, code: lipoCode } = await captureCombined([
             "lipo",
             "-info",
-            naivePath,
+            singboxPath,
         ]);
         if (lipoCode !== 0) {
             failMsg(state, `lipo failed: ${lipoOut.trim()}`);
         } else {
             const parsed = parseLipoInfo(lipoOut);
             if (parsed.universal) {
-                step("naive: universal (arm64 + x86_64) ✓");
+                step("sing-box: universal (arm64 + x86_64) ✓");
             } else {
-                failMsg(state, `naive is not universal: ${lipoOut.trim()}`);
+                failMsg(state, `sing-box is not universal: ${lipoOut.trim()}`);
             }
         }
     } else {
         warn(
-            `no naive at ${naivePath} — bootstrap the pin with CT_REPIN_CONFIRM=1 scripts/fetch_naive.sh --repin`,
+            `no sing-box at ${singboxPath} — bootstrap the pin with CT_REPIN_CONFIRM=1 scripts/fetch_singbox-core.sh --repin`,
         );
         if (strict) {
-            failMsg(state, "naive missing (--strict)");
+            failMsg(state, "sing-box missing (--strict)");
         }
     }
 
