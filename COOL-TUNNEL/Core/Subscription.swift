@@ -448,11 +448,14 @@ public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
 
 // MARK: - Conversion to local Profile
 //
-// v3.0.0 — the local `Profile` model in Protocol.swift still carries
-// the v2.x basic-auth shape (`username` + `password`). The actual
-// rewire of Profile + the engine config generation to consume the
-// `uuid` + `reality` block lands in sub-phase F (the
-// TunnelOrchestrator rewire) and sub-phase D (the Rust client core
-// rewrite). For now, `toLocalProfile` is intentionally absent — any
-// caller that needs it must wait for the wider Profile reshape
-// landing on this branch.
+// **v3.0.0 (sub-phase F):** the rewire landed — the local
+// `Profile` model in Protocol.swift now carries `uuid` and a
+// `reality { publicKey, destHost, shortId }` block, matching the
+// manifest's `SubscriptionProfileV2` shape one-to-one.
+// `TunnelOrchestrator.importFromSubscriptionURL(_:)` constructs
+// the local Profile inline (the rename touches one call site
+// only). A dedicated `toLocalProfile()` helper isn't pulled into
+// the manifest type because the conversion needs orchestrator
+// context (existing profile id, localPort, subscriptionURL) that
+// the manifest itself doesn't carry — keeping the inline shape
+// in the orchestrator avoids a wider API change here.

@@ -11,6 +11,14 @@
 // on its own line. Naming follows the Swift API Design Guidelines (camelCase
 // case names, descriptive argument labels) while CodingKeys translate to the
 // snake_case the Rust side uses.
+//
+// **v3.0.0 (sub-phase F):** the wire shape pivots from NaiveProxy
+// basic-auth (`{username, password}`) to sing-box VLESS+Reality
+// (`{username, uuid, reality { public_key, dest_host, short_id }}`).
+// `generate_naive_config` / `generate_pac` are gone; sing-box client
+// config replaces them via `generate_singbox_config`. The proxy
+// liveness probe and debug-handshake stdout/stderr fields rename
+// `naive_*` → `singbox_*`. `coreProtocolVersion` bumps `1 → 2`.
 
 import Foundation
 
@@ -21,12 +29,65 @@ import Foundation
 /// any breaking change to the JSON-over-stdio frame shapes — additive
 /// changes (new request variants, new optional fields) do not require
 /// a bump.
-public let coreProtocolVersion: UInt32 = 1
+///
+/// **v3.0.0 (sub-phase F):** bumped `1 → 2` because the `Credentials`
+/// payload shape changed from `{username, password}` to
+/// `{username, uuid, reality}` and the `generate_naive_config` /
+/// `generate_pac` methods were dropped in favour of
+/// `generate_singbox_config`.
+public let coreProtocolVersion: UInt32 = 2
 
 // MARK: - Profile
 
-/// Wire-format profile shared with the engine. The five core
-/// fields (id / server / username / password / localPort) match
+/// Reality handshake parameters carried inline on a [`Profile`].
+///
+/// The wire shape uses snake_case (`public_key`, `dest_host`,
+/// `short_id`) to match the Rust core's `RawReality`; the Swift
+/// field names are camelCase per Swift's API Design Guidelines.
+///
+/// All three fields are credential-shaped — `publicKey` and
+/// `shortId` carry transport-layer secret material the rendered
+/// sing-box config plugs into its VLESS outbound. `destHost` is
+/// the cover-site FQDN (e.g. `www.microsoft.com`); leakage there
+/// is operator-fingerprinting metadata rather than account
+/// takeover, but the lifecycle telemetry redactor still scrubs it
+/// when the rendered config or stderr happens to include it.
+public struct ProfileReality: Sendable, Codable, Hashable {
+    /// X25519 public key, base64url. Plugs into the sing-box
+    /// VLESS outbound's `tls.reality.public_key` field; the server-
+    /// side `singbox-core` config holds the matching private key.
+    public var publicKey: String
+    /// Cover-site FQDN used as the Reality SNI on the
+    /// `tls.server_name` field. Operator picks: `www.microsoft.com`,
+    /// `www.apple.com`, `www.cloudflare.com`.
+    public var destHost: String
+    /// Reality `short_id` (hex, even length, 0–16 chars). Empty
+    /// string is the conventional "no challenge" sentinel — the
+    /// server-side `singbox-core` config emits that default when
+    /// the operator hasn't configured explicit short_ids.
+    public var shortId: String
+
+    public init(publicKey: String, destHost: String, shortId: String) {
+        self.publicKey = publicKey
+        self.destHost = destHost
+        self.shortId = shortId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case publicKey = "public_key"
+        case destHost = "dest_host"
+        case shortId = "short_id"
+    }
+
+    /// Empty placeholder used by `Profile.default` so the new-
+    /// profile UX surfaces "please paste your subscription URL"
+    /// rather than failing engine validation with an opaque
+    /// "reality.public_key must not be empty".
+    public static let empty = ProfileReality(publicKey: "", destHost: "", shortId: "")
+}
+
+/// Wire-format profile shared with the engine. The core fields
+/// (id / server / username / uuid / reality / localPort) match
 /// `core::domain::profile::RawProfile` exactly; `subscriptionURL`
 /// is a Swift-only persistence field that the Rust deserializer
 /// silently ignores (no `#[serde(deny_unknown_fields)]` on the
@@ -34,18 +95,32 @@ public let coreProtocolVersion: UInt32 = 1
 /// a subscription URL remembers its source — the auto-sync flow
 /// uses it to re-fetch when the engine reports an auth failure
 /// against the cached credentials.
+///
+/// **v3.0.0 (sub-phase F):** `password` (NaiveProxy basic-auth)
+/// replaced by `uuid` (VLESS user_id — the per-account
+/// credential) plus a `reality` block carrying the transport-
+/// layer secret material the rendered sing-box config plugs into
+/// its VLESS+Reality outbound.
 public struct Profile: Sendable, Codable, Hashable, Identifiable {
     public var id: String
     public var server: String
     public var username: String
-    public var password: String
+    /// VLESS user_id (RFC 4122 UUID). v3.0.0 successor to the v2.x
+    /// `password` field — UUID is the actual VLESS auth credential.
+    public var uuid: String
+    /// Reality handshake parameters (public_key + dest_host +
+    /// short_id). Required for the engine to render a working
+    /// sing-box client config; `Profile.isStartable` gates Start
+    /// on non-empty `publicKey` + `destHost` (shortId may legally
+    /// be empty).
+    public var reality: ProfileReality
     public var localPort: String
     /// Subscription URL the profile was last imported from, if
     /// any. `nil` for hand-entered profiles; non-nil for profiles
     /// imported via the "Import from subscription URL" flow.
     /// Persisted alongside the rest of the profile so a future
     /// auto-sync can re-fetch credentials transparently when the
-    /// upstream rotates the password and the cached value is
+    /// upstream rotates the credential and the cached value is
     /// no longer accepted.
     public var subscriptionURL: String?
 
@@ -53,14 +128,16 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
         id: String,
         server: String,
         username: String,
-        password: String,
+        uuid: String,
+        reality: ProfileReality,
         localPort: String,
         subscriptionURL: String? = nil
     ) {
         self.id = id
         self.server = server
         self.username = username
-        self.password = password
+        self.uuid = uuid
+        self.reality = reality
         self.localPort = localPort
         self.subscriptionURL = subscriptionURL
     }
@@ -69,7 +146,8 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
         id: "default",
         server: "proxy.example.com",
         username: "user",
-        password: "",
+        uuid: "",
+        reality: .empty,
         localPort: "1080"
     )
 
@@ -83,22 +161,25 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
     /// the diagnostics — confusing the user about what went
     /// wrong).
     ///
-    /// Whitespace-only entries count as empty. Password is also
-    /// trimmed: a password of pure whitespace is almost always a
-    /// typo, and the upstream would reject it anyway.
+    /// Whitespace-only entries count as empty. `uuid` is also
+    /// trimmed: a pure-whitespace UUID is almost always a typo,
+    /// and the engine's parser would reject it on the next round
+    /// anyway. `reality.shortId` may legally be empty (the
+    /// "no challenge" sentinel the server emits when the operator
+    /// hasn't set explicit short_ids).
     ///
-    /// **v2.0.30 (Defensive Input Logic):** server-shape and
-    /// local-port-range checks are now part of the gate.
-    /// Previously a typo'd port (e.g. "abc") or a pasted full
-    /// URL with `https://` prefix would clear the gate and the
-    /// failure surfaced only at engine-validate time. Now the
-    /// Start button stays disabled until the inputs are
-    /// well-formed, and the inline captions in
-    /// `ConnectionFormView` tell the user exactly what to fix.
+    /// **v3.0.0 (sub-phase F):** the password gate is now a
+    /// uuid + reality.publicKey + reality.destHost gate. A v2.x
+    /// profile in-place upgraded across the v3.0.0 boundary loses
+    /// access to its NaiveProxy `password`; this gate keeps Start
+    /// disabled until the user re-imports via subscription URL,
+    /// which populates the v3.0.0 credentials cleanly.
     public var isStartable: Bool {
         serverValidation == .valid
             && !username.trimmingCharacters(in: .whitespaces).isEmpty
-            && !password.trimmingCharacters(in: .whitespaces).isEmpty
+            && !uuid.trimmingCharacters(in: .whitespaces).isEmpty
+            && !reality.publicKey.trimmingCharacters(in: .whitespaces).isEmpty
+            && !reality.destHost.trimmingCharacters(in: .whitespaces).isEmpty
             && localPortValue != nil
     }
 
@@ -137,7 +218,7 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
 
         // Scheme prefix? `^[a-zA-Z][a-zA-Z0-9+.-]*://` matches
         // the RFC-3986 scheme grammar (so we catch `http://`,
-        // `https://`, `naive+https://`, etc.).
+        // `https://`, `vless://`, etc.).
         if let schemeRange = trimmed.range(
             of: #"^[a-zA-Z][a-zA-Z0-9+.\-]*://"#, options: .regularExpression)
         {
@@ -181,7 +262,7 @@ public struct Profile: Sendable, Codable, Hashable, Identifiable {
 
     /// **v2.0.30 (Defensive Input Logic):** the "Good Deed" half
     /// of the input contract — auto-strips a scheme prefix
-    /// (`https?://`, `naive+https://`, …) and any trailing path
+    /// (`https?://`, `vless://`, …) and any trailing path
     /// from a pasted URL. Used by `ConnectionFormView`'s
     /// `.onChange(of:)` so the field self-corrects on the next
     /// runloop tick after a paste.
@@ -213,7 +294,7 @@ public enum ServerValidation: Sendable, Equatable {
     /// UI (no red caption shown for this case).
     case empty
     /// Pasted with a scheme prefix; the captured string is the
-    /// matched prefix verbatim ("https://", "naive+https://", …)
+    /// matched prefix verbatim ("https://", "vless://", …)
     /// so the caption can quote it back to the user.
     case hasScheme(String)
     /// Contains a `/` — looks like the user pasted a URL with a
@@ -351,22 +432,29 @@ extension CoreEvent: Decodable {
 // MARK: - Responses
 
 /// Discriminated reply payload for a [`CoreRequest`].
+///
+/// **v3.0.0 (sub-phase F):** wire tag renames in lock-step with
+/// the Rust side:
+/// - `naive_config` → `singbox_config`
+/// - `naive_liveness` → `singbox_liveness`
+///
+/// The `pac` variant is dropped (Rust crate's `GeneratePac` was
+/// removed in sub-phase D); smart-mode PAC text is now produced
+/// in-process on the Swift side by `TunnelOrchestrator`.
 public enum CoreResponse: Sendable, Hashable {
     case ack
     case validation(ValidationReport)
-    case naiveConfig(json: String)
-    case pac(js: String)
+    /// `generate_singbox_config` reply carrying the rendered
+    /// sing-box client `config.json` as a pretty-printed string.
+    case singboxConfig(json: String)
     case started(pid: UInt32)
     case stopped
     case diagnostic(DiagnosticReport)
     case latency(LatencyReport)
-    /// `probe_naive_live` reply (UX-F#7 / v2.0.15): `running`
-    /// is the canonical "is the engine still alive" flag the
-    /// orchestrator routes on; `pid` is for diagnostic logging
-    /// only. The wire tag predates the v3.0.0 sing-box pivot and
-    /// is preserved verbatim until sub-phase F renames the
-    /// JSON-over-stdio shape in lock-step with the Rust side.
-    case naiveLiveness(running: Bool, pid: UInt32?)
+    /// `probe_singbox_live` reply: `running` is the canonical
+    /// "is the engine still alive" flag the orchestrator routes
+    /// on; `pid` is for diagnostic logging only.
+    case singboxLiveness(running: Bool, pid: UInt32?)
     /// `hello` reply carrying the engine's compiled-in
     /// `protocolVersion` and `engineVersion`. The Swift caller
     /// compares `protocolVersion` against `coreProtocolVersion`
@@ -384,20 +472,19 @@ public enum CoreResponse: Sendable, Hashable {
     private enum Tag: String, Decodable {
         case ack
         case validation
-        case naiveConfig = "naive_config"
-        case pac
+        case singboxConfig = "singbox_config"
         case started
         case stopped
         case diagnostic
         case latency
-        case naiveLiveness = "naive_liveness"
+        case singboxLiveness = "singbox_liveness"
         case helloReply = "hello_reply"
         case probe
         case debugHandshake = "debug_handshake"
     }
 
     private enum FlatKeys: String, CodingKey {
-        case type, json, js, pid, running
+        case type, json, pid, running
         case protocolVersion = "protocol_version"
         case engineVersion = "engine_version"
     }
@@ -412,10 +499,8 @@ extension CoreResponse: Decodable {
             self = .ack
         case .validation:
             self = .validation(try ValidationReport(from: decoder))
-        case .naiveConfig:
-            self = .naiveConfig(json: try flat.decode(String.self, forKey: .json))
-        case .pac:
-            self = .pac(js: try flat.decode(String.self, forKey: .js))
+        case .singboxConfig:
+            self = .singboxConfig(json: try flat.decode(String.self, forKey: .json))
         case .started:
             self = .started(pid: try flat.decode(UInt32.self, forKey: .pid))
         case .stopped:
@@ -424,8 +509,8 @@ extension CoreResponse: Decodable {
             self = .diagnostic(try DiagnosticReport(from: decoder))
         case .latency:
             self = .latency(try LatencyReport(from: decoder))
-        case .naiveLiveness:
-            self = .naiveLiveness(
+        case .singboxLiveness:
+            self = .singboxLiveness(
                 running: try flat.decode(Bool.self, forKey: .running),
                 pid: try flat.decodeIfPresent(UInt32.self, forKey: .pid)
             )
@@ -522,6 +607,16 @@ public struct ProbeReport: Sendable, Codable, Hashable {
     }
 }
 
+/// Result of [`CoreRequest.debugHandshake`]. Carries the
+/// byte-level evidence the operator-facing classifier reads.
+///
+/// **v3.0.0 (sub-phase F):** the stdout / stderr field names
+/// renamed `naive_*` → `singbox_*` in lock-step with the engine
+/// pivot. The byte semantics still describe the temporary SOCKS5
+/// listener the engine spun up for the diagnostic (Rust side
+/// retained the historical names like `local_sent_hex` /
+/// `local_received_hex` verbatim; only the supervisor's
+/// stdout/stderr fields renamed).
 public struct DebugHandshakeReport: Sendable, Codable, Hashable {
     public let server: String
     public let target: String
@@ -531,9 +626,41 @@ public struct DebugHandshakeReport: Sendable, Codable, Hashable {
     public let elapsedMs: UInt64
     public let localSentHex: String
     public let localReceivedHex: String
-    public let naiveStdout: [String]
-    public let naiveStderr: [String]
+    /// Redacted stdout lines captured from the temporary
+    /// `sing-box` child the engine spawned for the diagnostic.
+    public let singboxStdout: [String]
+    /// Redacted stderr lines captured from the temporary
+    /// `sing-box` child. Carries any handshake-rejection
+    /// signature the engine surfaced (e.g.
+    /// "reality handshake failed").
+    public let singboxStderr: [String]
     public let error: String?
+
+    public init(
+        server: String,
+        target: String,
+        ok: Bool,
+        connectOk: Bool,
+        postConnectReceivedBytes: UInt64,
+        elapsedMs: UInt64,
+        localSentHex: String,
+        localReceivedHex: String,
+        singboxStdout: [String],
+        singboxStderr: [String],
+        error: String?
+    ) {
+        self.server = server
+        self.target = target
+        self.ok = ok
+        self.connectOk = connectOk
+        self.postConnectReceivedBytes = postConnectReceivedBytes
+        self.elapsedMs = elapsedMs
+        self.localSentHex = localSentHex
+        self.localReceivedHex = localReceivedHex
+        self.singboxStdout = singboxStdout
+        self.singboxStderr = singboxStderr
+        self.error = error
+    }
 
     private enum CodingKeys: String, CodingKey {
         case server, target, ok, error
@@ -542,8 +669,8 @@ public struct DebugHandshakeReport: Sendable, Codable, Hashable {
         case elapsedMs = "elapsed_ms"
         case localSentHex = "local_sent_hex"
         case localReceivedHex = "local_received_hex"
-        case naiveStdout = "naive_stdout"
-        case naiveStderr = "naive_stderr"
+        case singboxStdout = "singbox_stdout"
+        case singboxStderr = "singbox_stderr"
     }
 }
 
@@ -554,17 +681,17 @@ public struct DebugHandshakeReport: Sendable, Codable, Hashable {
 /// raw byte-level breakdown that requires an operator to read
 /// hex to interpret.
 ///
-/// **post-v2.0.52:** added because the existing deterministic
-/// `Local Kernel / ISP / VPS` classifier in
-/// `TunnelOrchestrator.classifyConnectionFailure()` is
-/// reachability-only — it can't distinguish "the VPS dropped my
-/// CONNECT before it answered" (likely auth / unreachable) from
-/// "the VPS accepted CONNECT, said 200 OK, then RSTed the upstream
-/// pipe" (egress-blocked). Both classify as `.localKernel` under
-/// the reachability model because both Apple and the VPS host
-/// respond to TCP probes. The handshake report has the byte-
-/// level evidence the classifier needs, so we read it here and
-/// surface the verdict.
+/// **v3.0.0 note:** the historical byte-shape patterns (`HTTP/1.1
+/// 200`, `HTTP/1.1 407`) describe NaiveProxy's HTTP-CONNECT
+/// frames. The v3.0.0 engine's `debug_handshake` probe drives one
+/// SOCKS5 connect through a temporary `sing-box` child instead;
+/// the post-CONNECT byte stream is a SOCKS5 reply rather than an
+/// HTTP response. The Swift classifier is deliberately preserved
+/// across the rename so historical support transcripts still
+/// parse — for new v3.0.0 reports the byte-shape patterns won't
+/// match and every non-success falls into `.other`, surfacing the
+/// raw `singboxStderr` lines instead. A follow-up retunes this
+/// for the SOCKS5 byte shape; sub-phase F covers the rename only.
 public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
     /// TCP / TLS to the proxy did not establish. The classic
     /// "wrong server", "VPS down", or "ISP-blocking-port-443"
@@ -574,7 +701,8 @@ public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
     /// Proxy answered the CONNECT with HTTP 407 — credentials
     /// rejected. Distinguishable from `vpsEgressBlocked` because
     /// the response bytes start with `HTTP/1.1 407` rather than
-    /// `HTTP/1.1 200`.
+    /// `HTTP/1.1 200`. **v3.0.0:** historical NaiveProxy pattern;
+    /// preserved for support-transcript parsing.
     case proxyAuthRejected = "proxy_auth_rejected"
 
     /// Proxy accepted CONNECT (HTTP 200 OK from forward_proxy /
@@ -585,20 +713,14 @@ public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
     /// IPv6-only routing to a destination the VPS can't talk
     /// to, DNS pointing at an unreachable IP, or the
     /// destination blocked at the VPS's network.
-    ///
-    /// **v3.0.0:** the classifier reads byte-level evidence from
-    /// debug_handshake replies whose 200/407 HTTP shape predates
-    /// the sing-box pivot. Sub-phase F will retune this case for
-    /// the VLESS+Reality handshake's byte shape; until then the
-    /// existing HTTP-shaped patterns still match anything that
-    /// passes through an HTTP-shaped reverse proxy in front of a
-    /// v2.x server.
     case vpsEgressBlocked = "vps_egress_blocked"
 
     /// Unclassified failure shape — non-2xx response that isn't
     /// 407, partial bytes received before the error, or a
     /// failure mode the byte-level evidence doesn't fit. Fall
-    /// through to the raw byte dump for diagnosis.
+    /// through to the raw byte dump for diagnosis. **v3.0.0:**
+    /// most VLESS+Reality handshake failures land here until the
+    /// classifier learns the new SOCKS5 byte shape.
     case other = "other"
 
     /// User-facing one-line explanation. Read by
@@ -615,8 +737,8 @@ public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
             return
                 "Server rejected the credentials (HTTP 407). If you imported "
                 + "via a subscription URL, try re-importing — the panel may "
-                + "have rotated the password. Otherwise check the Server / "
-                + "Username / Password fields in Settings."
+                + "have rotated the UUID. Otherwise check the Server / "
+                + "Username / UUID fields in Settings."
         case .vpsEgressBlocked:
             return
                 "Server accepted credentials but cannot reach the destination. "
@@ -628,8 +750,8 @@ public enum DebugHandshakeFailureClass: String, Sendable, Hashable, Codable {
         case .other:
             return
                 "Handshake failed in an unrecognised shape. Read the byte "
-                + "dump above for clues; `naive_stderr` lines (if any) are "
-                + "the proxy daemon's own diagnostic output."
+                + "dump above for clues; `singbox_stderr` lines (if any) are "
+                + "the sing-box child's own diagnostic output."
         }
     }
 }
@@ -750,10 +872,20 @@ extension CoreOutbound: Decodable {
 /// One request sent to the engine. Variant names follow Swift conventions
 /// (camelCase); the wire emits snake_case via [`Self.method`] and per-variant
 /// param structs.
+///
+/// **v3.0.0 (sub-phase F):** method renames in lock-step with the
+/// Rust side:
+/// - `generate_naive_config` → `generate_singbox_config`
+/// - `probe_naive_live` → `probe_singbox_live`
+///
+/// The `generate_pac` variant is dropped (Rust crate's `GeneratePac`
+/// was removed in sub-phase D); smart-mode PAC text is generated
+/// in-process on the Swift side by `TunnelOrchestrator`.
 public enum CoreRequest: Sendable, Hashable {
     case validateProfile(Profile)
-    case generateNaiveConfig(Profile)
-    case generatePac(directDomains: [String], port: UInt16)
+    /// Generate the sing-box client `config.json` for the given
+    /// validated profile. Successor to v2.x's `generateNaiveConfig`.
+    case generateSingboxConfig(Profile)
     /// Spawn the bundled `sing-box` binary and start streaming
     /// its output. `monitorIntervalSecs` overrides the engine's
     /// connection-monitor poll cadence (clamped server-side to
@@ -769,15 +901,10 @@ public enum CoreRequest: Sendable, Hashable {
     case shutdown
     /// Asks the engine whether its supervised proxy binary is
     /// currently alive. Used by the orchestrator's no-restart
-    /// hot-swap path (UX-F#7 / v2.0.15) to detect a proxy crash
-    /// that happened during the swap window — the
-    /// `transitionInFlight` gate suppresses the engine's
-    /// usual `stateChanged(false)` event so without an
-    /// explicit probe the orchestrator would declare success
-    /// over a dead engine. The wire-protocol method name
-    /// `probe_naive_live` is preserved verbatim — sub-phase F
-    /// owns the rename in lock-step with the Rust side.
-    case probeNaiveLive
+    /// hot-swap path to detect a sing-box crash that happened
+    /// during the swap window. The wire-protocol method name is
+    /// `probe_singbox_live`; the reply tag is `singbox_liveness`.
+    case probeSingboxLive
     /// Wire-protocol handshake. Sent by `CoreClient.start()`
     /// immediately after the subprocess spawns; the engine
     /// replies with `helloReply(protocolVersion:engineVersion:)`
@@ -797,14 +924,13 @@ public enum CoreRequest: Sendable, Hashable {
     public var method: String {
         switch self {
         case .validateProfile: "validate_profile"
-        case .generateNaiveConfig: "generate_naive_config"
-        case .generatePac: "generate_pac"
+        case .generateSingboxConfig: "generate_singbox_config"
         case .startProxy: "start_proxy"
         case .stopProxy: "stop_proxy"
         case .runDiagnostics: "run_diagnostics"
         case .runLatencyTest: "run_latency_test"
         case .shutdown: "shutdown"
-        case .probeNaiveLive: "probe_naive_live"
+        case .probeSingboxLive: "probe_singbox_live"
         case .hello: "hello"
         case .probeServer: "probe_server"
         case .debugHandshake: "debug_handshake"
@@ -831,13 +957,11 @@ public struct CoreRequestFrame: Sendable, Encodable {
         try container.encode(id, forKey: .id)
         try container.encode(request.method, forKey: .method)
         switch request {
-        case .stopProxy, .runDiagnostics, .shutdown, .probeNaiveLive, .hello:
+        case .stopProxy, .runDiagnostics, .shutdown, .probeSingboxLive, .hello:
             try container.encodeNil(forKey: .params)
         case .validateProfile(let profile),
-            .generateNaiveConfig(let profile):
+            .generateSingboxConfig(let profile):
             try container.encode(ProfileEnvelope(profile: profile), forKey: .params)
-        case .generatePac(let domains, let port):
-            try container.encode(GeneratePacParams(directDomains: domains, port: port), forKey: .params)
         case .startProxy(let binary, let config, let port, let monitorInterval):
             try container.encode(
                 StartProxyParams(
@@ -870,16 +994,6 @@ public struct CoreRequestFrame: Sendable, Encodable {
 
 private struct ProfileEnvelope: Encodable {
     let profile: Profile
-}
-
-private struct GeneratePacParams: Encodable {
-    let directDomains: [String]
-    let port: UInt16
-
-    enum CodingKeys: String, CodingKey {
-        case directDomains = "direct_domains"
-        case port
-    }
 }
 
 private struct StartProxyParams: Encodable {

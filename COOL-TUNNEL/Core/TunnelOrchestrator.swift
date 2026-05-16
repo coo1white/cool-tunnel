@@ -368,7 +368,8 @@ public final class TunnelOrchestrator {
             id: UUID().uuidString,
             server: "",
             username: "",
-            password: "",
+            uuid: "",
+            reality: .empty,
             localPort: "1080"
         )
         profiles.append(newProfile)
@@ -385,7 +386,7 @@ public final class TunnelOrchestrator {
         profileStore.save(selectedID: selectedProfileID)
         // Delete the credential entry too — through the migrating
         // store so the legacy Keychain copy is cleaned up.
-        profileStore.deletePassword(forProfileID: id)
+        profileStore.deleteUUID(forProfileID: id)
     }
 
     /// Debounced settings autosave (250 ms). Bound directly to
@@ -506,22 +507,22 @@ public final class TunnelOrchestrator {
         // the auth-failure auto-sync flow can re-fetch when the
         // upstream rotates credentials.
         //
-        // v3.0.0 transitional shape: the `Profile.password` field is
-        // still the v2.x basic-auth column, but in v3.0.0 it carries
-        // the VLESS UUID (the per-account credential). The Reality
-        // params live on the imported manifest but aren't wired into
-        // `Profile` yet — that's sub-phase F. For sub-phase B the
-        // imported `Profile` is shape-compatible with the old code
-        // path; the engine driving sing-box on its other end would
-        // just fail the VLESS+Reality handshake with the
-        // UUID-as-password, which is the right outcome for an
-        // in-flight v3.0.0 branch that hasn't completed the
-        // singbox-core rewire yet.
+        // **v3.0.0 (sub-phase F):** the imported `Profile` carries
+        // the VLESS `uuid` and the Reality block directly. v2.x
+        // basic-auth `password` is gone; the engine driving sing-box
+        // consumes `uuid` + `reality.*` to render the client
+        // `config.json` and complete the VLESS+Reality handshake
+        // against `cool-tunnel-server`'s matching keypair.
         let imported = Profile(
             id: selectedProfile?.id ?? UUID().uuidString,
             server: "\(primary.host):\(primary.port)",
             username: primary.username,
-            password: primary.uuid,
+            uuid: primary.uuid,
+            reality: ProfileReality(
+                publicKey: primary.reality.publicKey,
+                destHost: primary.reality.destHost,
+                shortId: primary.reality.shortId
+            ),
             localPort: selectedProfile?.localPort ?? "1080",
             subscriptionURL: trimmed
         )
@@ -693,12 +694,20 @@ public final class TunnelOrchestrator {
             // `settings.directDomains` may have changed since
             // the last start; regenerate every swap so the PAC
             // reflects current intent.
-            let pacResponse = try await core.send(
-                .generatePac(directDomains: settings.directDomains, port: port)
+            //
+            // **v3.0.0 (sub-phase F):** PAC generation is no longer
+            // delegated to the Rust engine — sub-phase D dropped
+            // `generate_pac` because the sing-box client config
+            // routes through a single VLESS outbound and has no
+            // PAC notion of its own. The orchestrator still needs
+            // a PAC file for system-proxy smart-mode (macOS's
+            // `networksetup -setautoproxyurl`), so we render it
+            // in-process from the same `directDomains` list the
+            // Rust generator consumed.
+            let pacJS = Self.generatePacJavaScript(
+                directDomains: settings.directDomains,
+                port: port
             )
-            guard case .pac(let pacJS) = pacResponse else {
-                throw OrchestratorError.unexpectedResponse
-            }
             try RestrictedFile.write(pacJS, to: paths.pacFile)
         }
 
@@ -783,17 +792,14 @@ public final class TunnelOrchestrator {
     /// engine crash. This probe converts the silent gap into a
     /// yes/no answer the caller can route on.
     ///
-    /// **v3.0.0:** the wire-protocol method name
-    /// `probe_naive_live` and the reply tag `naive_liveness` are
-    /// preserved verbatim — sub-phase F owns the rename of those
-    /// JSON tags in lock-step with the Rust side. From sub-phase E
-    /// onward the spawned binary is sing-box; the wire call still
-    /// asks the engine "is the proxy still alive", which it
-    /// answers the same way regardless of which proxy binary it
-    /// is supervising.
+    /// **v3.0.0 (sub-phase F):** wire-protocol method name is
+    /// `probe_singbox_live`; reply tag is `singbox_liveness`.
+    /// The semantics are unchanged from the v2.x `probe_naive_live`
+    /// — the engine answers "is the supervised proxy still alive",
+    /// the proxy binary is now `sing-box`.
     private func verifyEngineLiveAfterHotSwap() async throws {
-        let response = try await core.send(.probeNaiveLive)
-        guard case .naiveLiveness(let running, let pid) = response else {
+        let response = try await core.send(.probeSingboxLive)
+        guard case .singboxLiveness(let running, let pid) = response else {
             throw OrchestratorError.unexpectedResponse
         }
         if !running {
@@ -841,7 +847,7 @@ public final class TunnelOrchestrator {
                 throw OrchestratorError.noProfile
             }
 
-            try hydratePasswordIfNeeded(&profile)
+            try hydrateUUIDIfNeeded(&profile)
 
             // The engine's `Profile` deserializer enforces every
             // rule the Swift form used to do inline.
@@ -850,8 +856,13 @@ public final class TunnelOrchestrator {
                 throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
             }
 
-            let configResponse = try await core.send(.generateNaiveConfig(profile))
-            guard case .naiveConfig(let configJSON) = configResponse else {
+            // **v3.0.0 (sub-phase F):** sing-box client config
+            // replaces NaiveProxy `config.json`. The on-disk
+            // filename (`paths.configFile`) is unchanged; the JSON
+            // shape is the sing-box client format with VLESS+Reality
+            // outbound + SOCKS5 inbound.
+            let configResponse = try await core.send(.generateSingboxConfig(profile))
+            guard case .singboxConfig(let configJSON) = configResponse else {
                 throw OrchestratorError.unexpectedResponse
             }
             try RestrictedFile.write(configJSON, to: paths.configFile)
@@ -859,12 +870,14 @@ public final class TunnelOrchestrator {
             let port = try parsePort(profile.localPort)
 
             if mode == .smart {
-                let pacResponse = try await core.send(
-                    .generatePac(directDomains: settings.directDomains, port: port)
+                // **v3.0.0 (sub-phase F):** Swift-side PAC generator —
+                // see `applyModeWithoutRestart` for the rationale (Rust
+                // crate dropped `generate_pac` because sing-box's
+                // own config has no PAC notion).
+                let pacJS = Self.generatePacJavaScript(
+                    directDomains: settings.directDomains,
+                    port: port
                 )
-                guard case .pac(let pacJS) = pacResponse else {
-                    throw OrchestratorError.unexpectedResponse
-                }
                 try RestrictedFile.write(pacJS, to: paths.pacFile)
             }
 
@@ -1186,8 +1199,8 @@ public final class TunnelOrchestrator {
     }
 
     private func verifyRunningProxyHealthy(profile: Profile) async throws {
-        let response = try await core.send(.probeNaiveLive)
-        guard case .naiveLiveness(let running, _) = response else {
+        let response = try await core.send(.probeSingboxLive)
+        guard case .singboxLiveness(let running, _) = response else {
             throw OrchestratorError.unexpectedResponse
         }
         guard running else { throw HotSwapError.engineDied }
@@ -1257,7 +1270,7 @@ public final class TunnelOrchestrator {
             guard var profile = selectedProfile else {
                 throw OrchestratorError.noProfile
             }
-            try hydratePasswordIfNeeded(&profile)
+            try hydrateUUIDIfNeeded(&profile)
             let validation = try await core.send(.validateProfile(profile))
             guard case .validation(let validationReport) = validation, validationReport.ok else {
                 throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
@@ -1295,14 +1308,16 @@ public final class TunnelOrchestrator {
 
             // The engine's stdout/stderr stays in the log —
             // carries engine-perspective diagnostics for unusual
-            // failures. The wire field names (`naiveStdout` /
-            // `naiveStderr`) are preserved verbatim; sub-phase F
-            // owns the rename of those JSON tags in lock-step
-            // with the Rust side.
-            for line in report.naiveStdout {
+            // failures.
+            //
+            // **v3.0.0 (sub-phase F):** wire field names renamed
+            // `naive_*` → `singbox_*`; the streams are from the
+            // temporary `sing-box` child the engine spawned for
+            // the debug-handshake probe.
+            for line in report.singboxStdout {
                 appendInfo("debug handshake engine stdout: \(line)")
             }
-            for line in report.naiveStderr {
+            for line in report.singboxStderr {
                 appendLog(source: .stderr, text: "[debug handshake engine stderr] \(line)")
             }
             let total = Self.formatElapsed(since: started)
@@ -1321,6 +1336,82 @@ public final class TunnelOrchestrator {
         } catch {
             recordError("debug handshake failed: \(error)", layer: .localKernel)
         }
+    }
+
+    // MARK: - PAC generation (v3.0.0 sub-phase F)
+
+    /// Generates the smart-mode PAC JavaScript that
+    /// `networksetup -setautoproxyurl` consumes. Successor to the
+    /// v2.x `RequestKind::GeneratePac` engine call — sub-phase D
+    /// dropped that from the Rust crate because sing-box's client
+    /// config has no PAC notion of its own. The orchestrator still
+    /// drives a PAC file for system-proxy smart-mode (macOS does
+    /// not natively understand "SOCKS but exempt this list of
+    /// domains"; PAC is the only stable way to express it across
+    /// every macOS-bundled browser).
+    ///
+    /// Output mirrors the previous Rust-rendered shape so a
+    /// support transcript that captured the v2.x file is still
+    /// recognisable. Each direct-domain is a `dnsDomainIs` match
+    /// against either the bare domain (when it starts with `.`)
+    /// or the exact host plus its subdomains; anything not in the
+    /// list falls through to `SOCKS5 127.0.0.1:<port>; SOCKS 127.0.0.1:<port>`.
+    ///
+    /// `nonisolated` static so a future unit test can pin the
+    /// output shape without standing up a full orchestrator.
+    nonisolated static func generatePacJavaScript(
+        directDomains: [String],
+        port: UInt16
+    ) -> String {
+        // Sanitised list: trim whitespace + strip leading dots +
+        // drop any blank entries. The leading-dot strip matches
+        // the v2.x renderer; `dnsDomainIs(host, ".cn")` matches
+        // any host ending in `.cn`, which is the natural
+        // expression of "all of China's gTLD" the operator
+        // intends.
+        let sanitised: [String] =
+            directDomains
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { $0.hasPrefix(".") ? String($0.dropFirst()) : $0 }
+
+        // JS string literals: escape backslashes and double
+        // quotes. The direct-domains are user-controlled (via the
+        // Settings sheet) so a careful encode prevents a domain
+        // with an embedded `"` from terminating the JS string and
+        // hijacking the PAC.
+        let escaped =
+            sanitised.map { domain -> String in
+                let backslash = domain.replacingOccurrences(of: "\\", with: "\\\\")
+                let quoted = backslash.replacingOccurrences(of: "\"", with: "\\\"")
+                return "\"\(quoted)\""
+            }
+            .joined(separator: ", ")
+
+        let proxyLine = "SOCKS5 127.0.0.1:\(port); SOCKS 127.0.0.1:\(port)"
+
+        return """
+            // Generated by Cool Tunnel v3.0.0 (sub-phase F). PAC for smart-mode
+            // routing: every host in `directDomains` is sent DIRECT; anything
+            // else flows through the local SOCKS5 listener at 127.0.0.1:\(port).
+            var directDomains = [\(escaped)];
+
+            function FindProxyForURL(url, host) {
+                if (isPlainHostName(host)) { return "DIRECT"; }
+                if (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+                    return "DIRECT";
+                }
+                if (isInNet(host, "10.0.0.0", "255.0.0.0")) { return "DIRECT"; }
+                if (isInNet(host, "172.16.0.0", "255.240.0.0")) { return "DIRECT"; }
+                if (isInNet(host, "192.168.0.0", "255.255.0.0")) { return "DIRECT"; }
+                for (var i = 0; i < directDomains.length; i++) {
+                    if (dnsDomainIs(host, "." + directDomains[i]) || host == directDomains[i]) {
+                        return "DIRECT";
+                    }
+                }
+                return "\(proxyLine)";
+            }
+            """
     }
 
     // MARK: - Time formatting helpers
@@ -1467,28 +1558,41 @@ public final class TunnelOrchestrator {
 
     // MARK: - Credential auto-sync (HTTP-407 self-healing)
 
-    /// Detects HTTP-407-class auth failures in the engine's
+    /// Detects auth-class handshake failures in the engine's
     /// stderr. Permissive on purpose: a false positive is a no-op
     /// `scheduleCredentialAutoSync`; a false negative leaves the
-    /// operator stuck with a stale password.
+    /// operator stuck with stale credentials.
     ///
-    /// **v3.0.0 note:** the v2.x naive transport surfaced auth
-    /// failures as HTTP 407 in stderr; the v3.0.0 sing-box
-    /// VLESS+Reality transport surfaces them as VLESS-side handshake
-    /// rejections (typically "invalid user_id" / "auth failure"
-    /// strings). Sub-phase F will widen this matcher to cover the
-    /// VLESS shape too; for now it keeps catching the legacy 407
-    /// pattern so the credential auto-sync still fires when an
-    /// HTTP-shaped reverse proxy stays in front of a v2.x server.
+    /// **v3.0.0 (sub-phase F):** matches both the historical
+    /// NaiveProxy HTTP-407 patterns AND the new sing-box
+    /// VLESS+Reality handshake-rejection signatures. The legacy
+    /// 407 chips stay so an HTTP-shaped reverse proxy in front of
+    /// a v2.x server still fires the auto-sync; the new chips
+    /// catch the strings sing-box itself emits when the VLESS
+    /// user_id is wrong or the Reality handshake fails
+    /// (`reality handshake failed`, `unknown vless user`,
+    /// `xtls-rprx-vision flow not allowed`, etc.).
     ///
     /// `nonisolated` so the hot stderr loop doesn't hop actors.
     nonisolated static func isProxyAuthFailureLine(_ line: String) -> Bool {
         let upper = line.uppercased()
+        // Legacy NaiveProxy / HTTP-CONNECT chips.
         if upper.contains("ERR_PROXY_AUTH") { return true }
         if upper.contains("ERR_TUNNEL_AUTH") { return true }
         if upper.contains("407 PROXY AUTHENTICATION") { return true }
         if upper.contains("PROXY AUTHENTICATION REQUIRED") { return true }
         if upper.contains("AUTHENTICATION REQUIRED") { return true }
+        // **v3.0.0 (sub-phase F):** VLESS+Reality chips from
+        // sing-box's own diagnostic output. The exact strings
+        // are SAGERNET/sing-box-stable across the upstream-tag
+        // window the cool-tunnel-server release line targets.
+        if upper.contains("REALITY HANDSHAKE FAILED") { return true }
+        if upper.contains("UNKNOWN VLESS USER") { return true }
+        if upper.contains("VLESS: USER NOT FOUND") { return true }
+        if upper.contains("VLESS USER NOT FOUND") { return true }
+        if upper.contains("INVALID USER_ID") { return true }
+        if upper.contains("INVALID USER ID") { return true }
+        if upper.contains("XTLS-RPRX-VISION FLOW NOT ALLOWED") { return true }
         // Raw "407" match — surrounded by non-alphanumeric
         // separators so a coincidence inside a longer numeric
         // run (port number, byte count) doesn't fire.
@@ -1536,7 +1640,16 @@ public final class TunnelOrchestrator {
             return
         }
         lastCredentialAutoSyncAt = ContinuousClock.now
-        let oldPassword = profile.password
+        // **v3.0.0 (sub-phase F):** drift check covers `uuid` +
+        // every Reality field. A real panel rotation flips `uuid`;
+        // a Reality keypair regen on the server flips
+        // `reality.publicKey` (and possibly `shortId`); a cover-
+        // site change flips `reality.destHost`. Any single one
+        // changing is enough to justify a restart.
+        let oldUUID = profile.uuid
+        let oldRealityPub = profile.reality.publicKey
+        let oldRealityDest = profile.reality.destHost
+        let oldRealityShortID = profile.reality.shortId
         let oldUsername = profile.username
         let oldServer = profile.server
         let activeModeAtTrigger = activeMode
@@ -1576,7 +1689,10 @@ public final class TunnelOrchestrator {
 
             let refreshed = self.selectedProfile
             let changed =
-                refreshed?.password != oldPassword
+                refreshed?.uuid != oldUUID
+                || refreshed?.reality.publicKey != oldRealityPub
+                || refreshed?.reality.destHost != oldRealityDest
+                || refreshed?.reality.shortId != oldRealityShortID
                 || refreshed?.username != oldUsername
                 || refreshed?.server != oldServer
             guard changed else {
@@ -1886,36 +2002,40 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// Fills the password from the credential store when the
+    /// Fills the UUID from the credential store when the
     /// in-memory copy is empty. Delegates to the static form.
-    private func hydratePasswordIfNeeded(_ profile: inout Profile) throws {
-        try Self.hydratePassword(&profile, from: profileStore)
+    ///
+    /// **v3.0.0 (sub-phase F):** renamed from
+    /// `hydratePasswordIfNeeded`. The stored credential is now a
+    /// VLESS UUID, not a NaiveProxy basic-auth password.
+    private func hydrateUUIDIfNeeded(_ profile: inout Profile) throws {
+        try Self.hydrateUUID(&profile, from: profileStore)
     }
 
     /// Throws `OrchestratorError.credentialReadFailed` on
     /// backend failure so callers can distinguish "keychain
-    /// locked" from "no password set" (item-not-found returns
+    /// locked" from "no UUID set" (item-not-found returns
     /// `""` per `CredentialStore` contract and the validation
     /// gate handles the empty case).
     ///
     /// `nonisolated` static so the unit-test target can pin the
     /// contract without standing up a full `TunnelOrchestrator`.
-    nonisolated static func hydratePassword(
+    nonisolated static func hydrateUUID(
         _ profile: inout Profile, from store: ProfileStore
     )
         throws
     {
-        guard profile.password.isBlank else {
+        guard profile.uuid.isBlank else {
             return
         }
         let stored: String
         do {
-            stored = try store.password(forProfileID: profile.id)
+            stored = try store.uuid(forProfileID: profile.id)
         } catch {
             throw OrchestratorError.credentialReadFailed(reason: error.localizedDescription)
         }
         if !stored.isEmpty {
-            profile.password = stored
+            profile.uuid = stored
         }
     }
 
@@ -2150,24 +2270,49 @@ public final class TunnelOrchestrator {
             )
             return false
         }
-        if profile.password.isBlank {
+        if profile.uuid.isBlank {
             // Distinguish credential-store failure from
-            // "no password set" so the rejection banner says
+            // "no UUID set" so the rejection banner says
             // the right thing — collapsing both produced
-            // "enter a password" even when the keychain was
+            // "enter a credential" even when the keychain was
             // locked.
             do {
-                profile.password = try profileStore.password(forProfileID: profile.id)
+                profile.uuid = try profileStore.uuid(forProfileID: profile.id)
             } catch {
                 recordError(
-                    "Start rejected: couldn't read stored password (\(error.localizedDescription)). Unlock the Keychain and try again.",
+                    "Start rejected: couldn't read stored UUID (\(error.localizedDescription)). Unlock the Keychain and try again.",
                     layer: .localKernel
                 )
                 return false
             }
         }
-        guard !profile.password.isBlank else {
-            recordError("Start rejected: enter a password for the selected profile.", layer: .localKernel)
+        guard !profile.uuid.isBlank else {
+            recordError(
+                "Start rejected: import a subscription URL or paste a VLESS UUID for the selected profile.",
+                layer: .localKernel
+            )
+            return false
+        }
+        // **v3.0.0 (sub-phase F):** Reality fields are NOT in the
+        // credential store — they live in the UserDefaults blob —
+        // so an empty `reality.publicKey` here means the user
+        // never imported a subscription URL or hand-entered the
+        // value. Reject up front with the same actionable banner;
+        // the engine would otherwise reject with
+        // "reality.public_key must not be empty" through
+        // `validate_profile`.
+        guard !profile.reality.publicKey.isBlank else {
+            recordError(
+                "Start rejected: import a subscription URL to populate the Reality public key.",
+                layer: .localKernel
+            )
+            return false
+        }
+        guard !profile.reality.destHost.isBlank else {
+            recordError(
+                "Start rejected: the profile is missing its Reality dest_host. Re-import via subscription URL.",
+                layer: .localKernel
+            )
             return false
         }
         return true
@@ -2283,8 +2428,9 @@ public enum OrchestratorError: LocalizedError, Sendable, Equatable {
     case singboxBinaryUnusable(SingboxResolverError)
     /// Credential store read failed — keychain locked, prompt
     /// dismissed, file IO, corrupted entry. Distinct from "no
-    /// password set" so the banner says "unlock keychain"
-    /// rather than the misleading "enter a password".
+    /// credential set" so the banner says "unlock keychain"
+    /// rather than the misleading "enter a credential". **v3.0.0
+    /// (sub-phase F):** the stored credential is now a VLESS UUID.
     case credentialReadFailed(reason: String)
 
     public var errorDescription: String? {
@@ -2295,7 +2441,7 @@ public enum OrchestratorError: LocalizedError, Sendable, Equatable {
         case .singboxBinaryUnusable(let err):
             "sing-box binary cannot be used: \(err.errorDescription ?? "unknown error")"
         case .credentialReadFailed(let reason):
-            "Couldn't read stored password: \(reason). Unlock the Keychain and try again."
+            "Couldn't read stored credential: \(reason). Unlock the Keychain and try again."
         }
     }
 }

@@ -4,7 +4,7 @@
 // Persistence/FileCredentialStore.swift
 //
 // File-backed primary credential store. Replaces the macOS Keychain
-// as the default password backend so the app never has to trigger a
+// as the default credential backend so the app never has to trigger a
 // system-password / "approve keychain access" prompt before the UI
 // appears.
 //
@@ -12,16 +12,25 @@
 //
 //   ~/Library/Application Support/COOL-TUNNEL/credentials.json   (mode 0600)
 //
-// File format: a flat JSON map of `{ profileID: passwordBase64 }`.
+// File format: a flat JSON map of `{ profileID: uuidBase64 }`.
 // Base64 is *not* encryption — it just stops a user accidentally
 // reading their own credentials by opening the file in a text
 // editor, and prevents `grep` over the support directory from
-// turning the password up as plain UTF-8. Real protection comes
+// turning the UUID up as plain UTF-8. Real protection comes
 // from the file's POSIX mode (0600 — user-only read/write) and
 // from the parent directory's mode (0700, set by `AppSupportPaths`).
 //
-// Concurrency: the read-modify-write cycle inside `setPassword` /
-// `deletePassword` is serialised by an `NSLock`. This protects
+// **v3.0.0 (sub-phase F):** stores VLESS UUIDs (the v3.0.0 sing-box
+// per-account credential). The on-disk filename and the JSON map
+// shape are unchanged from v2.x — only the semantic of the stored
+// value changes. A v2.x file from an upgraded install will hold a
+// basic-auth password under the v2.x profile id; the v3.0.0 engine
+// will reject that as a malformed UUID at validate time and the
+// orchestrator's banner steers the user through the subscription
+// URL re-import flow that overwrites the value with a real UUID.
+//
+// Concurrency: the read-modify-write cycle inside `setUUID` /
+// `deleteUUID` is serialised by an `NSLock`. This protects
 // against two stores in the same process racing on the file. The
 // store does **not** guard against multiple **processes** writing
 // the same file concurrently — which can't happen in practice
@@ -37,9 +46,9 @@ import Foundation
 /// Conforms to `LocalizedError` so the user-facing catch site
 /// surfaces the strings below rather than Swift's default
 /// `"…CoolTunnel.FileCredentialError error N."` placeholder. The
-/// "credentials file" wording is kept (rather than "password
+/// "credentials file" wording is kept (rather than "uuid
 /// file") since this is also reachable from credential-import
-/// flows that don't involve a password yet.
+/// flows that don't involve a UUID yet.
 public enum FileCredentialError: LocalizedError, Sendable, Equatable {
     /// Reading or writing the JSON file failed at the OS level.
     case io(String)
@@ -89,7 +98,7 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
 
     // MARK: - CredentialStore
 
-    public func password(forProfileID id: String) throws -> String {
+    public func uuid(forProfileID id: String) throws -> String {
         lock.lock()
         defer { lock.unlock() }
         let table = try loadLocked()
@@ -102,10 +111,10 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
         return plain
     }
 
-    public func setPassword(_ password: String, forProfileID id: String) throws {
+    public func setUUID(_ uuid: String, forProfileID id: String) throws {
         // Take the lock first, then dispatch on emptiness while
         // holding it. Inlining the delete path avoids the
-        // re-entrant `deletePassword` call the previous
+        // re-entrant `deleteUUID` call the previous
         // implementation made — `NSLock` is NOT reentrant, so a
         // future maintainer reordering the empty-check below the
         // `lock.lock()` would have produced an instant deadlock.
@@ -113,15 +122,15 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var table = try loadLocked()
-        if password.isEmpty {
+        if uuid.isEmpty {
             guard table.removeValue(forKey: id) != nil else { return }
         } else {
-            table[id] = Data(password.utf8).base64EncodedString()
+            table[id] = Data(uuid.utf8).base64EncodedString()
         }
         try saveLocked(table)
     }
 
-    public func deletePassword(forProfileID id: String) throws {
+    public func deleteUUID(forProfileID id: String) throws {
         lock.lock()
         defer { lock.unlock() }
         var table = try loadLocked()

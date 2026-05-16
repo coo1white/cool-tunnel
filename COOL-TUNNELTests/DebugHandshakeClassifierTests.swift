@@ -41,6 +41,10 @@ final class DebugHandshakeClassifierTests: XCTestCase {
         receivedHex: String = "",
         error: String? = nil
     ) -> DebugHandshakeReport {
+        // **v3.0.0 (sub-phase F):** wire field names renamed
+        // `naive_*` → `singbox_*`; the stdout/stderr arrays now
+        // describe the temporary sing-box child the engine spawns
+        // for the diagnostic. Streams are empty in unit tests.
         DebugHandshakeReport(
             server: "test.example.com:443",
             target: "www.example.com:443",
@@ -50,8 +54,8 @@ final class DebugHandshakeClassifierTests: XCTestCase {
             elapsedMs: 300,
             localSentHex: "",
             localReceivedHex: receivedHex,
-            naiveStdout: [],
-            naiveStderr: [],
+            singboxStdout: [],
+            singboxStderr: [],
             error: error
         )
     }

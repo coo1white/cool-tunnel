@@ -4,23 +4,16 @@
 // COOL-TUNNELTests/TunnelOrchestratorTests.swift
 //
 // H3 plumbing regression coverage. The orchestrator's
-// `hydratePasswordIfNeeded` private method delegates to the static
-// `TunnelOrchestrator.hydratePassword(_:from:)` helper specifically
+// `hydrateUUIDIfNeeded` private method delegates to the static
+// `TunnelOrchestrator.hydrateUUID(_:from:)` helper specifically
 // so the H3 contract can be unit-tested without standing up the
 // full orchestrator (which would require `CoreClient`,
 // `SystemProxyController`, `FirewallProbe`, etc.).
 //
-// Pins:
-//
-//   - Credential-store read failure becomes
-//     `OrchestratorError.credentialReadFailed`, NOT a passed-through
-//     backend error.
-//   - "No password set" (`""` from the store, per the
-//     `CredentialStore` contract) flows through unchanged — the
-//     validation gate downstream handles the empty-string case.
-//   - An already-hydrated profile is a no-op regardless of store
-//     state. The store is only consulted when the in-memory
-//     password is empty (or whitespace).
+// **v3.0.0 (sub-phase F):** call sites rename to the new
+// `uuid` / `setUUID` API. Test names use "credential" / "uuid"
+// interchangeably; the H3 / H2 / M1 semantics carry forward
+// from v2.x verbatim.
 
 import XCTest
 
@@ -39,12 +32,13 @@ final class TunnelOrchestratorTests: XCTestCase {
         return (store, credentials)
     }
 
-    private func emptyPasswordProfile(id: String = "p1") -> Profile {
+    private func emptyCredentialProfile(id: String = "p1") -> Profile {
         Profile(
             id: id,
             server: "proxy.example.com",
             username: "user",
-            password: "",
+            uuid: "",
+            reality: .empty,
             localPort: "1080"
         )
     }
@@ -55,14 +49,14 @@ final class TunnelOrchestratorTests: XCTestCase {
     /// reach the caller as `OrchestratorError.credentialReadFailed`,
     /// not the raw backend error. Pre-fix, the orchestrator
     /// collapsed the failure into the empty-string path and the
-    /// user got "please enter a password" — wrong root cause.
-    func testHydratePasswordThrowsCredentialReadFailedOnBackendError() throws {
+    /// user got "please enter a credential" — wrong root cause.
+    func testHydrateUUIDThrowsCredentialReadFailedOnBackendError() throws {
         let (store, credentials) = makeProfileStore()
         credentials.failReadsWith(.backendLocked)
 
-        var profile = emptyPasswordProfile()
+        var profile = emptyCredentialProfile()
         XCTAssertThrowsError(
-            try TunnelOrchestrator.hydratePassword(&profile, from: store)
+            try TunnelOrchestrator.hydrateUUID(&profile, from: store)
         ) { error in
             guard case OrchestratorError.credentialReadFailed(let reason) = error else {
                 return XCTFail(
@@ -82,7 +76,7 @@ final class TunnelOrchestratorTests: XCTestCase {
     /// can simulate. All three must funnel into the same wrapper
     /// case — the orchestrator does NOT distinguish them at this
     /// layer.
-    func testHydratePasswordWrapsEveryBackendErrorAsCredentialReadFailed() throws {
+    func testHydrateUUIDWrapsEveryBackendErrorAsCredentialReadFailed() throws {
         let cases: [MockCredentialStore.InjectedError] = [
             .backendLocked,
             .backendIO("disk full"),
@@ -91,9 +85,9 @@ final class TunnelOrchestratorTests: XCTestCase {
         for injected in cases {
             let (store, credentials) = makeProfileStore()
             credentials.failReadsWith(injected)
-            var profile = emptyPasswordProfile()
+            var profile = emptyCredentialProfile()
             XCTAssertThrowsError(
-                try TunnelOrchestrator.hydratePassword(&profile, from: store)
+                try TunnelOrchestrator.hydrateUUID(&profile, from: store)
             ) { error in
                 guard case OrchestratorError.credentialReadFailed = error else {
                     return XCTFail(
@@ -108,58 +102,58 @@ final class TunnelOrchestratorTests: XCTestCase {
     /// Per the `CredentialStore` contract, item-not-found returns
     /// `""` rather than throwing. The orchestrator must preserve
     /// that distinction: an empty store value flows through, leaving
-    /// the in-memory profile's empty password intact. The downstream
-    /// validation gate is what surfaces "please enter a password."
-    func testHydratePasswordTreatsEmptyAsNoPasswordSet() throws {
+    /// the in-memory profile's empty credential intact. The downstream
+    /// validation gate is what surfaces "please enter a credential."
+    func testHydrateUUIDTreatsEmptyAsNoCredentialSet() throws {
         let (store, _) = makeProfileStore()
-        var profile = emptyPasswordProfile()
-        XCTAssertNoThrow(try TunnelOrchestrator.hydratePassword(&profile, from: store))
-        XCTAssertEqual(profile.password, "", "empty store value must leave password empty")
+        var profile = emptyCredentialProfile()
+        XCTAssertNoThrow(try TunnelOrchestrator.hydrateUUID(&profile, from: store))
+        XCTAssertEqual(profile.uuid, "", "empty store value must leave credential empty")
     }
 
-    // MARK: - hydration — hits the store only when the password is empty
+    // MARK: - hydration — hits the store only when the credential is empty
 
     /// An already-hydrated profile must be a no-op. The store
     /// should not even be consulted — this is what keeps the
     /// orchestrator from accidentally re-prompting the keychain on
-    /// every Start when the password is already in hand.
-    func testHydratePasswordIsNoOpWhenPasswordAlreadyPresent() throws {
+    /// every Start when the credential is already in hand.
+    func testHydrateUUIDIsNoOpWhenCredentialAlreadyPresent() throws {
         let (store, credentials) = makeProfileStore()
         // Configure the store to throw if anyone reads from it. The
-        // test passes only if `hydratePassword` short-circuits before
+        // test passes only if `hydrateUUID` short-circuits before
         // the read.
         credentials.failReadsWith(.backendLocked)
 
-        var profile = emptyPasswordProfile()
-        profile.password = "already-set"
-        XCTAssertNoThrow(try TunnelOrchestrator.hydratePassword(&profile, from: store))
-        XCTAssertEqual(profile.password, "already-set", "in-memory password must not be touched")
+        var profile = emptyCredentialProfile()
+        profile.uuid = "already-set"
+        XCTAssertNoThrow(try TunnelOrchestrator.hydrateUUID(&profile, from: store))
+        XCTAssertEqual(profile.uuid, "already-set", "in-memory credential must not be touched")
     }
 
-    /// Whitespace-only passwords count as empty (the orchestrator
+    /// Whitespace-only credentials count as empty (the orchestrator
     /// trims before deciding whether to hydrate). Pre-trim path was
     /// silently leaking "user typed three spaces" as a valid
-    /// password until v0.1.7-ish.
-    func testHydratePasswordTreatsWhitespacePasswordAsEmpty() throws {
+    /// credential until v0.1.7-ish.
+    func testHydrateUUIDTreatsWhitespaceCredentialAsEmpty() throws {
         let (store, credentials) = makeProfileStore()
-        try credentials.setPassword("real-pwd", forProfileID: "p1")
+        try credentials.setUUID("real-uuid", forProfileID: "p1")
 
-        var profile = emptyPasswordProfile()
-        profile.password = "   "
-        XCTAssertNoThrow(try TunnelOrchestrator.hydratePassword(&profile, from: store))
+        var profile = emptyCredentialProfile()
+        profile.uuid = "   "
+        XCTAssertNoThrow(try TunnelOrchestrator.hydrateUUID(&profile, from: store))
         XCTAssertEqual(
-            profile.password, "real-pwd",
-            "whitespace-only password must trigger hydration from the store")
+            profile.uuid, "real-uuid",
+            "whitespace-only credential must trigger hydration from the store")
     }
 
-    /// When the store returns a value AND the profile's password
+    /// When the store returns a value AND the profile's credential
     /// is empty, hydration fills it in.
-    func testHydratePasswordFillsFromStoreWhenPresent() throws {
+    func testHydrateUUIDFillsFromStoreWhenPresent() throws {
         let (store, credentials) = makeProfileStore()
-        try credentials.setPassword("from-store", forProfileID: "p1")
+        try credentials.setUUID("from-store", forProfileID: "p1")
 
-        var profile = emptyPasswordProfile()
-        XCTAssertNoThrow(try TunnelOrchestrator.hydratePassword(&profile, from: store))
-        XCTAssertEqual(profile.password, "from-store")
+        var profile = emptyCredentialProfile()
+        XCTAssertNoThrow(try TunnelOrchestrator.hydrateUUID(&profile, from: store))
+        XCTAssertEqual(profile.uuid, "from-store")
     }
 }

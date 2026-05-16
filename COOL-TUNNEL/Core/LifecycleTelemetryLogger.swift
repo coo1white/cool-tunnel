@@ -157,13 +157,14 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
     /// matched case-insensitively to catch curl's occasional
     /// upper-cased error output.
     ///
-    /// The `naive` scheme is retained verbatim — v2.x-shaped
-    /// userinfo URLs may still appear in handed-down support
-    /// transcripts; sub-phase F will add `vless` once the wire
-    /// rename lands. False positives are a structural no-op (the
-    /// redactor doesn't touch non-credential URLs).
+    /// **v3.0.0 (sub-phase F):** `vless` added to the scheme
+    /// alternation alongside the historical `naive`. The `naive`
+    /// scheme stays so v2.x support transcripts handed back to
+    /// the team during the upgrade window still get scrubbed.
+    /// False positives are a structural no-op — the redactor
+    /// only fires on `scheme://userinfo@`, not on `scheme://host`.
     private static let userinfoPattern =
-        #"(?i)((?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^/\s]+@"#
+        #"(?i)((?:https?|socks(?:5h?|4a?)?|ftp|naive|vless)://)[^/\s]+@"#
 
     /// `Authorization: <scheme> <value>` and `Proxy-Authorization:`
     /// variants. Scheme stays (Bearer / Basic / Digest is useful
@@ -237,6 +238,47 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
         [^&\s\x23]+
         """#
 
+    /// **v3.0.0 (sub-phase F):** strict-JSON quoted Reality /
+    /// UUID values. Mirrors the Rust core's
+    /// `crate::redaction::REALITY_QUOTED_CRED_PATTERN` so a
+    /// rendered sing-box config blob can't surface its
+    /// `"public_key"` / `"short_id"` / `"uuid"` / Reality
+    /// private-key fields verbatim.
+    private static let realityJsonQuotedPattern = #"""
+        (?ix)
+        (
+            "(?:public[_-]?key|short[_-]?id|uuid|reality[_-]?private[_-]?key)"
+            \s* : \s*
+            "
+        )
+        (?:[^"\\]|\\.)*
+        (")
+        """#
+
+    /// **v3.0.0 (sub-phase F):** bare `k=v` / `k: v` form of the
+    /// Reality / UUID credentials. Mirrors the Rust core's
+    /// `REALITY_BARE_CRED_PATTERN`.
+    private static let realityBareCredPattern = #"""
+        (?ix)
+        (
+            "?(?:public[_-]?key|short[_-]?id|uuid|reality[_-]?private[_-]?key)"?
+            \s* [:=] \s*
+            "?
+        )
+        [^"\s,&\x23}\r\n]+
+        ("?)
+        """#
+
+    /// **v3.0.0 (sub-phase F):** bare-UUID matcher (RFC 4122
+    /// hyphenated, lower or upper case). Runs last so the longer
+    /// `<uuid-redacted>` literal doesn't clobber the tail of an
+    /// already-redacted JSON value (the strict-JSON rule above
+    /// catches `"uuid":"…"` first; this rule catches stray bare
+    /// UUIDs in unstructured engine log lines). Mirrors the Rust
+    /// core's `UUID_REGEX`.
+    private static let bareUUIDPattern =
+        #"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"#
+
     private struct RedactionRule {
         let regex: NSRegularExpression
         let template: String
@@ -281,6 +323,12 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
             make(authHeaderPattern, template: "$1***"),
             make(cookieHeaderPattern, template: "$1***"),
             make(jsonQuotedCredPattern, template: "$1***$2"),
+            // **v3.0.0 (sub-phase F):** Reality / UUID JSON-shaped
+            // values. Runs before the general bare-token rule so
+            // `"public_key":"…"` matches the strict-JSON variant
+            // rather than getting truncated by the bare-token
+            // matcher's value class.
+            make(realityJsonQuotedPattern, template: "$1***$2"),
             // Query-string rule MUST run before the bare k=v rule:
             // the bare matcher's value class doesn't include `&`,
             // so a URL like `?token=abc&user=alice` would have its
@@ -291,7 +339,18 @@ public final class LifecycleTelemetryLogger: @unchecked Sendable {
             // query string is structurally intact.
             make(queryStringCredPattern, template: "$1***"),
             make(jsonBareCredPattern, template: "$1***$2"),
+            // **v3.0.0 (sub-phase F):** bare Reality / UUID k=v
+            // form. Runs after the JSON variant so the strict
+            // quoted form gets first crack at any quoted value.
+            make(realityBareCredPattern, template: "$1***$2"),
             make(authHeaderPattern, template: "$1***"),
+            // **v3.0.0 (sub-phase F):** bare-UUID matcher fires
+            // LAST so a `"uuid":"<v>"` value already replaced
+            // with `***` by the earlier strict-JSON rule isn't
+            // re-clobbered into `<uuid-redacted>`. The `\b`
+            // boundaries keep the match away from UUID-shaped
+            // substrings embedded inside longer hex runs.
+            make(bareUUIDPattern, template: "<uuid-redacted>"),
         ]
     }()
 
