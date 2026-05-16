@@ -353,7 +353,7 @@ A mismatch means the bytes you have don't match the bytes the release cutter sig
 
 ## Building from source
 
-You'll need Xcode (with Swift 6 and the macOS 14 SDK), the Rust toolchain pinned by [core/rust-toolchain.toml](./core/rust-toolchain.toml), `cargo-deny`, and `shellcheck`.
+You'll need Xcode (with Swift 6 and the macOS 14 SDK), the Rust toolchain pinned by [core/rust-toolchain.toml](./core/rust-toolchain.toml), `cargo-deny`, `shellcheck`, and [Bun](https://bun.sh) 1.1+ (the two complex maintenance scripts — `scripts/cut_release.ts` and `scripts/fetch_naive.ts` — are TypeScript+Bun; the other scripts stay POSIX shell).
 
 ```bash
 git clone https://github.com/coo1white/cool-tunnel.git

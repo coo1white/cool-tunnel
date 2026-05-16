@@ -515,16 +515,23 @@ async function main(): Promise<void> {
     }
 }
 
+// **Test-friendly main-guard:** dispatch only when this file is
+// the process entry point. Without the guard, `bun test`
+// importing `parseArgs` from this module would run the full
+// verify-mode pipeline at import time.
+//
 // Defensive top-level: anything that escapes the main flow as a
 // thrown Error (network glitch, JSON parse failure, etc.) lands
 // here with a clean message instead of a stack trace.
-main().catch((caught) => {
-    if (caught instanceof Error) {
-        die(`fetch_naive: ${caught.message}`);
-    } else {
-        die(`fetch_naive: unknown failure: ${String(caught)}`);
-    }
-});
+if (import.meta.main) {
+    main().catch((caught) => {
+        if (caught instanceof Error) {
+            die(`fetch_naive: ${caught.message}`);
+        } else {
+            die(`fetch_naive: unknown failure: ${String(caught)}`);
+        }
+    });
+}
 
 // Re-export key helpers for unit tests.
 export { parseArgs, readManifest, sha256OfFile, type NaiveManifest };
