@@ -11,6796 +11,2312 @@ line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
 
 ## [2.0.54] — 2026-05-16 — Streamlined Debug-Handshake Log + VPS-Egress Hint Wired
 
-PR #79 (v2.0.53) added `DebugHandshakeFailureClass` + `operatorHint`
-but the orchestrator never read them, so a real VPS-egress failure
-still surfaced as six lines of hex dumps + a raw `Connection reset
-by peer`. PR #81 wires the classifier and trims the live-log shape:
-
-```
-debug handshake: ✗ elapsed=336ms
-  ↪ Server accepted credentials but cannot reach the destination.
-    This is a VPS-side issue. On the VPS run:
-    `curl -v --max-time 5 https://www.google.com/generate_204` — if it
-    RSTs the same way, your VPS's egress to that destination is blocked.
-```
-
-156/156 Swift (+18 new in `DebugHandshakeClassifierTests`), 178 Rust,
-10 Bun, 7/7 CI. No wire change — `DebugHandshakeReport` shape
-unchanged; only the orchestrator's interpretation on display.
+PR #79 (v2.0.53) shipped `DebugHandshakeFailureClass` + `operatorHint`
+but never wired them; PR #81 wires the classifier and collapses the
+debug-handshake live log from six hex-dump lines to verdict + hint.
+156 Swift (+18 new), 178 Rust, 10 Bun, 7/7 CI. No wire change.
 
 ## [2.0.53] — 2026-05-14 — VPS-Egress Classifier + TypeScript+Bun Maintenance Scripts
 
-> **Two unrelated improvements bundled in one release:**
-> **(1)** A new actionable error class — `vpsEgressBlocked` — that
-> recognises the "server accepted CONNECT but RSTed the upstream
-> pipe" signature and tells the operator to investigate VPS-side
-> egress rather than walk through the same useless retry loop.
-> **(2)** TypeScript+Bun port of the two complex maintenance
-> scripts (`cut_release` + `fetch_naive`) for cross-repo toolchain
-> consolidation. Hybrid scope: 7 simpler scripts stay POSIX shell.
-> All existing `bash scripts/X.sh` invocations continue to work
-> unchanged.
-
-### Added — `DebugHandshakeFailureClass` actionable classifier (#79)
-
-The existing reachability-only `Local Kernel / ISP / VPS`
-classifier in `TunnelOrchestrator.classifyConnectionFailure()`
-can't distinguish "the VPS dropped my CONNECT before answering"
-(unreachable / wrong server) from "the VPS accepted CONNECT, said
-HTTP 200 OK, then RSTed the upstream pipe" (egress-blocked). Both
-classify as `.localKernel` under the reachability model because
-both Apple and the VPS host respond to TCP probes.
-
-`DebugHandshakeReport` now carries a `failureClassification`
-computed property that reads the byte-level evidence the engine
-already collected and projects it onto four actionable classes:
-
-  - `connectFailed` — TCP/TLS to the proxy didn't establish
-  - `proxyAuthRejected` — server returned HTTP 407
-  - `vpsEgressBlocked` — server returned 200 OK but the upstream
-    pipe was reset/refused/closed without bytes from the target
-  - `other` — unrecognised failure shape
-
-Each class carries an `operatorHint` string with a one-line
-explanation and a specific next investigation step (e.g. for
-`vpsEgressBlocked`: "On the VPS run `curl -v --max-time 5
-https://www.google.com/generate_204` — if it RSTs the same way,
-your VPS's egress to that destination is blocked").
-
-The classifier is `nonisolated` and pure — testable from
-outside `@MainActor` and exposed for unit tests.
-
-### Refactored — TypeScript+Bun port of `cut_release` + `fetch_naive` (#80)
-
-Driver: cross-repo TS/Bun consolidation (cool-tunnel-server etc).
-Hybrid scope: only the two complex scripts that benefit most
-from real string handling + structured errors are ported. The
-other 7 scripts (`audit`, `build_rust_core`, `package_release`,
-`preflight`, `security_check`, `try_question_ratchet`, `bin/ct`)
-stay POSIX shell.
-
-**New files:**
-
-  - `scripts/cut_release.ts` — port of cut_release.sh
-  - `scripts/fetch_naive.ts` — port of fetch_naive.sh
-  - `scripts/lib/{log,spawn,paths}.ts` — shared helpers (coloured
-    output matching the `==>` / `Error:` / `ok:` bash conventions,
-    typed `Bun.spawn` wrappers, repo-root resolution)
-  - `scripts/cut_release.test.ts` + `scripts/fetch_naive.test.ts`
-    — 10 argv-parser tests across both scripts, run by the new
-    `bun-tests` CI job
-  - `package.json` + `tsconfig.json` + `bun.lock` — Bun workspace
-    with strict TS settings (noUncheckedIndexedAccess,
-    noImplicitOverride, verbatimModuleSyntax)
-
-**Backwards-compat preserved:** `scripts/cut_release.sh` and
-`scripts/fetch_naive.sh` become thin shims (~26 lines each)
-that exec `bun scripts/X.ts "$@"`. Every existing `bash scripts/X.sh`
-invocation continues to work; the shims fail loudly with
-`!!! bun not found in PATH — install with: brew install bun`
-if Bun is missing. Exit-code contracts preserved exactly.
-
-**CI:** new `bun-tests` job (7 jobs total, was 6) runs `bun
-test scripts/` on every push and PR. The `naive-pin` job +
-the daily `naive-pin-audit.yml` workflow now install Bun
-before invoking the .sh shim.
-
-**Test-friendly main-guard:** both .ts files use
-`if (import.meta.main)` to gate top-level `main()` so tests
-can import the parsers without triggering the full pipeline.
-
-### Why Hybrid (not 100% rewrite)
-
-v2.0.50 deliberately removed Ruby to **minimize** the toolchain
-to Swift + Rust + POSIX shell. A 100% TS rewrite walks that
-back; Hybrid only adds Bun where it actually buys something.
-The simple scripts are stable + tested by every release cut;
-rewriting them is churn without benefit. `bin/ct` (v2.0.52) is
-bash and doesn't need TS — it's a pure-dispatch wrapper.
-
-### Dogfood
-
-This release was cut using the new TypeScript+Bun
-`cut_release.ts` (via `bin/ct release 2.0.53` → `bash
-scripts/cut_release.sh` → `bun scripts/cut_release.ts`). The
-TS port drove its own publication pipeline end-to-end on its
-first real release.
-
-### Checks
-
-- 138/138 Swift tests pass.
-- 178/178 Rust tests pass.
-- 10/10 Bun tests pass (5 fetch_naive + 5 cut_release argv parsers).
-- GitHub Actions CI on PR #80 — 7/7 jobs green (Rust, Swift
-  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy
-  pin verification, `try?` ratchet, **bun-tests**).
-- `bunx tsc --noEmit` → clean (strict mode).
-- `shellcheck bin/ct scripts/*.sh` → clean.
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
+Two improvements bundled. PR #79 adds `DebugHandshakeFailureClass` —
+a four-case classifier (`connectFailed` / `proxyAuthRejected` /
+`vpsEgressBlocked` / `other`) on `DebugHandshakeReport` that reads
+byte-level evidence and projects it onto actionable classes with
+an `operatorHint` string per case (the egress-blocked class
+distinguishes "VPS RSTed CONNECT after 200 OK" from generic
+unreachable). PR #80 ports `cut_release.sh` and `fetch_naive.sh`
+to TypeScript+Bun for cross-repo toolchain consolidation; the
+other 7 scripts stay POSIX shell, and the .sh files become thin
+shims that exec the .ts via Bun so every existing `bash scripts/X.sh`
+invocation continues to work. New `bun-tests` CI job runs the
+10 argv-parser tests. 138 Swift, 178 Rust, 10 Bun, 7/7 CI.
 
 ## [2.0.52] — 2026-05-14 — bin/ct — Brew-Style Maintenance Wrapper
 
-> **Adds a single discoverable entry point over the existing
-> `scripts/*.sh` toolchain. The mental model collapses from
-> "remember nine script paths and their argv conventions" to
-> "run `ct <verb>` and get help." Backwards-compatible: every
-> existing `bash scripts/...` invocation keeps working.**
-
-### Added — bin/ct brew-style CLI (#78)
-
-A new wrapper at `bin/ct` collects every maintenance script
-under a single verb-based interface. Verbs map onto the
-underlying scripts:
-
-  ct doctor       → preflight + audit --strict + ratchet (composite)
-  ct preflight    → scripts/preflight.sh
-  ct audit        → scripts/audit.sh
-  ct ratchet      → scripts/try_question_ratchet.sh
-  ct release X    → scripts/cut_release.sh X
-  ct package X    → scripts/package_release.sh X
-  ct naive [...]  → scripts/fetch_naive.sh [...]
-  ct security     → scripts/security_check.sh
-  ct version      → reads core/Cargo.toml
-  ct commands     → full list
-  ct help [VERB]  → top-level help, or detail for a verb
-
-Every verb supports `--help` / `-h` and names its source
-script in the help text, so a curious reader can drill
-straight into the implementation. Each verb is a thin
-function that forwards to the underlying script with the
-conventional arg order; trust the underlying script's exit
-code, `set -E` carries the failure out.
-
-Brew-style output: `==>` blue prefix for major operations,
-`Error:` red for failures, `Warning:` yellow, `ok:` green —
-ONLY on a TTY (the colour vars resolve to empty strings
-under redirection or in CI logs, so piped output stays
-clean).
-
-### Ergonomics change
-
-Before:
-  bash scripts/preflight.sh
-  bash scripts/cut_release.sh 2.0.52
-  CT_REPIN_CONFIRM=1 bash scripts/fetch_naive.sh --repin v...
-
-After:
-  bin/ct preflight
-  bin/ct release 2.0.52
-  CT_REPIN_CONFIRM=1 bin/ct naive --repin v...
-
-Plus a new composite "is my checkout healthy?" command
-(`ct doctor`) that runs preflight + audit --strict + ratchet
-and prints one summary at the end with the list of failed
-gates (if any).
-
-### Backwards-compatible
-
-`bin/ct` is a wrapper, not a replacement. Every existing
-script under `scripts/` continues to work the way it always
-has. Every existing CI workflow, every CHANGELOG history
-entry, every `bash scripts/...` muscle-memory invocation
-keeps working unchanged.
-
-### Documentation updates
-
-- README.md "Building from source" + "Release reproducibility"
-  + naive-pin rolling sections lead with `bin/ct ...` and
-  explicitly preserve the "underlying scripts still work"
-  note.
-- CONTRIBUTING.md "Running the test sweep" simplifies from a
-  9-line shell block invoking three separate scripts to a
-  single `bin/ct doctor` call, with the manual
-  `ct preflight` / `ct audit --strict` / `ct ratchet`
-  shapes mentioned as the granular alternatives.
-
-### CI + shellcheck coverage
-
-`bin/ct` is added to BOTH the local preflight script's
-shellcheck pass AND the GitHub Actions `ShellCheck` job — so
-a future edit to the wrapper that introduces a shellcheck
-warning fails CI before it can ship. Pinned at zero
-shellcheck warnings as of this release.
-
-### Checks
-
-- `shellcheck bin/ct scripts/*.sh` → clean (zero warnings).
-- `bin/ct help`, `bin/ct commands`, `bin/ct version` all emit
-  expected output.
-- `bin/ct ratchet` end-to-end → same result as direct
-  invocation of the underlying script.
-- `bin/ct release` with no args → prints usage + exit 2
-  (brew convention for "missing required arg").
-- `bin/ct nonexistent` → red `Error:` message + exit 2.
-- Colour codes correctly omitted when stdout isn't a TTY
-  (verified via `bin/ct help | cat` — no escape sequences in
-  the piped output).
-- GitHub Actions CI on PR #78 — 6/6 jobs green.
-
-No production code change. No new tests. No new dependencies.
-No new files outside `bin/`.
+PR #78 adds `bin/ct` as a single brew-style verb-based entry
+point over the existing nine maintenance scripts (e.g.
+`bin/ct release 2.0.52` → `bash scripts/cut_release.sh`).
+Driver: collapse "remember nine script paths and their argv"
+into one discoverable interface with `--help` per verb. New
+`ct doctor` composite runs preflight + audit --strict + ratchet
+and prints one summary. Brew-style colour output (TTY-only).
+`bin/ct` is added to the ShellCheck CI gate. Every existing
+`bash scripts/...` invocation continues to work unchanged.
+6/6 CI green; no production code change.
 
 ## [2.0.51] — 2026-05-14 — OPSEC Audit: Close 6 Redaction Gaps
 
-> **Senior-engineer OPSEC audit identified six leak sites that,
-> while bounded by the existing privacy-first posture, would
-> surface operator-fingerprinting infrastructure metadata or
-> subscription tokens into the in-memory log / lifecycle-
-> telemetry file / `os_log` in specific failure modes. All six
-> fixed; 10 new regression tests (5 Rust + 5 Swift) lock in
-> the new redaction discipline.**
+OPSEC audit identified six leak sites that surface operator
+infrastructure metadata or subscription tokens into the in-memory
+log, lifecycle-telemetry JSONL file, or `os_log` under specific
+failure modes. All six fixed in PR #77. Closed: H1 subscription
+URL token leak via `url.host ?? urlString` fallback in
+`TunnelOrchestrator.importFromSubscriptionURL` (token-in-path
+shape doesn't match credential-shaped redaction patterns); H2
+subscription redirect URL logged at `privacy: .public` in
+`SubscriptionClient`; H3 transport-error description leak via
+`URLError.localizedDescription` embedding the failing URL with
+token (now redacted before both log and re-throw); M1
+operator-hostname leak in import-success log; M2 updater
+untrusted-host URL exposure (3 sites). Added L1 query-string
+credential redaction rule in both `core/src/redaction.rs` and
+`COOL-TUNNEL/Core/LifecycleTelemetryLogger.swift`:
 
-### Fixed — subscription URL token leak via fallback (H1) (#77)
+```
+([?&](token|api_key|access_token|refresh_token|session|auth|password|secret)=)[^&\s\x23]+
+→ $1***
+```
 
-`TunnelOrchestrator.importFromSubscriptionURL`:
-
-  Before: `appendInfo("subscription: fetching \(url.host ?? urlString)…")`
-  After:  `appendInfo("subscription: fetching \(host)…")`  (host-only)
-
-The `??` fallback fired when `url.host` returned nil for a URL
-that nevertheless parsed (edge cases: `https:///path`,
-`https://?token=X`, parser-permissive shapes). In that window
-the full `urlString` — which on a subscription import embeds
-the operator's token in the path
-(`/api/v1/subscription/<TOKEN>`) — went into the in-memory log
-buffer AND, via the lifecycle-telemetry pipeline, the 0600-mode
-JSONL file on disk. The redaction regex set didn't catch it
-because tokens-in-path don't match any of the credential-shaped
-patterns (no `scheme://user:pass@`, no Auth header, no JSON kv).
-
-### Fixed — subscription redirect URL logged at `privacy: .public` (H2) (#77)
-
-`SubscriptionClient.urlSession(_:task:willPerformHTTPRedirection:...)`:
-
-  Before: `"subscription redirect refused: \(absoluteString, privacy: .public)"`
-  After:  `"subscription redirect refused (target host: \(host, privacy: .public))"`
-
-A panel that issues a redirect could (incorrectly) preserve the
-subscription token in the query string of the redirect target.
-Logging `absoluteString` at `privacy: .public` surfaced the
-redirect URL into `os_log` unredacted — reachable via
-`log show`, support bundles, and screen-capture.
-
-### Fixed — transport-error description leak (H3) (#77)
-
-`SubscriptionClient.fetch()` catch blocks at lines 209 + 296:
-
-  Before: `throw .transportFailed(error.localizedDescription)`
-          (also logged at `privacy: .public`)
-  After:  let redacted = LifecycleTelemetryLogger.redact(error.localizedDescription)
-          throw .transportFailed(redacted)
-          (logs redacted form)
-
-`URLError.localizedDescription` routinely embeds the full
-failing URL: "Could not connect to https://panel.example.com/
-api/v1/subscription/<TOKEN>". The previous shape both logged
-AND re-threw the unredacted string — the throw surfaced in the
-SubscriptionImportError UI banner, AND in the engine stderr
-stream forwarded to the lifecycle-telemetry file. Wrapping
-through the canonical redaction pipeline once, before either
-log or throw, closes both leak paths.
-
-### Fixed — operator-hostname leak in import-success log (M1) (#77)
-
-`TunnelOrchestrator.importFromSubscriptionURL`:
-
-  Before: `appendInfo("subscription: imported \(primary.host):\(primary.port)")`
-  After:  `appendInfo("subscription: imported new credentials")`
-
-Same class as the v2.0.47 debug_handshake gap at a different
-callsite. The bare-hostname:port redaction rule doesn't catch
-this shape; the import-success message doesn't need the hostname
-to be useful.
-
-### Fixed — updater untrusted-host URL exposure (M2) (#77)
-
-Three sites (`GitHubTrust.swift`, `RustCoreUpdater.swift`,
-`NaiveUpdater.swift`):
-
-  Before: `"untrusted host: \(url.absoluteString, privacy: .public)"`
-  After:  `"untrusted host: \(host, privacy: .public)"`
-
-Lower risk than H1-H3 because the URL is upstream-supplied
-(from a GitHub redirect we just refused) rather than
-operator-supplied, but host-only is still the principled
-posture — the host names the rejected hop without leaking
-whatever the attacker / mis-configured panel tried to send.
-
-### Added — query-string credential redaction rule (L1) (#77)
-
-Both `core/src/redaction.rs` and `COOL-TUNNEL/Core/LifecycleTelemetryLogger.swift`
-gain a new rule for URL-query-string credentials:
-
-  `([?&](token|api_key|access_token|refresh_token|session|auth|password|secret)=)[^&\s\x23]+`
-  → `$1***`   (preserves the key, redacts the value)
-
-Order matters: the query-string rule runs BEFORE the bare-token
-kv rule in both pipelines. Without that ordering, the bare-token
-rule's value class would eat past the URL `&` separator,
-clobbering subsequent non-credential parameters. The bare-token
-rule's value-terminator class now also includes `&` and `\x23`
-(`#`, via hex-escape to avoid the regex extended-mode comment
-trap) so the bare matcher can't undo the query-string rule by
-re-matching the redacted token and eating the URL tail.
-
-### Findings the audit CLEARED — no fix needed (#77)
-
-- naive proxy invocation: credentials in config FILE path, NOT
-  argv (`core/src/supervisor/mod.rs:279`). ✓
-- curl probe stderr: already runs `redaction::redact` before
-  stringifying into the wire-shipped `notes` field
-  (`core/src/diagnostics/probe.rs:111`). ✓
-- loopback binding: `LOOPBACK_HOST = "127.0.0.1"` is the only
-  bind the `naive` config generator ever writes
-  (`core/src/config/naive_config.rs`). No `0.0.0.0` codepath
-  exists. ✓
-- Subprocess env passthrough: only PATH / HOME / LANG / LC_ALL
-  propagated; DYLD_INSERT_LIBRARIES, OBJC_DEBUG_*,
-  MallocStackLogging etc. stripped. ✓
-- curl invocation: `--` separator + `socks5h://127.0.0.1:port`
-  proxy arg — no userinfo in argv. ✓
-- Third-party analytics SDKs: grep for sentry / crashlytics /
-  amplitude / segment / datadog / firebase returns zero. ✓
-- ApplicationSupport file permissions: `RestrictedFile` writes
-  mode 0600 atomic O_CREAT|O_EXCL. ✓
-- Updater SHA + GitHubTrust + code-signing: unchanged. ✓
-
-### Checks
-
-- 138/138 Swift tests pass (was 133, +5 new query-string
-  redaction tests).
-- 178/178 Rust tests pass (was 173, +5 new query-string
-  redaction tests).
-- GitHub Actions CI on PR #77 — 6/6 jobs green.
-- `cargo clippy --all-targets -- -D warnings` clean.
-- `cargo fmt --all -- --check` clean.
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
-
-### Remaining OPSEC risks (deferred)
-
-- `Subprocess.swift` HOME env-var passthrough leaks
-  `/Users/<name>` to any inspection-time child that logs it.
-  Tightening requires auditing codesign / lipo / naive
-  --version for HOME dependencies; Subprocess.run is not on
-  the live tunnel path, so deferred.
-- Bare `hostname:port` redaction via a generic regex risks
-  false positives. Callsite-by-callsite review is the correct
-  shape; M1 in this release is the second callsite handled
-  that way (the first was the v2.0.47 debug_handshake fix).
+Ordering matters: the query-string rule runs BEFORE the bare-token
+kv rule, and the bare-token rule's value-terminator class now
+includes `&` and `\x23` so it can't re-match the redacted token
+and eat the URL tail. 138 Swift (+5 redaction tests), 178 Rust
+(+5), 6/6 CI. Subprocess HOME passthrough and bare hostname:port
+redaction stay deferred (callsite-by-callsite review remains the
+correct shape for the latter; M1 is the second callsite handled
+that way after v2.0.47).
 
 ## [2.0.50] — 2026-05-14 — Remove Ruby; Tests Target → fileSystemSynchronizedGroups
 
-> **Drops Ruby from the project toolchain. The single Ruby file
-> — `scripts/add_test_target.rb` — existed solely to register
-> new test source files into the `COOL-TUNNELTests` target's
-> explicit pbxproj entries. The tests target now uses Xcode 16's
-> native `fileSystemSynchronizedGroups` (same pattern the app
-> target has used since the project upgrade), so new test files
-> in `COOL-TUNNELTests/` auto-pick-up on the next `xcodebuild`
-> with no script invocation, no pbxproj edit, no `gem install`.
-> The project toolchain is now Swift + Rust + POSIX shell only.**
-
-### Changed — tests target adopts fileSystemSynchronizedGroups (#76)
-
-The main `COOL-TUNNEL` app target has tracked source files via
-`fileSystemSynchronizedGroups` since the Xcode 16 project upgrade
-— every Swift file under `COOL-TUNNEL/` is auto-picked-up. The
-`COOL-TUNNELTests` target was the lone holdout still using
-explicit `PBXBuildFile` + `PBXFileReference` + `PBXGroup` entries
-per test file, which is why every new test required a
-`ruby scripts/add_test_target.rb` invocation (and a
-`gem install --user-install xcodeproj` prerequisite, plus a
-`LANG=en_US.UTF-8` workaround for the gem's plist parser).
-
-This release applies the same auto-sync pattern to the tests
-target. Effect on a contributor's workflow:
-
-  Before: 1. Drop the *.swift file into COOL-TUNNELTests/
-          2. ruby scripts/add_test_target.rb
-                (after gem install --user-install xcodeproj)
-
-  After:  1. Drop the *.swift file into COOL-TUNNELTests/.
-                That's the entire step.
-
-### Removed — scripts/add_test_target.rb (132 lines)
-
-The script's only purpose was to maintain the explicit pbxproj
-entries that the synchronized-group mechanism makes obsolete.
-Project-file changes:
-
-  Removed (24 entries):
-    - 11 PBXBuildFile entries (one per *.swift in the test
-      target's Sources build phase)
-    - 11 PBXFileReference entries (the same 11 files)
-    - 1 PBXGroup "COOL-TUNNELTests" wrapping those references
-    - 1 Sources-build-phase files list (was the 11 entries)
-
-  Added (2 entries):
-    - 1 PBXFileSystemSynchronizedRootGroup for "COOL-TUNNELTests"
-      pointing at the on-disk COOL-TUNNELTests/ directory
-    - 1 fileSystemSynchronizedGroups = (...) row on the
-      COOL-TUNNELTests PBXNativeTarget, identical in shape to
-      the existing row on the COOL-TUNNEL target
-
-  Net pbxproj diff: -47 lines.
-
-### Checks
-
-- 133/133 Swift tests pass (unchanged — the synced group picked
-  up every existing test file automatically; the previously-
-  explicit 11 entries are now resolved on disk).
-- 173/173 Rust tests pass.
-- GitHub Actions CI on PR #76 — 6/6 jobs green.
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
-- `find . -name '*.rb' -not -path './target/*' -not -path
-  './.git/*'` -> zero hits.
-
-### Architecture note
-
-The language ratio question (whether the project should target
-a balanced Swift/Rust/Shell mix) was evaluated alongside this
-change. Conclusion: the existing boundary — Swift owns
-lifecycle, Rust owns the supervisor, Shell owns deployment — is
-sound. Moving more code across the boundary for cosmetic
-balance would be churn without safety value. The bar reads what
-the architecture actually is; the architecture is what we
-designed for.
+PR #76 drops Ruby from the project toolchain. The 132-line
+`scripts/add_test_target.rb` existed solely to register new test
+source files into the `COOL-TUNNELTests` target's explicit
+pbxproj entries; the tests target now uses Xcode 16's native
+`fileSystemSynchronizedGroups` (same pattern the app target
+already used), so new files in `COOL-TUNNELTests/` auto-pick-up
+with no script invocation or `gem install`. Pbxproj diff -47
+lines (24 explicit entries → 2 synchronized-group entries). The
+toolchain is now Swift + Rust + POSIX shell only. 133 Swift,
+173 Rust, 6/6 CI.
 
 ## [2.0.49] — 2026-05-14 — HTTP-407 Credential Auto-Sync
 
-> **Closes the Mac-side counterpart to cool-tunnel-server's
-> auto-sync watchdog. When the engine reports an HTTP-407-class
-> auth failure on stderr and the active profile carries a saved
-> subscription URL, the orchestrator transparently re-fetches
-> credentials from the panel and restarts against the refreshed
-> values — no operator action required. Symmetric fix to
-> cool-tunnel-server v0.1.1.**
-
-### Fixed — auto-sync credentials on HTTP-407 auth failure (#75)
-
-cool-tunnel-server's `make auto-sync` (v0.1.1) detects and
-corrects server-side credential drift (db ↔ rendered sing-box ↔
-manifest ↔ subscription endpoint) every 5 minutes. That fixes
-server-side drift, but the symmetric failure mode — server-side
-credentials rotated correctly but the macOS client still holds
-the old password in its credentials store — was invisible to the
-server-side watchdog. An incident with this shape (operator
-rotated panel password; server-side guard converged; Mac client
-kept failing 407 with no path to recovery beyond a manual
-re-import) drove this fix.
-
-**Three pieces:**
-
-1. **Profile.subscriptionURL persistence.** New optional field
-   on the wire-format Profile, populated by
-   `importFromSubscriptionURL` and persisted via ProfileStore.
-   Rust silently ignores unknown fields (no
-   `#[serde(deny_unknown_fields)]`), so the change is additive
-   in both directions. Legacy profile blobs without the field
-   decode to `nil` (regression-tested — a strict-mode decoder
-   would have wiped every saved profile on the first launch
-   after upgrade).
-
-2. **Auth-failure stderr classification.**
-   `TunnelOrchestrator.isProxyAuthFailureLine(_:)` — nonisolated,
-   pure, testable — detects HTTP-407-class chips in engine stderr.
-   Matches Chromium-style `ERR_PROXY_AUTH_*` and `ERR_TUNNEL_AUTH_*`
-   chips, the verbatim `407 Proxy Authentication Required`
-   HTTP/1.1 status line, the bare phrase "authentication
-   required", and the raw `407` substring when bounded by
-   non-alphanumeric separators (so coincidental "407" inside
-   byte counts and session IDs doesn't fire).
-
-3. **Single-flight auto-sync + restart with 30-second cooldown.**
-   `scheduleCredentialAutoSync(reason:)` runs at most one
-   in-flight attempt at a time. The cooldown ensures a
-   continuously-retrying engine can't hammer the panel — the
-   continuously-failing case (panel down + engine retry loop)
-   hits the panel at most twice per minute. The flow captures
-   `(server, username, password)` from the live profile, calls
-   `importFromSubscriptionURL` on the saved URL, and restarts
-   the engine via `stopQuiet()` + `start(mode:)` only when the
-   refreshed credentials actually differ. If upstream returns
-   the same credentials, the sync logs "no drift" and returns —
-   the auth failure was something else (revoked token,
-   server-side basic_auth misconfiguration), and the existing
-   error-classification path retains its banner.
-
-The "Profile edits applied — click Stop" banner the
-`selectedProfile` setter raises on live-session edits is
-suppressed inside the auto-sync flow — the auto-sync IS about
-to do exactly that, so the prompt would be confusing rather
-than helpful.
-
-### Lifecycle integration
-
-The credential-auto-sync task is cancelled in three places,
-matching the existing `selfHealTask` pattern:
-
-  - `shutdown()` — process exit
-  - `stop()` — user-initiated stop
-  - `switchMode(to:)` — mode change (the auto-sync's captured
-    `activeModeAtTrigger` would otherwise restart in the old
-    mode a beat after the user picked the new one)
-
-### Tests added (13 new, suite 120 → 133)
-
-`COOL-TUNNELTests/CredentialAutoSyncTests.swift`:
-
-  Profile.subscriptionURL Codable (3 tests):
-    - JSON encode/decode round-trip preserves the field
-    - Legacy JSON without `subscriptionURL` decodes to nil
-    - `Profile.default` still has nil subscriptionURL
-
-  isProxyAuthFailureLine positive cases (6 tests):
-    - ERR_PROXY_AUTH_REQUESTED (Chromium chip)
-    - ERR_TUNNEL_AUTH_FAILURE
-    - "407 Proxy Authentication Required" HTTP/1.1 status line
-    - Bare "authentication required" mid-line
-    - Raw "407" surrounded by every documented separator class
-    - Case-insensitive variants of all the above
-
-  isProxyAuthFailureLine negative cases (4 tests):
-    - Normal connect / listen / TLS-success log lines
-    - Coincidental "407" inside byte counts and session IDs
-    - Other 4xx codes (400/401/403/404) not mis-attributed
-    - Empty / whitespace / single-newline lines
-
-The single-flight + cooldown + restart shape needs the
-SubscriptionClient + CoreClient mock harness and is left to a
-follow-up integration test.
-
-### Checks
-
-- 133/133 Swift tests pass.
-- 173/173 Rust tests pass.
-- GitHub Actions CI on PR #75 — 6/6 jobs green (Rust, Swift
-  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy pin
-  verification, `try?` ratchet).
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
+PR #75 closes the Mac-side counterpart to cool-tunnel-server's
+auto-sync watchdog (server v0.1.1). When the engine reports an
+HTTP-407-class auth failure on stderr and the active profile
+carries a saved subscription URL, the orchestrator transparently
+re-fetches credentials from the panel and restarts against the
+refreshed values — no operator action. Three pieces: (1) new
+optional `Profile.subscriptionURL` field (Rust ignores unknown
+fields so additive in both directions; legacy decode to nil
+regression-tested); (2) `TunnelOrchestrator.isProxyAuthFailureLine`
+classifier matching Chromium `ERR_PROXY_AUTH_*` / `ERR_TUNNEL_AUTH_*`
+chips, the `407 Proxy Authentication Required` line, the phrase
+"authentication required", and bare `407` bounded by non-alphanums
+(so byte counts don't fire); (3) `scheduleCredentialAutoSync` —
+single-flight with 30-second cooldown so the panel sees at most
+two requests per minute under retry loops. The auto-sync
+suppresses the "Profile edits applied — click Stop" banner the
+`selectedProfile` setter raises, and is cancelled on shutdown,
+stop, and switchMode (matching the existing `selfHealTask`
+pattern). 133 Swift (+13 new), 173 Rust, 6/6 CI.
 
 ## [2.0.48] — 2026-05-14 — Beginner-Friendly README Rewrite
 
-> **Restructures `README.md` to lead with the first-time reader's
-> path without dropping any operator-facing truth. Adds two new
-> audience-targeted chapters (Quick Start, Reading this code),
-> softens the heaviest industrial section headers, and reorders
-> content beginner → operator → maintainer. Documentation-only.
-> No production-code change.**
-
-### Documented — beginner + code-learner onboarding (#74)
-
-The pre-rewrite README opened with `Repository Metadata` and
-`Operating Posture` — both correct and useful, but the wrong
-first chapter for someone who has never run the app. The rewrite
-leads with **What is Cool Tunnel?** (plain-English intro, use
-and don't-use cases, three differentiators), then **Quick Start
-(5 minutes)** for someone with a server already, then **How does
-it work? (Plain-English version)** with an ASCII diagram and a
-"why three languages" table.
-
-The Mermaid architecture diagram and the boundary-contract table
-move to **Architecture details (for the curious)** further down,
-so the curious reader can drill in without crowding the first-
-time path.
-
-### Documented — `Reading this code` chapter (#74)
-
-A new chapter targets the secondary audience the brief named:
-"noob coders and new code learners." It walks 7 actual source
-files in recommended reading order (`ContentView.swift` →
-`UIComponents.swift` → `CoolTunnelState.swift` →
-`TunnelOrchestrator.swift` → `core/src/main.rs` →
-`core/src/protocol.rs` → `scripts/cut_release.sh`) and includes a
-patterns-to-file-paths table mapping 8 idioms (Swift 6 strict
-concurrency, schema-driven UI, process supervision, JSON-over-
-stdio RPC, credential redaction, atomic file writes, defensive
-shell, code organization) to specific files. A curious reader can
-navigate the source without guessing.
-
-### Operational truth preserved verbatim
-
-- One-shell-block VPS install command — byte-identical
-- All 4 `curl` server-verification probes — unchanged
-- Mermaid architecture diagram — unchanged (moved later)
-- 3-error-layer classification table — unchanged
-- Common-failure table — unchanged
-- Uninstall sequence — unchanged
-- Credential rotation procedure — unchanged
-- `naive`-pin rolling procedure — unchanged
-- Sleep/wake + error-classification + release-reproducibility
-  quality-bar tables — unchanged
-- Every cross-link to sibling files (CHANGELOG, SUPPORT,
-  CONTRIBUTING, SECURITY, SECURITY-WEB3, Disclaimer, NOTICE,
-  NaiveProxy_Server_Setup) — preserved
-
-### Removed (deliberate)
-
-The `Repository Metadata` section (GitHub-topic keyword salad +
-redacted description copy-paste) is dropped. It served the
-GitHub repo configuration surface, not a reader of the project;
-the description field and topics on the GitHub repo page are the
-right home for those values.
-
-### Checks
-
-- README rendering: well-formed Markdown, every in-page `#anchor`
-  link resolves to a heading this commit defines.
-- Cross-file links: every linked sibling file exists at HEAD.
-- GitHub Actions CI on PR #74 — 6/6 jobs green.
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
-
-Net diff: +37 lines (521 → 558). No production-code change.
-No new tests.
+PR #74 restructures README.md to lead with the first-time
+reader's path: opens with "What is Cool Tunnel?" (plain-English
+intro), then "Quick Start (5 minutes)", then "How does it work?
+(Plain-English version)" with an ASCII diagram and a "why three
+languages" table. Mermaid diagram and boundary-contract table
+moved to "Architecture details (for the curious)" further down.
+New "Reading this code" chapter walks 7 source files in
+recommended order with a patterns-to-file-paths table mapping 8
+idioms. Repository Metadata section (GitHub-topic salad) dropped
+in favour of the GitHub repo description+topics surface. Every
+operational artefact preserved verbatim (VPS install command,
+4 curl probes, error-layer table, uninstall sequence, credential
+rotation, naive-pin rolling, all sibling-file cross-links). Net
+diff: +37 lines, README 521 → 558. 6/6 CI.
 
 ## [2.0.47] — 2026-05-14 — Telemetry Hostname Redaction
 
-> **Closes a redaction gap in the on-disk lifecycle telemetry file.
-> Debug Handshake events were carrying the operator's proxy server
-> hostname in plaintext under the `server` and `target` detail
-> fields; the Swift redaction pipeline correctly let them through
-> because they are not credential-shaped, but they should not have
-> been emitted to disk in the first place. Fix is at the call site:
-> drop both fields. The operator still sees them in the live log
-> console, exported on demand.**
-
-### Fixed — bare server hostname in debug_handshake telemetry (#73)
-
-The lifecycle telemetry file at
-`~/Library/Application Support/COOL-TUNNEL/lifecycle-telemetry.jsonl`
-(mode 0600) was carrying the operator's proxy hostname on every
-Debug Handshake click:
-
-```json
-{"event":"debug_handshake.success",
- "details":{"elapsed":"687ms",
-            "server":"<operator-hostname>:443",
-            "target":"www.google.com:443"},
- ...}
-```
-
-`LifecycleTelemetryLogger.redact(_:)` is scoped to credential-
-shaped strings — URL userinfo, Authorization headers, Cookie
-headers, JSON credential pairs. A bare `host:port` value matches
-none of those, and intentionally so: hostnames in non-sensitive
-log lines should remain readable for triage.
-
-The fix is at the emit site in `TunnelOrchestrator`, not at the
-redaction layer:
-
-```diff
--details: ["elapsed": total, "server": report.server, "target": report.target]
-+details: ["elapsed": total]
-```
-
-The operator still sees both fields in the live log surface
-(`LogConsoleView` buffer), which is exported on demand via the
-Copy / Save / Share path. The auto-persisted telemetry file no
-longer carries them.
-
-### Added — 2 regression tests
-
-`testBareHostnamePortPassesThroughUnredacted` documents the
-deliberate gap: a value shaped like `sentinel.example.invalid:443`
-is intentionally **not** redacted by `redact(_:)`. Pins the
-limitation so the next developer adding a hostname-bearing
-telemetry field sees explicitly that they need a different
-defense (drop the field, redact it explicitly, or expand the
-rule set).
-
-`testDebugHandshakeRecordDoesNotCarrySentinelServerHostname`
-is end-to-end: instantiates `LifecycleTelemetryLogger` against
-a temp file URL, emits a `debug_handshake.success` event
-through the public `record(_:mode:running:details:)` API with
-the post-fix details shape (`elapsed` only), and asserts the
-on-disk JSONL contains no sentinel hostname, no `"server"`
-key, no `"target"` key, but does contain the event name.
-
-### Checks
-
-- 120/120 Swift tests pass (118 prior + 2 new).
-- 173/173 Rust tests pass.
-- GitHub Actions CI on PR #73 — 6/6 jobs green (Rust, Swift
-  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy pin
-  verification, `try?` ratchet).
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
-
-### Notes
-
-The lifecycle-telemetry file on the operator's own machine may
-still contain historical records emitted under the old shape.
-Wiping the file (or letting it rotate via the existing
-operator-driven "clear logs" path) drops those records. This
-fix prevents new hostname-bearing records from being written;
-it does not retroactively redact existing ones.
+PR #73 closes a redaction gap in the on-disk lifecycle telemetry
+file at `~/Library/Application Support/COOL-TUNNEL/lifecycle-telemetry.jsonl`
+(mode 0600). Debug Handshake events were carrying the operator's
+proxy server hostname in plaintext under the `server` and `target`
+detail fields. The Swift redaction pipeline correctly let them
+through (it is scoped to credential-shaped strings — URL userinfo,
+Authorization headers, Cookie headers, JSON credential pairs —
+not bare `host:port` values, deliberately so for triage
+readability). Fix is at the emit site in `TunnelOrchestrator`,
+not the redaction layer: drop both fields from the details
+payload (operator still sees them in the live `LogConsoleView`
+buffer, exported on demand). 2 regression tests:
+`testBareHostnamePortPassesThroughUnredacted` pins the deliberate
+gap so the next developer adding a hostname-bearing field sees
+they need a different defense; the second is an end-to-end
+record/read-back assertion. Historical records on disk are not
+retroactively redacted; fix prevents new hostname records from
+being written. 120 Swift (+2), 173 Rust, 6/6 CI.
 
 ## [2.0.46] — 2026-05-14 — Test Fixture Convention: Alice / Bob
 
-> **Adopt the canonical Alice / Bob crypto-test convention for the
-> sample username threaded through 8 Rust + Swift test files.
-> Pure test-fixture cleanup — no production behaviour change,
-> no observable user-facing difference.**
-
-### Refactored — test-fixture username convention (#72)
-
-The repo is the public face of `coolwhite LLC` (publicly attributed
-since v2.0.26 / Cool Tunnel Server v0.0.63). The prior placeholder
-username was a name-shaped string with no canonical-test value;
-aligning with `alice` / `alice_bob` / `alice-bob` removes that in
-one sweep across the suites that previously embedded it.
-
-| Fixture (post-refactor) | Test |
-|---|---|
-| `"alice"` | every `Username::parse(...)` / `username` JSON fixture |
-| `"Alice123"` | case-preservation test |
-| `"alice@bad"` | parse-rejection (`@`) |
-| `"alice:bad"` | parse-rejection (`:`) |
-| `"alice bad"` | parse-rejection (space) |
-| `"alice.bad"` | parse-rejection (`.`) |
-| `"alice_bob"` | underscore-allowed in username |
-| `"alice-bob"` | hyphen-allowed in username |
-| `alice:hunter2` (in URLs) | redaction tests against socks/https URLs |
-
-Two expected-output URL strings (in `protocol_roundtrip.rs` +
-`naive_config.rs`) and one prose comment in `ProfileStore.swift`
-also move to the new convention so assertions and surrounding
-text stay consistent.
-
-Redaction-test assertions of the shape `!out.contains(<seed>)`
-update in lockstep with the seed change. The intent — verify the
-seed username does not pass through `redact()` — is unchanged;
-the assertion is exactly as strict against the new fixture.
-
-### Checks
-
-- 173/173 Rust tests pass (142 + 4 + 18 + 7 + 2 across all crates).
-- 118/118 Swift tests pass.
-- GitHub Actions CI on the source PR — 6/6 jobs green (Rust, Swift
-  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy pin
-  verification, `try?` ratchet).
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
-
-### Audit posture after v2.0.46
-
-Net diff: ±47 lines (one-for-one replacements; no inserted or
-deleted test cases). No production-code change. No new tests
-added — the scrub preserves every existing test and assertion
-under a different seed value.
+PR #72 adopts the canonical Alice / Bob crypto-test convention
+for the sample username across 8 Rust + Swift test files (`alice`
+for happy-path, `Alice123` for case-preservation, `alice@bad` /
+`alice:bad` / `alice bad` / `alice.bad` for parse-rejection,
+`alice_bob` and `alice-bob` for allowed punctuation, `alice:hunter2`
+in redaction URL fixtures). Driver: prior placeholder was a
+name-shaped string with no canonical-test value, and the repo
+is the public face of `coolwhite LLC`. Two expected-output URLs
+(`protocol_roundtrip.rs`, `naive_config.rs`) and one prose comment
+in `ProfileStore.swift` move in lockstep so assertions and
+surrounding text stay consistent. ±47 lines, no test cases
+added/removed, no production change. 173 Rust, 118 Swift, 6/6 CI.
 
 ## [2.0.45] — 2026-05-14 — UI Compact + Layout-Stable Pass
 
-> **Focused UI audit: seven state-driven layout-shift bugs fixed
-> and two duplicated structures consolidated across the SwiftUI
-> surface. All fixes share one technique — reserve the column /
-> frame / glyph slot unconditionally so changing state never
-> reflows neighbouring controls. Three small shared components
-> absorb the duplication. No production behaviour change.**
-
-### Fixed — toolbar reflows on Start ↔ Stop (#71)
-
-`ControlPanelView.primaryButton` toggled between "Start" and
-"Stop" labels with different glyphs (`play.fill` vs `stop.fill`),
-both rendering at different widths. The five secondary icon
-buttons to the right shifted a few pixels every time the proxy
-started or stopped. Fixed by widening `minWidth` 60 → 72 so the
-button keeps its widest natural width across both states.
-
-### Fixed — uneven icon-button row (#71)
-
-The five secondary buttons (Diagnostics / Debug Handshake /
-Latency / Developer / Settings) carried SF Symbols with very
-different intrinsic widths (`stethoscope`,
-`network.badge.shield.half.filled`, `speedometer`,
-`waveform.path.ecg`, `gear`). Default `.bordered` sizes to glyph,
-producing five visibly-different cells. New `IconBarButton`
-wrapper pins every secondary to 30×22 pt with a 16×16 inner
-image frame; the row now reads as a uniform cluster.
-
-### Fixed — Import button collapses to spinner width (#71)
-
-`ConnectionFormView`'s Subscription Import button rendered
-`Text("Import")` when idle and `ProgressView()` (much narrower)
-while importing. The whole row reflowed every time an import
-started. Replaced with a ZStack overlaying the spinner on a
-hidden-opacity but always-rendered "Import" label, so the
-button keeps its intrinsic width across the toggle.
-
-### Fixed — Developer Overlay tiles clip long status (#71)
-
-`DeveloperOverlayView` metric tiles used rigid
-`frame(width: 178, height: 86)`. Long VPS status strings
-(e.g. probe-error messages) were clipped by the fixed parent
-height even though the inner detail row had `lineLimit(2)` +
-`fixedSize(vertical)`. Split into separate width and `minHeight`
-frames so unusually long detail strings grow the tile; the
-HStack equalises all four tiles to the tallest. Added
-`accessibilityElement(.combine)` per tile so VoiceOver hears
-one cohesive utterance per metric instead of three.
-
-### Fixed — log filter capsule grows on first keystroke (#71)
-
-`LogConsoleView.filterField` only rendered the clear-X button
-when `!filter.isEmpty`. The capsule grew the moment the user
-typed one character, kicking the count and ⋯ menu sideways.
-The X is now always present at zero opacity when idle,
-hit-testing disabled, so the column is reserved
-unconditionally. Pinned the capsule to `frame(height: 22)` so
-caret rendering inside the TextField doesn't perturb the row
-height.
-
-### Fixed — menu-bar mode rows drift sideways on activate (#71)
-
-`MenuBarStatusContent` rendered the active row with
-`Label(label, systemImage: "checkmark")` and the inactive row
-with bare `Text(label)`. The icon column appeared and
-disappeared per row, shifting the mode names horizontally on
-every state change. Now always renders
-`Label { Text(label) } icon: { Image(...).opacity(isActive ? 1 : 0) }` —
-the checkmark column is permanently reserved; only its opacity
-flips.
-
-### Refactored — `VerdictPill` component extracted (#71)
-
-`SettingsView` shipped four near-identical inline OK / NG pills
-(naive verdict + picker-error, rust verdict + picker-error),
-each a ~20-line HStack with conditional colour and alpha
-background. Hoisted to a single `VerdictPill` type carrying
-`.ok` / `.ng` / `.neutral`, optional tag, optional system image,
-optional 2-line message. The mode-aware alpha (light 0.10 /
-dark 0.22) the v0.2 audit introduced for legibility against
-`.windowBackground` moves inside the component, resolved from
-`@Environment(\.colorScheme)` so light/dark transitions repaint
-without a view rebuild.
-
-### Refactored — `SummaryRow` component extracted (#71)
-
-The label/value diagnostic row was a private function on
-`SettingsView` duplicating itself for Path / Architectures /
-Version / Host slice across the naive and rust sections.
-Promoted to a `SummaryRow` type with a `labelWidth` parameter so
-the same shape serves the 70 pt machine-detail gutter and the
-90 pt binary-diagnostic gutter. `lineLimit(1) +
-truncationMode(.middle) + help() + textSelection(.enabled)`
-stay inside the component.
-
-### Checks
-
-- 118/118 tests pass.
-- GitHub Actions CI on `main` — 6/6 jobs green (Rust, Swift
-  format lint, Swift xcodebuild test, ShellCheck, NaiveProxy
-  pin verification, `try?` ratchet).
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary
-  verification, and package security checks.
-
-### Audit posture after v2.0.45
-
-Net diff across the six modified view files is **−21 lines**;
-the new `UIComponents.swift` adds 322 lines of shared
-component + `#Preview` blocks, absorbing those deletions and
-the four duplicated inline pill constructions. The structural
-discipline ("Do not rewrite large modules just for style")
-holds: `SettingsView` stays at 1,726 lines and its section
-structure is unchanged. Only the inline pills and rows
-extract.
+PR #71 closes seven state-driven layout-shift bugs and consolidates
+two duplicated structures across the SwiftUI surface. All fixes
+share one technique: reserve the column / frame / glyph slot
+unconditionally so changing state never reflows neighbouring
+controls. Fixes: toolbar reflowing on Start↔Stop (primary button
+`minWidth` 60→72); uneven five-icon secondary button row (new
+`IconBarButton` pinning every cell to 30×22 with 16×16 image
+frame); Import-button collapsing to spinner width (ZStack overlays
+spinner on hidden-opacity always-rendered Import label); Developer
+Overlay tiles clipping long status (separate width/minHeight
+frames; HStack equalises to tallest); log filter capsule growing
+on first keystroke (X always present at zero opacity, hit-testing
+disabled); menu-bar mode rows drifting sideways on activate
+(`Label`+icon-opacity instead of `Label`-vs-Text branching). Two
+extracted components: `VerdictPill` (4 inline OK/NG pills in
+SettingsView consolidated, mode-aware alpha 0.10 light / 0.22
+dark moved inside) and `SummaryRow` (label/value diagnostic row
+parameterised by `labelWidth`). Net diff −21 lines across modified
+views; new `UIComponents.swift` adds 322 lines absorbing the
+deletions plus #Preview blocks. SettingsView stays at 1,726 lines
+(no structural rewrite). 118 tests, 6/6 CI.
 
 ## [2.0.44] — 2026-05-14 — SHA Manifest CRLF Fix + LipoOutputParser Extraction
 
-> **Real-bug fix: the in-app updater's SHA-256 manifest parser
-> silently failed to verify against CRLF-formatted manifests
-> because Swift represents `\r\n` as a single extended grapheme
-> cluster. Two production sites affected (`SHAVerifier.expectedHash`
-> and `AppUpdater.verifyZipAgainstManifest`); both fixed. Plus a
-> focused refactor extracting duplicated `lipo -info` parsing,
-> with 38 new regression tests across both. Suite 80 → 118.**
-
-### Fixed — CRLF manifest silent parse failure (#70)
-
+PR #70 fixes a real bug: the in-app updater's SHA-256 manifest
+parser silently failed to verify against CRLF-formatted manifests
+because Swift's `Character` merges `\r\n` into a single extended
+grapheme cluster that equals neither single-codepoint literal.
 `SHAVerifier.expectedHash` and `AppUpdater.verifyZipAgainstManifest`
-both used:
-
-  for line in manifest.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-
-Swift's `Character` type merges the CRLF byte pair into a single
-extended grapheme cluster, and that cluster equals neither
-single-codepoint literal. So a CRLF-formatted manifest round-
-tripped as one giant line, the asset-name match never fired, and
-the function returned `nil` — surfacing in the UI as "Refusing
-to install — checksum failed" even when the bytes matched.
-
-Production-impact bound: macOS / Linux `shasum -a 256` emits LF,
-so the canonical release-cutter path was never affected by this
-release. The bug bites if an operator hand-edits a manifest on
-Windows, round-trips a manifest through a tool that rewrites
-line endings, or generates a manifest on an unusual host.
-Defensive parsing is what we want either way — fail-closed is
-fine, fail-silently is not.
-
-Fix is one character per site: `whereSeparator: \.isNewline`.
-`Character.isNewline` is true for both LF and the CRLF grapheme,
-so the splitter sees the right separators in both cases. Inline
-comment at each site explains the gotcha so a future maintainer
-doesn't re-introduce it.
-
-Caught by `SHAVerifierTests.testHandlesCrlfLineEndings`, which
-failed on first run and led directly to the fix.
-
-### Refactored — `LipoOutputParser` extracted (#69)
-
-`NaiveBinaryResolver.runLipoInfo` and `RustCoreResolver.runLipoInfo`
-each carried a near-verbatim copy of the same colon-split +
-tokenize + known-arch filter logic. Extracted the pure parsing
-step to `COOL-TUNNEL/SystemIntegration/LipoOutputParser.swift`.
-Both resolvers now delegate. The subprocess invocation stays
-in each resolver; only the string-to-set parsing moved.
-Behaviour is byte-equivalent — the known-arch allow-list now
-lives in one place rather than two.
-
-### Added — regression tests (38 new across three files)
-
-- `SHAVerifierTests.swift` (12) — known-vector SHA-256
-  (empty / "abc" / multi-chunk), missing-file throw, manifest
-  parser happy-path + corruption defenses (short hash, non-hex,
-  case normalisation, duplicate-asset first-match-wins, CRLF
-  parsing, empty manifest, missing manifest throw).
-
-- `ProxyActiveFlagTests.swift` (12) — sentinel lifecycle:
-  existence-check on fresh dir / after write / after clear,
-  `clear` idempotency on missing-file + double-clear, payload
-  round-trip across every documented mode (Smart / Global /
-  Local), atomic overwrite of existing sentinel, defensive
-  read paths (missing → nil, corrupt JSON → nil, wrong-schema
-  → nil).
-
-- `LipoOutputParserTests.swift` (14) — thin-file shapes (arm64
-  / x86_64 / arm64e / i386), fat-file shape + order-
-  independence, defensive cases (empty / whitespace / colonless
-  / multi-line / unknown-arch annotations), allow-list exact-
-  match invariant.
-
-Suite: 80 → 118.
-
-### Verified
-
-- 118/118 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
-- `bash scripts/audit.sh --strict` — `audit: PASS` across every
-  section.
-- `xcrun swift-format lint -r --strict` clean across app + tests.
-- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
-- GitHub Actions CI on `main` — 6/6 jobs green.
-- Release cutter passed every audit gate.
-
-### Audit posture after v2.0.44
-
-Every previously-flagged "remaining risk" from the v2.0.38 →
-v2.0.43 sprint is now either closed or genuinely needs
-scaffolding refactor that the project's "Do not rewrite large
-modules just for style" discipline rules out: `Subprocess.swift`
-SIGTERM/SIGKILL ladder, `CodeSignVerifier`, `FirewallProbe`.
-None are trust gates; all are bounded by existing CI gates.
-
-The CRLF bug is the legitimate find of this audit pass — caught
-by a new test against a previously-untested surface, fixed at
-both sites it appeared, regression-tested. The refactor + test
-deltas in v2.0.44 are pure infrastructure; runtime behaviour is
-byte-equivalent to v2.0.43 EXCEPT for the CRLF parse path,
-which now produces correct results instead of silent `nil`.
+both used `split(whereSeparator: { $0 == "\n" || $0 == "\r" })`,
+so a CRLF manifest round-tripped as one giant line, the
+asset-name match never fired, and the UI surfaced "Refusing to
+install — checksum failed" even when the bytes matched. Fix is
+one character per site: `whereSeparator: \.isNewline` (true for
+both LF and the CRLF grapheme). Production-impact bound:
+release-cutter `shasum -a 256` emits LF; the bug bites only on
+hand-edited or tool-rewritten manifests. Caught by
+`SHAVerifierTests.testHandlesCrlfLineEndings`. PR #69 refactors
+duplicated `lipo -info` parsing from `NaiveBinaryResolver` and
+`RustCoreResolver` into `LipoOutputParser` — the known-arch
+allow-list now lives in one place. 38 new regression tests
+across `SHAVerifierTests` (12), `ProxyActiveFlagTests` (12),
+and `LipoOutputParserTests` (14). Suite 80 → 118. 6/6 CI.
 
 ## [2.0.43] — 2026-05-14 — README: First Deployment Walkthrough + Maintenance Chapter
 
-> **README answers two questions it didn't: "how do I deploy this
-> the first time?" and "how do I maintain a running version?"**
-
-No code change. README grows +147 / −2 lines: two new H2
-sections plus a small stale-version fix in `Build From Source`.
-Bundled `naive`, `cool-tunnel-core`, and the macOS bundle's
-runtime surface are byte-equivalent to v2.0.42.
-
-### Added — First Deployment chapter
-
-Sits between Architecture Blueprint and One-Click VPS
-Installation. Names the four-step arc that a first-time operator
-needs in order, with forward-links to each existing detailed
-playbook:
-
-  1. Stand up the VPS.
-  2. Verify the VPS in isolation BEFORE installing the client.
-  3. Install the macOS client.
-  4. Verify end-to-end via Run Diagnostics + VPS Health overlay.
-
-Plus a prerequisites table (Debian VPS ≥ 1 GB RAM, DNS pointed
-at the host, ports open, root shell, Mac on macOS 14+, ~10
-minutes) so operators self-check before touching a terminal.
-
-### Added — Maintenance chapter
-
-Sits between Operator Diagnostics and Quality Assurance: Heng.
-Documents the post-deployment surface that wasn't documented
-anywhere:
-
-  - **Keeping the client up to date.** Operator-initiated in-app
-    updater. SHA-256 manifest pinning. Manual `shasum -a 256 -c`
-    verification path for security-conscious operators. The
-    "Refusing to install — checksum failed" banner and what it
-    means. Where the running version is surfaced in the UI.
-
-  - **Triaging the three error layers.** Local Kernel / ISP /
-    VPS chip → meaning → first operator click. The classifier
-    was already in the code (v2.0.29 Deterministic Error
-    Reporting); now operators can read what each chip means
-    without grepping the source.
-
-  - **Where state lives.** The three 0o600 files in Application
-    Support, their lifecycle, atomic-write discipline, Time
-    Machine exclusion. Cross-link to SECURITY-WEB3.md for the
-    full privacy model.
-
-  - **Rotating VPS credentials.** Three-step VPS-side regen +
-    Caddyfile `sed` + `docker compose restart`, then Mac
-    profile update, then Run Diagnostics to verify. Threat
-    model: operator-defined cadence, no automated policy.
-
-  - **Rolling the bundled NaiveProxy pin.** Maintainer surface,
-    not the typical operator. Documents `--repin` +
-    `CT_REPIN_CONFIRM=1` + the single-audited-commit
-    requirement. Cross-links to the daily naive-pin-audit.yml
-    workflow.
-
-  - **Common-failure quick reference.** Five-row symptom →
-    likely cause → first operator action table, pinned against
-    actual error strings the orchestrator surfaces.
-
-  - **Uninstalling cleanly.** Sequenced `rm` commands for the
-    app, Application Support state, and updater staging dirs.
-    Plus `networksetup` recovery commands for the system-proxy
-    settings in case the app crashed without reverting.
-
-### Fixed — stale version example in Build From Source
-
-`bash scripts/cut_release.sh 2.0.36` was carried forward from
-v2.0.36's release. Bumped to v2.0.42 and added a one-line note
-that pre-flight rejects any value that doesn't match
-`core/Cargo.toml` and `MARKETING_VERSION` — so a reviewer
-following the example doesn't pick a stale value and hit a
-pre-flight error they don't understand.
-
-### Verified
-
-- GitHub Actions CI on `main` — 6/6 jobs green.
-- `bash scripts/audit.sh --strict` — `audit: PASS`.
-- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
-- README section anchors all resolve to the actual section IDs
-  GitHub generates (`#first-deployment`, `#one-click-vps-installation`,
-  `#macos-installation`, `#operator-diagnostics`, `#maintenance`).
+README answers two questions it didn't: "how do I deploy this
+the first time?" and "how do I maintain a running version?"
+Two new H2 sections — First Deployment (four-step arc with
+prerequisites table) and Maintenance (in-app updater, error-layer
+triage, state-on-disk topology, VPS credential rotation, naive-pin
+rolling, common-failure quick reference, clean uninstall with
+networksetup recovery commands). Plus a small fix in Build From
+Source: `cut_release.sh 2.0.36` example bumped to v2.0.42 with
+a note that pre-flight rejects mismatched versions. No code
+change. README +147 / −2 lines. 6/6 CI.
 
 ## [2.0.42] — 2026-05-13 — Web3 Privacy Posture (Telemetry Redaction + SECURITY-WEB3.md)
 
-> **Web3-oriented privacy audit (post-v2.0.41) closed three gaps:
-> telemetry-side redaction is now at parity with the Rust core's
-> credential-redaction surface; 16 new regression tests pin the
-> categories; `SECURITY-WEB3.md` documents the threat model,
-> architectural guarantees, and known surfaces for operators
-> routing wallet / RPC traffic through the tunnel.**
-
-No production-runtime behavior change. The redaction extension
-is a defense-in-depth alignment — the Rust core's redaction
-already catches anything that flows from the engine; this
-closes the gap for strings that arrive only via Swift
-(Foundation errors, third-party library descriptions).
-Bundled `naive`, `cool-tunnel-core`, and the macOS bundle's
-runtime surface are byte-equivalent to v2.0.41.
-
-### Changed — telemetry redaction at parity with Rust core (W1)
-
-`LifecycleTelemetryLogger.redact` previously handled only
-`scheme://user:pass@host`. The Rust core's
-`cool_tunnel_core::redaction::redact` catches FOUR additional
-categories — Authorization / Proxy-Authorization headers,
-Cookie / Set-Cookie headers, JSON-shaped credentials (both
-strict-quoted and bare-token forms), and multi-`@` userinfo. A
-`URLError.localizedDescription` wrapping a userinfo URL, a
-Foundation error embedding an `Authorization:` header, or any
-third-party library error that surfaces a `"password":"…"` JSON
-dump would have reached the 0o600 telemetry file verbatim.
-
-Aligned: five sequential `NSRegularExpression` passes,
-order-equivalent to the Rust impl (strict-quoted JSON first,
-then bare-token, then a final Authorization sweep for header-
-shaped credentials inside JSON dumps). Patterns embedded as
-named constants with extended regex syntax for readability.
-
-The previous one-line regex (`replacingOccurrences` returning
-an optional) became an explicit `do/catch` with a `fatalError`
-carrying the underlying `NSError.localizedDescription` — a
-future bad regex edit now surfaces the actual compile error
-rather than a generic "regex was nil". Compile failure is a
-build-regression, not a runtime condition.
-
-### Added — telemetry redaction regression coverage (W2, 16 tests)
-
-`COOL-TUNNELTests/LifecycleTelemetryRedactionTests.swift`:
-
-  - Sanity (3): rules compile, clean line passes through, empty
-    string is safe.
-  - Userinfo (5): https, every SOCKS variant, multi-`@`
-    embedded, two URLs on one line each redacted, bare `@`
-    outside a URL untouched.
-  - Authorization (3): Bearer, Basic / Proxy-Authorization,
-    mixed-case + tight-colon variants.
-  - Cookie (1): Cookie + Set-Cookie shapes.
-  - JSON quoted (3): embedded space, embedded comma, token /
-    api_key / refresh_token variants.
-  - JSON bare (1): k=v / k: v shapes.
-
-Test names mirror the Rust-side redaction tests so contract
-drift between the two languages stays visible. Suite: 64 → 80.
-
-### Added — `SECURITY-WEB3.md` (W3)
-
-Sibling to `SECURITY.md`. Three sections, each anchored in
-code paths a reviewer can verify:
-
-  1. **Architectural guarantees** — what Cool Tunnel does NOT
-     see, ever: HTTPS CONNECT payloads, destination URLs of
-     routed traffic, telemetry endpoints (none exist),
-     credential-carrying process arguments, wallet-specific
-     state.
-
-  2. **What persists on disk** — `config.json` + `credentials.json`
-     + `lifecycle-telemetry.jsonl` (all 0o600, atomic-write,
-     Time Machine-excluded). Exact content categories.
-
-  3. **Known surfaces** — the honest section: `naive`'s stderr
-     in error paths can name destination hostnames (the
-     redaction layer strips credentials, NOT identifiers). The
-     live log and lifecycle telemetry file should be treated as
-     sensitive by an operator routing wallet/RPC traffic.
-     Explicit operator guidance: clear the log before
-     screenshotting, delete the telemetry file between sessions
-     if destination metadata for that window matters.
-
-The doc deliberately distinguishes "guaranteed" from "best-
-effort." No sweeping "secure-by-default" claims; explicit
-operator agency where the architecture can't deliver a hard
-guarantee.
-
-### Verified
-
-- 80/80 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
-- `bash scripts/audit.sh --strict` — `audit: PASS` across every
-  section.
-- `xcrun swift-format lint -r --strict` clean.
-- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
-- GitHub Actions CI on `main` — 6/6 jobs green.
-- Release cutter passed every audit gate.
-
-### What this is NOT
-
-- Not a fix for a known leak. The Rust-side redaction already
-  catches anything that flows from the engine; W1 closes the
-  gap for strings that arrive only via Swift.
-- Not wallet-aware logic. No payload inspection, no transaction
-  parsing, no destination-list maintenance. Cool Tunnel stays
-  transport-neutral.
-- Not a new telemetry endpoint. The existing
-  `lifecycle-telemetry.jsonl` is local, 0o600, never sent
-  anywhere; W1 strengthens its credential-redaction discipline.
-
-### Remaining audit-gap risks (next follow-ups — not v2.0.42-blocking)
-
-- `Subprocess.swift` timeout + SIGTERM → SIGKILL ladder
-  untested (carried from v2.0.41 — not Web3-specific).
-- `NaiveBinaryResolver` / `RustCoreResolver` path resolution
-  untested (carried from v2.0.41).
-- Configurable identifier-redaction mode for operators with
-  extreme RPC-destination sensitivity needs would impair
-  connectivity debugging; the documented operator guidance in
-  `SECURITY-WEB3.md` is the right answer for now.
+W1 brings `LifecycleTelemetryLogger.redact` to parity with the
+Rust core's `cool_tunnel_core::redaction::redact` — five
+sequential `NSRegularExpression` passes, order-equivalent to the
+Rust impl: strict-quoted JSON, then bare-token, then a final
+Authorization sweep for header-shaped credentials inside JSON
+dumps. Previously the Swift side handled only `scheme://user:pass@host`,
+so a `URLError.localizedDescription` wrapping a userinfo URL, a
+Foundation error embedding an `Authorization:` header, or a
+third-party `"password":"…"` JSON dump would have reached the
+0o600 telemetry file verbatim. Defense-in-depth — the Rust-side
+redaction already catches engine-originated strings; W1 closes
+the gap for Swift-only paths. Compile-time discipline tightened:
+the previous `replacingOccurrences` returning an optional became
+an explicit `do/catch` with `fatalError` so a bad regex edit
+surfaces the actual NSError. W2 adds 16 regression tests in
+`LifecycleTelemetryRedactionTests.swift` covering sanity,
+userinfo (https + every SOCKS variant + multi-`@` + two-URLs-on-one-line),
+Authorization (Bearer / Basic / Proxy-Authorization), Cookie /
+Set-Cookie, and JSON quoted/bare; test names mirror the Rust-side
+tests so contract drift stays visible. W3 adds `SECURITY-WEB3.md`
+sibling to `SECURITY.md` with three sections — Architectural
+guarantees (what Cool Tunnel does NOT see), What persists on
+disk (the three 0o600 files), Known surfaces (the honest section
+naming naive's stderr identifier-leakage path and operator
+guidance for wallet/RPC routing). No production-runtime change;
+bundled `naive` and `cool-tunnel-core` byte-equivalent to v2.0.41.
+Suite 64 → 80, 6/6 CI.
 
 ## [2.0.41] — 2026-05-13 — Panel Trust-Gate Regression Coverage
 
-> **`SubscriptionManifestV1.validate(now:)` and
-> `isBlockedHost(_:)` — the two security-trust gates protecting
-> the panel-import flow against counterfeit / hijacked panels —
-> were documented in code but had zero regression tests. Closed
-> with 29 new tests. Suite goes from 35 → 64.**
-
-Strictly additional test coverage. No production code change.
-Bundled `naive`, `cool-tunnel-core`, and the macOS bundle's
-runtime surface are byte-equivalent to v2.0.40.
-
-### Added — `validate(now:)` coverage (15 tests)
-
-Happy path plus one test per documented rejection rule:
-
-- `version != 1` → `unsupportedVersion`
-- empty `profiles` → `noProfiles`
-- profile flood above `maxProfiles` cap → `tooManyProfiles`
-- exactly `maxProfiles` accepted (boundary)
-- profile with blocked host → `blockedHost` (wires the SSRF gate
-  through the validator)
-- `capabilities.http3 == true` → `counterfeitCapabilities`
-- `issuedAt == 0` sentinel → `invalidIssuedAt`
-- future `issuedAt` beyond the 60 s skew window → `invalidIssuedAt`
-- future `issuedAt` inside the skew window (accepted)
-- `expiresAt < issuedAt` → `malformedExpiry`
-- validity window > 1 year → `validityTooLong`
-- validity at exactly 1 year (boundary)
-- already-expired manifest → `expired`
-- older than 7-day max age → `stale`
-- exactly maxAge old (boundary; `>` not `>=`)
-- overflow safety at `UInt64.max` (saturating-add discipline)
-
-### Added — `isBlockedHost(_:)` coverage (14 tests)
-
-SSRF protection classifier covered across every category:
-
-- Hostname forms: `localhost` (case + whitespace), `*.local`
-  mDNS, empty / whitespace-only.
-- IPv4 every RFC 1918 / loopback / link-local / unspecified
-  block: `127/8`, `10/8`, `172.16/12`, `192.168/16`, `169.254/16`,
-  `0.0.0.0`.
-- **Adjacency boundaries** — `172.15.255.255` and `172.32.0.0`
-  must remain ALLOWED. Off-by-one CIDR-classifier bugs are a
-  known anti-pattern; the boundary tests catch a regression that
-  expands or contracts the block by one octet.
-- Public IPv4 allowed (8.8.8.8, 1.1.1.1, 203.0.113.1, 11.0.0.1).
-- IPv6 bracketed literals: `[::1]`, `[::]`, `[fe80::]`,
-  `[fc00::]`, `[fd00::]` blocked; `[2001:db8::]` and
-  `[2001:4860:4860::8888]` allowed.
-- Public hostnames pass through.
-
-### Verified
-
-- 64/64 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
-- `bash scripts/audit.sh --strict` — `audit: PASS`.
-- `xcrun swift-format lint -r --strict` clean across both
-  `COOL-TUNNEL` and `COOL-TUNNELTests`.
-- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
-- GitHub Actions CI on `main` — 6/6 jobs green.
-- Release cutter passed every audit gate.
-
-### Remaining audit-gap risks (next follow-up — not v2.0.41-blocking)
-
-- `Subprocess.swift` timeout + SIGTERM → SIGKILL escalation
-  (used by AppUpdater for ditto extraction) — untested. Needs a
-  controllable subprocess fixture.
-- `NaiveBinaryResolver` / `RustCoreResolver` path resolution —
-  untested. Needs a filesystem fixture.
-
-Neither is a trust gate; both are bounded by the existing
-compile-time CI gates.
+`SubscriptionManifestV1.validate(now:)` and `isBlockedHost(_:)`
+— the two security-trust gates protecting the panel-import flow
+against counterfeit / hijacked panels — were documented in code
+but had zero regression tests. Closed with 29 new tests covering
+every documented rejection rule plus boundary cases. `validate`
+coverage (15): version != 1 → unsupportedVersion, empty profiles
+→ noProfiles, profile-cap and exact-cap boundary, blocked-host
+wiring, counterfeitCapabilities (`http3 == true`), invalidIssuedAt
+(zero sentinel + future-beyond-60s-skew + future-within-skew
+boundary), malformedExpiry, validityTooLong (with exact-1-year
+boundary), expired, stale (with exact-maxAge boundary), and
+saturating-add overflow safety at UInt64.max. `isBlockedHost`
+coverage (14): localhost (case + whitespace), `*.local` mDNS,
+every RFC 1918 / loopback / link-local / unspecified block, the
+critical adjacency boundaries `172.15.255.255` / `172.32.0.0`
+that catch off-by-one CIDR regressions, public IPv4 allowed,
+IPv6 bracketed literals (`[::1]` / `[::]` / `[fe80::]` / `[fc00::]`
+/ `[fd00::]` blocked, `[2001:db8::]` / `[2001:4860:4860::8888]`
+allowed). Strictly additional coverage — no production change.
+Suite 35 → 64, 6/6 CI.
 
 ## [2.0.40] — 2026-05-12 — Robustness Test Surface + CI Gate Refinement
 
-> **Suite goes from 16 → 35 regression tests. Annotation-aware
-> `try?` ratchet at cap 0. `cut_release.sh` unblocked from a latent
-> code-signing pre-flight. CONTRIBUTING.md documents the new gate
-> set.**
-
-Closes the post-v2.0.39 debt called out in the milestone-assessment
-gap audit. No production-code behavior change for end users —
-bundled `naive`, `cool-tunnel-core`, and the macOS bundle's runtime
-surface are byte-equivalent to v2.0.39 modulo:
-
-- Internal-visibility tweak: `TunnelOrchestrator.hydratePasswordIfNeeded`
-  now delegates to a `nonisolated static func hydratePassword(_:from:)`
-  helper used as the H3 test seam. Behaviorally identical; the
-  instance method is a one-line delegate.
-- `// try-ok: <reason>` annotations on every legitimate cleanup
-  `try?` in the Swift production tree. Comment-only; zero runtime
-  effect.
-- Two doc-comment rephrases in `ProfileStore` / `CredentialStore`
-  to drop literal `try?` tokens from prose so the ratchet's
-  grep-based count doesn't penalise historical commentary.
-
-### Added — annotation-aware `try?` ratchet (#60)
-
-- `scripts/try_question_ratchet.sh` now accepts a `// try-ok:
-  <reason>` annotation on the same line as the `try?` token OR
-  the immediately preceding line. Annotated sites are zero-cost
-  against the cap; unannotated sites count.
-- Cap lowered from 54 → 0. Every remaining `try?` in `COOL-TUNNEL/`
-  carries a one-line rationale.
-- Bi-directional enforcement: introducing or removing a `try?`
-  without updating the cap fails CI in the same commit.
-
-### Added — Swift unit-test target (#61)
-
-- New `COOL-TUNNELTests` XCTest target wired into the Xcode
-  project, the shared `COOL-TUNNEL` scheme's TestAction, and CI
-  via a new `swift-tests` job on `macos-latest`.
-- `scripts/add_test_target.rb` — Ruby + `xcodeproj` gem script
-  that adds the target idempotently; future test files just need
-  to be dropped into `COOL-TUNNELTests/` and the script re-run.
-- 16 tests at landing: `ProfileStoreTests` (6) + `MigratingCredentialStoreTests`
-  (10) pinning the H2/H3/M1 persistence-layer invariants.
-
-### Added — regression tests for the remaining audit gaps (#65)
-
-Suite grows to **35 tests**. New coverage:
-
-- `GitHubTrustTests` (11) — `isTrustedGitHubURL` exhaustively
-  (accept list + reject list including HTTP downgrade, look-alike
-  hosts, IP literals, sibling GitHub services); `GitHubRedirectGuard.download`
-  rejects untrusted URLs before any network call.
-- `ProfileStoreTests` `+2` — `deletePassword` swallows credential-
-  store failures (M1 contract) and removes the entry on success.
-- `TunnelOrchestratorTests` (6) — H3 plumbing: backend errors
-  become `OrchestratorError.credentialReadFailed`, "not stored"
-  flows through unchanged, whitespace-only counts as empty.
-
-### Fixed — `cut_release.sh` pre-flight (#62)
-
-- `scripts/audit.sh`'s `xcodebuild test (Debug)` step now passes
-  `CODE_SIGNING_ALLOWED=NO`. PR #61 activated the previously-
-  skipped step; on systems without an Apple Developer ID identity
-  the ad-hoc-signed test host crashed during bootstrap, which
-  blocked `cut_release.sh`'s PRE-FLIGHT step 4. One-flag fix
-  aligns audit.sh with the CI swift-tests job and the Release
-  build, all of which already disable code signing.
-
-### Changed — `CONTRIBUTING.md` (#62)
-
-- New "CI gates and invariants" section documents the Zero
-  `try?` rule (with concrete `do/catch` + annotation examples),
-  the test target conventions, the NaiveProxy pin model, and the
-  full six-gate green requirement.
-- Older "All four green checks" line updated to enumerate the
-  six current jobs.
-
-### Internal refactor — H3 plumbing (#65)
-
-- `TunnelOrchestrator.hydratePasswordIfNeeded` extracted into a
-  `nonisolated static func hydratePassword(_:from:)` helper. Pure
-  function over `(inout Profile, ProfileStore) throws`; throws
-  `OrchestratorError.credentialReadFailed(reason:)` on credential-
-  backend failure. The instance method one-line-delegates; the
-  static is the test seam so the H3 contract is pinnable without
-  constructing a real orchestrator.
-
-### Verified
-
-- 35/35 tests pass (`xcodebuild test … CODE_SIGNING_ALLOWED=NO`).
-- `bash scripts/audit.sh --strict` — `audit: PASS` across every
-  section: cargo fmt, clippy --pedantic -D warnings, cargo test,
-  cargo deny check, swift-format lint, xcodebuild test, naive
-  arch guard, schema sync probe, `try?` ratchet.
-- `bash scripts/try_question_ratchet.sh` — `0 unannotated == cap ✓`.
-- GitHub Actions CI on `main` — 6/6 jobs green across PRs #60,
-  #61, #62, #65.
-- Release cutter passed cargo fmt, clippy, tests, cargo-deny,
-  Swift format lint, Release build, bundled-binary verification,
-  and package security checks.
+Closes the post-v2.0.39 debt. PR #60 makes the `try?` ratchet
+annotation-aware: a `// try-ok: <reason>` annotation on the same
+line or the line immediately preceding renders the site zero-cost
+against the cap. Cap lowered from 54 to 0; every remaining `try?`
+in `COOL-TUNNEL/` carries a one-line rationale, and bi-directional
+enforcement means introducing or removing a `try?` without
+updating the cap fails CI in the same commit. PR #61 lands the
+Swift unit-test target — new `COOL-TUNNELTests` XCTest target
+wired into the project + scheme + CI (`swift-tests` job on
+macos-latest), plus `scripts/add_test_target.rb` for idempotent
+target maintenance and 16 starter tests in `ProfileStoreTests`
+(6) and `MigratingCredentialStoreTests` (10). PR #65 adds 19
+more: `GitHubTrustTests` (11) covering `isTrustedGitHubURL`
+exhaustively (HTTP downgrade, look-alike hosts, IP literals,
+sibling GitHub services) plus `GitHubRedirectGuard.download`
+rejection paths; `ProfileStoreTests` +2 for `deletePassword`
+M1 contract; `TunnelOrchestratorTests` (6) pinning H3 plumbing
+(`OrchestratorError.credentialReadFailed` mapping). Internal
+seam: `TunnelOrchestrator.hydratePasswordIfNeeded` extracted
+into a `nonisolated static func hydratePassword` helper so the
+contract is pinnable without constructing a real orchestrator.
+PR #62 fixes `cut_release.sh` pre-flight by passing
+`CODE_SIGNING_ALLOWED=NO` to the audit's `xcodebuild test` step
+(PR #61 activated the previously-skipped step; ad-hoc-signed
+test host crashed bootstrap on machines without an Apple
+Developer ID). CONTRIBUTING.md gains a "CI gates and invariants"
+section documenting the Zero `try?` rule with do/catch +
+annotation examples, the test-target conventions, and the
+six-gate green requirement. Suite 16 → 35, 6/6 CI on PRs #60/#61/#62/#65.
 
 ## [2.0.39] — 2026-05-11 — M1 Ratchet + Sweep + GitHubTrust Fail-Closed
 
-> **CI guardrail against silent `try?` regressions, first sweep
-> converting seven swallowed-error sites to logging do/catch, and
-> a fail-closed fix on the auto-updater download size cap.**
-
-Continues the robustness pass that produced v2.0.38. No protocol or
-data-format changes. Bundled `naive` unchanged. Wire- and disk-
-compatible with v2.0.38 in both directions.
-
-### Added — try? ratchet (M1, #58)
-
-- `scripts/try_question_ratchet.sh` — standalone, no Swift / Rust
-  toolchain dependency. Counts `\btry\?` in
-  `COOL-TUNNEL/**/*.swift` via `grep -rEo` and compares against
-  `TRY_QUESTION_CAP`. Hard-fails on any drift; on drop, the
-  failure message names the new value to write. The ratchet is
-  intentionally bi-directional — converting a `try?` site to
-  logging `do/catch` forces the same commit to lower the cap,
-  so wins land atomically.
-- New `try-ratchet` job in `.github/workflows/ci.yml` runs the
-  standalone on every push and PR. Lightweight; runs on
-  `ubuntu-latest`, no toolchain install.
-- `scripts/audit.sh` section 8 delegates to the standalone so
-  the local audit suite enforces the same cap.
-
-### Fixed — silent-error conversions (M1 sweep, #59)
-
-Seven `try?` sites that swallowed real (not cleanup-path) errors
-now propagate through `do { try ... } catch { Logger.warning(...) }`:
-
-- `ProfileStore.deletePassword(forProfileID:)` — credential
-  delete failure logs the profile id (was: silent → orphan
-  keychain entry on profile removal).
-- `ProfileStore.persistStripped` JSON encode — logs on failure
-  (was: silent abandon of the profile-list save).
-- `MigratingCredentialStore` × 3 — every legacy-keychain cleanup
-  (after promote, after `setPassword`, after `deletePassword`)
-  logs at info level so drift between primary and legacy
-  backends is visible to a support session.
-- `AppSupportPaths.init` — `setResourceValues(.isExcludedFromBackup)`
-  failure warns. Credentials ending up in Time Machine snapshots
-  was the silent worst case.
-
-Cap dropped from 59 to **54**. The residual is intentional
-cleanup-path `try?` (close FileHandle, sleep cancellation,
-disable system proxy on shutdown, `defer { try? FileManager.…
-removeItem(at: tempRoot) }`, etc.).
-
-### Fixed — GitHubTrust size cap bypass (M5-equivalent, #59)
-
-- `GitHubTrust.download` now fails closed when
-  `attributesOfItem` throws or the `.size` key is missing.
-  Mirrors the AppUpdater fix landed in PR #55 (v2.0.38). A
-  sandbox stat failure or a compromised mirror serving a
-  multi-GB payload would have bypassed the cap entirely under
-  the previous `if let attrs = try? …, let size = …` chain. The
-  thrown `OversizeDownloadError` carries sentinel `actual = -1`
-  on the "unreadable" path so callers can distinguish it from
-  "too large".
-
-### Verified
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `cargo test --locked --all-features`
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild Debug` — `** BUILD SUCCEEDED **`
-- `scripts/try_question_ratchet.sh` — `try? ratchet: 54 == cap ✓`
-- GitHub Actions CI on `main` (`688eb8f`) — 5/5 jobs green
-  (Rust, Swift, ShellCheck, NaiveProxy pin verification, try? ratchet)
+PR #58 adds `scripts/try_question_ratchet.sh` — a standalone
+toolchain-free script that counts `\btry\?` in `COOL-TUNNEL/**/*.swift`
+and hard-fails on any drift from `TRY_QUESTION_CAP`. Bi-directional
+by design: converting a `try?` site forces the same commit to
+lower the cap, so wins land atomically. New `try-ratchet` CI job
+runs the standalone on every push/PR, and `scripts/audit.sh`
+section 8 delegates to it. PR #59 sweeps 7 `try?` sites that
+swallowed real errors: `ProfileStore.deletePassword` /
+`ProfileStore.persistStripped` JSON encode, three
+`MigratingCredentialStore` cleanups (after promote / setPassword
+/ deletePassword), and `AppSupportPaths.init`'s
+`setResourceValues(.isExcludedFromBackup)` failure warn (silent
+worst case: credentials in Time Machine snapshots). Cap 59 → 54.
+Plus a fail-closed fix on `GitHubTrust.download` mirroring the
+AppUpdater fix in PR #55: when `attributesOfItem` throws or
+`.size` is missing, the previous `if let attrs = try? ..., let
+size = ...` short-circuited silently to no-action; the new path
+throws `OversizeDownloadError` with sentinel `actual = -1` so
+callers can distinguish unreadable from too-large. 5/5 CI jobs
+green at `688eb8f`.
 
 ## [2.0.38] — 2026-05-11 — Robustness Review Pass (H1 + H2 + H3 + M2 — M8 + L1 + L2)
 
-> **Senior-engineer-grade robustness review landed in five focused PRs:
-> supply-chain pin enforcement, credential-store error plumbing,
-> Swift-side I/O hygiene, self-heal classifier, and a redaction +
-> defense-in-depth pass.**
-
-No protocol changes. No data-format changes. Bundled `naive` and
-profile-store schema unchanged from v2.0.37. The release is
-substantively user-visible (every fix has a "what the user used to
-see vs sees now" story), but is wire- and disk-compatible with
-v2.0.37 in both directions.
-
-### Fixed — supply-chain (H1, #53)
-
-- `scripts/fetch_naive.sh` no longer auto-pins to whatever upstream
-  served at release-cut time. The committed `naive.upstream.json` is
-  now the authoritative pin. Three explicit modes:
-  - **default (verify, no network)** — SHA-256 of the bundled
-    binary vs `merged_universal_sha256` in the manifest. `< 100 ms`.
-    `cut_release.sh` now calls this; pin drift at release time is a
-    release blocker.
-  - **`--check-only` (audit)** — re-downloads at the *pinned* tag
-    and verifies every SHA still reproduces. Drift here is a
-    supply-chain signal. Wired up to a daily `naive-pin-audit.yml`
-    workflow.
-  - **`--repin [TAG]` (operator-explicit)** — requires
-    `CT_REPIN_CONFIRM=1`. Prints OLD → NEW SHA diff. Rolls the pin
-    as a single audited commit.
-- New `naive-pin` job in `ci.yml` runs the default verify on every
-  PR — catches binary/manifest drift introduced by a botched merge.
-
-### Fixed — credential storage (H2 + H3, #54)
-
-- `ProfileStore.loadProfiles()` no longer silently destroys legacy
-  passwords when the credential-store migration write fails. The
-  failed-migration ids are tracked, and the UserDefaults rewrite
-  preserves the legacy password for those profiles until the
-  underlying store is reachable again.
-- `ProfileStore.save()` does the same for credential-write failures
-  — the password stays in UserDefaults until the next save succeeds,
-  rather than being unconditionally stripped after a `try?`-swallowed
-  failure.
-- `ProfileStore.password(forProfileID:)` now throws instead of
-  collapsing every error to `""`. Item-not-found still returns `""`
-  per the `CredentialStore` contract; backend failures propagate.
-- New `OrchestratorError.credentialReadFailed(reason:)`. Three
-  call sites (Start, Debug Handshake, VPS Health overlay) and the
-  start-intent gate now distinguish "keychain locked" from "no
-  password set" and surface "Unlock the Keychain and try again."
-  instead of misrouting the user into re-typing a password against
-  a still-locked keychain.
-
-### Fixed — I/O & network hygiene (M2 + M3 + M4 + M5 + M8, #55)
-
-- **M2** — `CoreClient` engine stderr chunk decode switched from
-  `String(data:encoding: .utf8)` (returns nil on a multi-byte
-  sequence split across the 4 KiB read boundary, silently drops
-  the chunk) to `String(decoding:as: UTF8.self)` (lossy at the
-  byte-pair level, never nil). Localized engine errors (CJK,
-  Cyrillic, emoji) no longer disappear at glyph boundaries.
-- **M3** — `SubscriptionClient` body read pre-allocates the full
-  `maxBytes` (1 MB) capacity so per-byte appends never trigger
-  `Data`'s geometric realloc. Cap enforcement switched from
-  inside-loop count check to `bytes.prefix(maxBytes + 1)` +
-  post-loop check — same guarantees, deterministic termination.
-- **M4** — `AppUpdater`'s ditto-failed user error string no longer
-  interpolates raw subprocess stderr (which can include absolute
-  paths or hostile-archive text). Logged privately; generic UI
-  message.
-- **M5** — `AppUpdater` size cap is now fail-closed: the previous
-  `if let attrs = try? …, let size = …` short-circuited silently
-  to no-action when `attributesOfItem` threw or `.size` was
-  missing. Any failure to read the downloaded file's size now
-  refuses the install.
-- **M8** — `SubscriptionClient.parseURL` rejects hostless URLs
-  (`https://`, `https:///path`) at parse time instead of letting
-  the fetch fail with an opaque transport error that mistrained
-  the user into thinking the panel was unreachable.
-
-### Fixed — self-heal classifier (M7, #56)
-
-- `scheduleSelfHeal` no longer retries Start three times for
-  permanent failures (bad profile shape, missing naive binary,
-  wire-protocol drift). A new `isPermanentStartFailure(_:)`
-  classifier aborts the retry loop with a distinct
-  "permanent failure — not retrying" log line and the real
-  cause in `lastError`. Transient failures (engine race, network
-  blip, pending keychain unlock) still retry as before.
-
-### Fixed — redaction & defense-in-depth (M6 + L1 + L2, #57)
-
-- **M6** — credential-redaction split into two passes. The new
-  strict-JSON quoted-value matcher runs first and consumes any
-  non-quote char or any escaped pair until the closing quote, so a
-  password with embedded spaces (`Tr0ub4dor 3 cat-pic`) inside a
-  `naive` JSON dump is now fully redacted instead of leaking
-  everything past the first space. The existing bare-token matcher
-  runs second for `k=v` / `k: v` plain text shapes.
-- **L2** — userinfo regex changed from `[^@\s/]+@` to `[^/\s]+@` so
-  a password containing `@` (`user:p@ssword@host`) is redacted in
-  full instead of stopping at the first `@`.
-- **L1** — curl probe inserts `--` before the URL so a future
-  user-set probe target whose URL begins with `-` can't be
-  interpreted by curl as a flag.
-- Seven new tests in `redaction.rs` cover the regression paths.
-
-### Deferred
-
-- **M1** — 53 `try?` sites without logging across persistence and
-  system-integration. Sweeping mechanical pass; doesn't fit a
-  single focused PR. Tracking for a dedicated `do/catch` +
-  `Logger.warning` sweep with a `scripts/audit.sh` ratchet.
-- **L3** — id-wrap collision after 2^64 requests. Hypothetical.
-- **L4** — PAC `shExpMatch` redundancy with `dnsDomainIs`. Style.
-
-### Verified
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `cargo test --locked --all-features` — 142 passed, including 7
-  new redaction tests
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild Debug` — `** BUILD SUCCEEDED **`
-- GitHub Actions CI on `main` (`8c5231a`) — 4/4 jobs green
-  (Rust, Swift, ShellCheck, NaiveProxy pin verification)
+Five-PR robustness sweep. **H1 supply-chain (#53):** `fetch_naive.sh`
+no longer auto-pins; `naive.upstream.json` is the authoritative
+pin with three modes — default (verify, no network, < 100 ms,
+called by `cut_release.sh` so pin drift blocks the release),
+`--check-only` (re-downloads at the pinned tag, wired into a
+daily `naive-pin-audit.yml`), and `--repin [TAG]` (operator-explicit,
+requires `CT_REPIN_CONFIRM=1`, prints OLD → NEW SHA diff). New
+`naive-pin` CI job runs the default verify on every PR. **H2/H3
+credential storage (#54):** `ProfileStore.loadProfiles` and
+`save` no longer silently destroy legacy passwords on
+credential-store write failure (failed-migration ids tracked;
+UserDefaults rewrite preserves the legacy entry until the
+backend is reachable again). `password(forProfileID:)` throws
+backend failures instead of collapsing every error to `""`. New
+`OrchestratorError.credentialReadFailed(reason:)` distinguishes
+"keychain locked" from "no password set" at three call sites
+(Start, Debug Handshake, VPS Health) and the start-intent gate.
+**M2-M8 I/O hygiene (#55):** M2 — engine stderr decode switched
+from `String(data:encoding: .utf8)` (silently drops chunks on
+multi-byte glyphs split across 4 KiB read boundaries) to
+`String(decoding:as: UTF8.self)` (lossy never nil); M3 —
+`SubscriptionClient` body read pre-allocates `maxBytes` capacity
+and uses `bytes.prefix(maxBytes + 1)` + post-loop check; M4 —
+`AppUpdater` ditto-failed UI string no longer interpolates raw
+subprocess stderr (logged privately, generic message); M5 —
+size cap is now fail-closed when `attributesOfItem` throws or
+`.size` is missing; M8 — `SubscriptionClient.parseURL` rejects
+hostless URLs at parse time. **M7 self-heal classifier (#56):**
+new `isPermanentStartFailure(_:)` aborts the Start retry loop
+for bad profile shape / missing naive / wire-protocol drift with
+"permanent failure — not retrying"; transient failures still
+retry. **M6/L1/L2 redaction (#57):** M6 splits credential
+redaction into two passes — strict-JSON quoted-value matcher
+runs first and consumes any non-quote char or escaped pair
+until the closing quote, so a password with embedded spaces
+(`Tr0ub4dor 3 cat-pic`) inside a naive JSON dump is now fully
+redacted instead of leaking past the first space; existing
+bare-token matcher runs second for `k=v` / `k: v` plain text.
+L2 — userinfo regex changed from `[^@\s/]+@` to `[^/\s]+@` so
+`user:p@ssword@host` is redacted in full instead of stopping at
+the first `@`. L1 — curl probe inserts `--` before the URL so
+a probe target beginning with `-` can't be interpreted as a
+flag. 7 new tests in `redaction.rs`. M1 (53 unlogged `try?`
+sites) deferred to a dedicated sweep with ratchet (lands v2.0.39).
+142 Rust tests, 4/4 CI at `8c5231a`. Wire- and disk-compatible
+with v2.0.37 in both directions.
 
 ## [2.0.37] — 2026-05-11 — README Refresh + Bundled NaiveProxy Bump
 
-> **README surfaces v2.0.36 features that were already shipped but not
-> documented. Release-cut also refreshed the bundled `naive` from
-> upstream `v148.0.7778.96-2` to `v148.0.7778.96-5`.**
-
-Aligns the repository README with code that already shipped in v2.0.36
-but was not surfaced in the operator-facing prose. The Rust core source
-is unchanged from v2.0.36; the macOS bundle and `cool-tunnel-core`
-binary differ only because `cargo update -p cool-tunnel-core` rolled
-the version stamp from `2.0.36` to `2.0.37` and `fetch_naive.sh`
-pulled the newer upstream naive.
-
-### Bundled
-
-- `naive` upstream tag bumped from `v148.0.7778.96-2` (fetched
-  2026-05-05) to `v148.0.7778.96-5` (fetched 2026-05-11). Universal
-  sha256 pinned at `8e07a0f5ec8ccfbe15f90aeedf0c4151e56decdfe2c848f5a1372f336638aa5c`
-  in `COOL-TUNNEL/naive.upstream.json`.
-
-### Changed
-
-- Architecture diagram now labels the macOS client data plane as the
-  bundled NaiveProxy client. Removed the misleading `sing-box-class`
-  wording — the only `sing-box` mention in the tree is a comment in
-  `core/src/preflight.rs` describing the *server-side* topology of the
-  separate `cool-tunnel-server` repo, which does not belong on the
-  client diagram.
-- macOS Installation step 4 surfaces subscription-URL profile import
-  alongside manual entry, matching the import flow in
-  `COOL-TUNNEL/Views/ConnectionFormView.swift` and
-  `COOL-TUNNEL/Core/SubscriptionClient.swift`.
-- Routing modes table adds a `Mechanism` column: Smart = PAC plus the
-  user's direct-domain list (`core/src/config/pac.rs`), Global = SOCKS
-  loopback, Local = no system-wide proxy changes.
-
-### Added
-
-- New `## Operator Diagnostics` README section documents the four
-  control-panel probes wired in
-  `COOL-TUNNEL/Views/ControlPanelView.swift` and backed by
-  `RunDiagnostics`, `DebugHandshake`, `RunLatencyTest`, and
-  `ProbeServer` in `core/src/protocol.rs`. Adds a pointer to the
-  optional `DeveloperOverlayView` HUD.
-
-### Verified
-
-- `cargo fmt --check`
-- `cargo test --locked --all-features`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
-- GitHub Actions CI on `main` (`fdb8ea0`)
+README surfaces v2.0.36 features that shipped without
+operator-facing prose: architecture diagram now labels the macOS
+data plane as the bundled NaiveProxy client (drops the misleading
+`sing-box-class` wording — the only `sing-box` mention in the
+tree is a `core/src/preflight.rs` comment about the separate
+cool-tunnel-server topology); macOS Installation step 4 surfaces
+subscription-URL import alongside manual entry; routing-modes
+table gains a Mechanism column; new `Operator Diagnostics`
+section documents the four control-panel probes
+(`RunDiagnostics`, `DebugHandshake`, `RunLatencyTest`,
+`ProbeServer`) plus the optional `DeveloperOverlayView` HUD.
+Bundled `naive` rolled `v148.0.7778.96-2` → `v148.0.7778.96-5`,
+universal SHA pinned at
+`8e07a0f5ec8ccfbe15f90aeedf0c4151e56decdfe2c848f5a1372f336638aa5c`
+in `COOL-TUNNEL/naive.upstream.json`. Rust core source unchanged
+from v2.0.36; bundled binary differs only via the version stamp
+roll. CI green at `fdb8ea0`.
 
 ## [2.0.36] — 2026-05-10 — Post-CONNECT Tunnel Diagnostics
 
-> **Debug Handshake now distinguishes CONNECT acceptance from real
-> tunnel payload forwarding.**
-
-Patch release for the aggressive stealth/anti-tracking investigation.
-The previous Debug Handshake probe could report success after the local
-reference `naive` listener returned `HTTP 200` for CONNECT even if the
-first target payload bytes were reset immediately afterward.
-
-### Changed
-
-- Debug Handshake now sends a deterministic TLS `ClientHello` through
-  the established CONNECT tunnel and only reports `ok=true` after
-  target bytes are received back.
-- The GUI log now prints `connect_ok` and `post_connect_recv` so
-  operators can tell whether failure is at proxy CONNECT acceptance or
-  post-CONNECT forwarding.
-- VPS health overlay now hydrates stored profile credentials before
-  probing and labels credential/probe failures as `Probe error` instead
-  of a false `Blocked · DNS ? · TCP ?`.
-
-### Verified
-
-- `cargo fmt --check`
-- `cargo test --locked --all-features`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
-- GitHub Actions CI on `main`
+Debug Handshake now distinguishes CONNECT acceptance from real
+tunnel payload forwarding. The previous probe reported success
+when the local reference `naive` returned `HTTP 200` for CONNECT
+even if first target payload bytes were reset immediately after.
+Now sends a deterministic TLS `ClientHello` through the
+established tunnel and reports `ok=true` only after target bytes
+come back; GUI log prints `connect_ok` and `post_connect_recv` so
+operators can tell whether failure is at proxy CONNECT acceptance
+or post-CONNECT forwarding. VPS health overlay now hydrates
+stored profile credentials before probing and labels
+credential/probe failures as `Probe error` instead of a false
+`Blocked · DNS ? · TCP ?`. CI green.
 
 ## [2.0.35] — 2026-05-10 — Debug Handshake Probe
 
-> **Operators can now compare the GUI client’s reference-naive
-> handshake path against hardened server suppression logs.**
-
-Handshake-diagnostics release for servers running the aggressive
-stealth and anti-tracking policy. The GUI still delegates public
-TLS/ALPN/header fingerprinting to the bundled reference NaiveProxy
-client; this release adds a dedicated probe path that records
-wire-adjacent first-byte evidence without exposing credentials in
-process arguments.
-
-### Added
-
-- Added a `debug_handshake` Rust RPC that spawns a temporary reference
-  `naive` client, drives one deterministic local CONNECT probe through
-  it, and reports success, elapsed time, first-byte hex, and redacted
-  child-process logs.
-- Added a Debug Handshake control-panel action that validates and
-  hydrates the selected profile, resolves the bundled `naive` binary,
-  and writes the diagnostic report into the live GUI log.
-- Added Swift/Rust protocol models and round-trip coverage for the new
-  debug-handshake request and response payloads.
-
-### Changed
-
-- The diagnostic stores temporary NaiveProxy config in a `0600` file
-  and deletes it on drop, avoiding credential leakage through command
-  arguments while preserving reference-client handshake behavior.
-
-### Verified
-
-- `cargo fmt --check`
-- `cargo test`
-- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+Adds a `debug_handshake` Rust RPC that spawns a temporary
+reference `naive` client, drives one deterministic local CONNECT
+probe through it, and reports success, elapsed time, first-byte
+hex, and redacted child-process logs. New Debug Handshake
+control-panel action validates and hydrates the selected profile,
+resolves the bundled `naive`, and writes the diagnostic into the
+live GUI log. Driver: operators on servers running aggressive
+stealth/anti-tracking need a way to compare the reference-naive
+handshake path against hardened server suppression logs. The
+diagnostic stores temporary NaiveProxy config in a 0600 file
+and deletes on drop so credentials never enter command arguments
+while reference-client handshake behaviour is preserved. Swift/Rust
+protocol models plus round-trip coverage for the new request/response
+payloads. CI green.
 
 ## [2.0.34] — 2026-05-09 — Operator Start Gate
 
-> **Every Start path now rejects ambiguous profile settings before
-> the engine is touched.**
-
-Operator-certainty release for the SwiftUI control surfaces. The main
-window and menu bar now share the same startability signal, and the
-orchestrator enforces a final local guard before routing any UI intent
-to the Rust core.
-
-### Changed
-
-- Added `selectedProfileCanRequestStart` to `CoolTunnelViewState` so
-  the main control row and menu-bar mode rows agree on whether a
-  stopped tunnel can request Start.
-- Menu-bar mode rows now stay disabled while stopped until the selected
-  profile has a valid server shape, non-empty username, and valid local
-  port.
-- The primary Start button now distinguishes malformed profile shape
-  from password hydration; stored credentials are still checked only
-  after an explicit Start intent.
-- `TunnelOrchestrator.perform(_:)` now records a local-kernel rejection
-  and returns before the engine sees malformed Start or mode-switch
-  intents.
-
-### Verified
-
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
-- `cargo fmt --all -- --check`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `cargo test --locked --all-features`
-- `cargo deny check`
-- `shellcheck scripts/*.sh`
+Every Start path now rejects ambiguous profile settings before
+the engine is touched. New `selectedProfileCanRequestStart` on
+`CoolTunnelViewState` aligns the main control row and the
+menu-bar mode rows on whether a stopped tunnel can request Start;
+menu-bar mode rows stay disabled until the selected profile has
+a valid server shape, non-empty username, and valid local port.
+The primary Start button distinguishes malformed profile shape
+from password hydration (stored credentials still checked only
+after explicit Start intent). `TunnelOrchestrator.perform(_:)`
+records a local-kernel rejection and returns before the engine
+sees malformed Start or mode-switch intents. CI green.
 
 ## [2.0.33] — 2026-05-09 — Observability Certainty
 
-> **The operator can now inspect tunnel lifecycle, throughput,
-> encryption overhead, and failure layer attribution without guessing
-> which part of the path is broken.**
-
-Observability release for macOS client support sessions. The tunnel
-continues to run through the existing supervised Rust subprocess and
-NaiveProxy path; this release adds local telemetry and an optional
-developer HUD over that path.
-
-### Added
-
-- **Append-only lifecycle telemetry** at
-  `Application Support/Cool Tunnel/lifecycle-telemetry.jsonl`.
-  Each transition row includes wall-clock and monotonic microsecond
-  timestamps, mode/running state, optional failure layer, and redacted
-  details for support correlation.
-- **Developer Overlay** toggle in the control bar. The non-interactive
-  HUD shows live throughput, TLS handshake delta, VPS reachability, and
-  local kernel/`naive` PID health without blocking normal app use.
-- **Rust traffic snapshot events** from the existing connection monitor,
-  reusing the same bounded `lsof` parse that powers anomaly detection.
-
-### Changed
-
-- Error-layer language now matches the operator-facing troubleshooting
-  taxonomy: **ISP**, **VPS**, and **Local Kernel**.
-- Connection start, stop, switch, hot-swap, diagnostics, latency, engine
-  stream end, and error paths now emit deterministic lifecycle records.
-
-### Verified
-
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' build`
-- `cargo fmt --all -- --check`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `cargo test --locked --all-features`
-- `shellcheck scripts/*.sh`
+Observability release for support sessions. New append-only
+lifecycle telemetry at
+`Application Support/Cool Tunnel/lifecycle-telemetry.jsonl` —
+each transition row carries wall-clock and monotonic microsecond
+timestamps, mode/running state, optional failure layer, and
+redacted details. New Developer Overlay toggle in the control
+bar — non-interactive HUD showing live throughput, TLS handshake
+delta, VPS reachability, and local kernel/`naive` PID health.
+Rust traffic-snapshot events reuse the existing bounded lsof
+parse that powers anomaly detection. Error-layer language aligns
+with the operator-facing taxonomy: ISP / VPS / Local Kernel.
+Connection start, stop, switch, hot-swap, diagnostics, latency,
+engine stream end, and error paths now emit deterministic
+lifecycle records. CI green.
 
 ## [2.0.32] — 2026-05-09 — Declarative UI State Schema
 
-> **The SwiftUI surface now renders from an explicit, AI-friendly
-> state schema and emits named operator intents instead of hiding
-> tunnel side effects inside leaf views.**
-
-Architecture release for maintainability on the LTSC line. No engine
-protocol change; the existing connection lifecycle, self-healing, and
-menu-bar controls are preserved behind a clearer state boundary.
-
-### Added
-
-- **`CoolTunnelViewState`** as the structured SwiftUI-facing schema
-  for connection, header, controls, menu-bar, profiles, activity log,
-  diagnostics, settings, and resource descriptor state.
-- **`CoolTunnelUIState`** for local view draft state such as Settings
-  visibility and the pending mode selection.
-- **`TunnelIntent`** as the named UI-to-orchestrator command surface
-  for mode changes, Start/Stop, diagnostics, latency tests, error
-  dismissal, and log clearing.
-
-### Changed
-
-- Main-window header, control panel, menu-bar content, menu-bar glyph,
-  and log-clear action now render from the schema and dispatch intents
-  through `TunnelOrchestrator.perform(_:)`.
-- Inline documentation now links the schema, status pill, error banner,
-  and control panel to the Heng / Silent Operator invariant: views
-  describe state and operator intent; the orchestrator owns recovery,
-  retry, and system side effects.
-
-### Verified
-
-- `xcrun swift-format lint -r --strict --configuration .swift-format COOL-TUNNEL`
-- `xcodebuild -project COOL-TUNNEL.xcodeproj -scheme COOL-TUNNEL -configuration Debug -destination 'platform=macOS' build`
-- `cargo fmt --all -- --check`
-- `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- `cargo test --locked --all-features`
-- `cargo deny check`
-- `shellcheck scripts/*.sh`
+Architecture release: the SwiftUI surface now renders from an
+explicit state schema and emits named operator intents instead
+of hiding tunnel side effects inside leaf views. New
+`CoolTunnelViewState` is the structured schema for connection,
+header, controls, menu-bar, profiles, activity log, diagnostics,
+settings, and resource-descriptor state; `CoolTunnelUIState`
+holds local view draft state (Settings visibility, pending mode);
+`TunnelIntent` is the named UI-to-orchestrator command surface
+(mode changes, Start/Stop, diagnostics, latency tests, error
+dismissal, log clearing). Main-window header, control panel,
+menu-bar content + glyph, and log-clear action now render from
+the schema and dispatch through `TunnelOrchestrator.perform(_:)`.
+No engine protocol change; existing lifecycle, self-healing, and
+menu-bar controls preserved behind the cleaner boundary. CI green.
 
 ## [2.0.31] — 2026-05-09 — Self-Healing Stability + Log Pressure Hardening
 
-> **The tunnel now recovers itself from core exits, proxy drops,
-> and sleep/wake edge cases while keeping bursty logs bounded.**
-> This release hardens the app's shipped stdio/Rust-core tunnel
-> path. The repository still does not contain an
-> `NEPacketTunnelProvider` target.
-
-Stability release for long-running menu-bar sessions. Focuses on
-bounded memory under noisy child-process output, automatic recovery
-after engine loss, and lower energy posture in the GUI/log surfaces.
-
-### Added
-
-- **Self-healing orchestrator loop** for unexpected core stream
-  termination and proxy stop events. Non-stopped modes now schedule
-  retry attempts automatically instead of leaving the operator with
-  a manual "click to retry" state.
-- **Sleep/wake health verification** that probes the running proxy
-  after wake. If the proxy is no longer reachable, the orchestrator
-  clears the stale sentinel, disables the system proxy, marks the
-  mode stopped, and lets the self-healing path restart the requested
-  mode.
-- **Performance-profile-derived pressure caps** for monitor interval,
-  log flush interval, log batch size, and maximum retained log-line
-  length.
-
-### Changed
-
-- **Core stdout ingestion is now frame-bounded** at the Swift side of
-  the JSON-over-stdio protocol. The app no longer relies on unbounded
-  `AsyncLineSequence` buffering when the core emits malformed or
-  newline-free output.
-- **Rust child-log forwarding is byte-bounded** before redaction and
-  event emission. Oversized `naive` log lines are truncated with a
-  marker instead of allocating an arbitrary string.
-- **Log publishing is batched** and flushed on a short timer or when
-  enough entries accumulate. Error entries still flush immediately so
-  operator-visible failures are not delayed.
-- **Log-console auto-scroll is throttled** and uses shorter animation,
-  reducing UI churn during noisy bursts.
-
-### Verified
-
-- `bash scripts/preflight.sh` — all green locally.
-- GitHub Actions on PR #46 — Rust build/clippy/test, Swift format
-  lint, and ShellCheck all passed before merge.
+Stability release for long-running menu-bar sessions. New
+self-healing orchestrator loop schedules retry attempts on
+unexpected core stream termination and proxy stop events
+(non-stopped modes auto-retry instead of leaving "click to retry"
+state). Sleep/wake health verification probes the running proxy
+after wake; on unreachability the orchestrator clears the stale
+sentinel, disables the system proxy, marks the mode stopped, and
+lets self-healing restart the requested mode. Performance-profile-derived
+pressure caps for monitor interval, log flush interval, log batch
+size, and max retained log-line length. Core stdout ingestion is
+now frame-bounded at the Swift side (no more unbounded
+`AsyncLineSequence` buffering on malformed or newline-free output);
+Rust child-log forwarding is byte-bounded before redaction (oversized
+naive log lines truncated with marker); log publishing is batched
+on short timer (errors still flush immediately); log-console
+auto-scroll throttled with shorter animation. CI green on PR #46.
 
 ## [2.0.30] — 2026-05-09 — Defensive Input Logic ("First Scold, Then Do Good")
 
-> **The UI is now strict on input to protect the engine's
-> integrity, but kind enough to fix your messy pastes for you.**
-> No more *"Couldn't start"* failures from a typo'd port or a
-> pasted full URL — the field self-corrects what it can, the
-> Start button stays disabled until what it can't is fixed, and
-> the inline captions tell the operator exactly what to do next.
-
-Final layer of UX hardening for the `ConnectionFormView` + Direct
-Domains flow. Closes audit findings D-1 through D-4. No protocol
-or infrastructure change; existing deployments can update without
-operator action beyond the in-app Update button.
-
-### Added
-
-- **`Profile.serverValidation: ServerValidation`** — pure
-  validator on the wire-shape contract (bare host or `host:port`,
-  no scheme, no path). Returns one of:
-  - `.valid` — engine-acceptable.
-  - `.empty` — treated as "still typing" (no caption).
-  - `.hasScheme(String)` — pasted with a scheme prefix; the
-    captured string is the matched prefix verbatim.
-  - `.hasPath` — contains `/`, looks like a pasted URL.
-  - `.malformed(reason: String)` — other format failure.
-- **`Profile.localPortValue: UInt16?`** — parses `localPort` as
-  a `UInt16` ≥ 1024. `nil` for non-numeric, out-of-range, or
-  blank input. The 1024 floor is enforced because `naive`
-  binding to a well-known port requires `setuid root` privileges
-  the app neither has nor should have.
-- **`Profile.normaliseServer(_:)`** — the "Good Deed" half of
-  the input contract. Auto-strips a scheme prefix
-  (`https?://`, `naive+https://`, …) and any trailing path from
-  a pasted URL. Idempotent.
-- **Inline red captions** in `ConnectionFormView` under the
-  Server and Local port fields. Only render when there's a
-  concrete problem to fix; absent during empty / valid /
-  still-typing states.
-- **`onChange`-driven paste normaliser** on the Server field.
-  When the user pastes a full URL, the field self-corrects on
-  the next runloop tick — they see "https://example.com/path"
-  briefly, then it collapses to "example.com." Same effect on
-  the Direct Domains TextField.
-- **`@State domainAddError: String?`** in `SettingsView` to
-  surface rejection reasons inline. Pre-2.0.30 the rejection
-  was silent — the operator clicked Add, the field cleared,
-  and they assumed success.
-
-### Changed
-
-- **`Profile.isStartable`** is now gated on
-  `serverValidation == .valid` AND `localPortValue != nil`.
-  Pre-2.0.30 it only checked "non-empty after trim." A typo'd
-  port (e.g. `"abc"`) or a pasted full URL would clear the gate
-  and the failure surfaced only at engine-validate time. Now
-  the Start button stays disabled until the inputs are
-  well-formed.
-- **`SettingsView.addDomain`** routes through `Profile.normaliseServer`
-  + a new `isPlausibleDomainShape` check (loose RFC-1123 hostname
-  shape: alphanumerics + dots + hyphens, ≤ 253 chars, must
-  contain a dot, no leading/trailing dot, no empty labels).
-  Rejects scheme prefixes, path components, and single-label
-  inputs like `localhost` (the latter shouldn't be on a public
-  PAC bypass list anyway).
-
-### UX guarantees (the "ballast" you don't have to doubt)
-
-| Field | Empty | Valid | Pasted URL | Bad port | Malformed host |
-|---|---|---|---|---|---|
-| Server | no caption | no caption | auto-strips, transient caption | n/a | red caption + blocks Start |
-| Username | no caption | no caption | n/a | n/a | n/a |
-| Password | no caption | no caption | n/a | n/a | n/a |
-| Local port | no caption | no caption | n/a | red caption + blocks Start | n/a |
-| Direct domain | no caption | added silently | auto-strips, then re-validates | n/a | inline error |
-
-Start button reflects all four upstream gates at once — operator
-never has to guess which field is blocking.
-
-### Out of scope (deliberate)
-
-- **Live keystroke-by-keystroke rejection** — HIG-violating;
-  validation fires on `onSubmit` / focus-leave / Start-press,
-  not on every key.
-- **Hard-rejecting paste of valid `https://host` URLs** — better
-  UX is to normalise + show the user what was accepted.
-- **Refactoring the FSM substrate** — already in place per the
-  prior "State-Driven UI" audit.
-
-### Process note
-
-Caught a Swift 6 strict-concurrency gap during local Debug
-xcodebuild *before* opening the PR — same class of error the
-v2.0.29 PR landed and only surfaced at `cut_release.sh` time.
-Local Debug build added to the pre-PR ritual; a future hardening
-of `.github/workflows/ci.yml` to run `xcodebuild build` is the
-trigger if a fourth instance surfaces.
+Final UX hardening on `ConnectionFormView` + Direct Domains, no
+more "Couldn't start" failures from a typo'd port or pasted full
+URL. New `Profile.serverValidation: ServerValidation` is a pure
+validator on the wire-shape contract (bare host or `host:port`,
+no scheme, no path) returning `.valid` / `.empty` / `.hasScheme(String)`
+/ `.hasPath` / `.malformed(reason:)`. `Profile.localPortValue:
+UInt16?` parses `localPort` requiring ≥ 1024 (well-known ports
+require setuid root the app shouldn't have). `Profile.normaliseServer(_:)`
+auto-strips scheme prefix (`https?://`, `naive+https://`, …) and
+trailing path from a pasted URL — idempotent. Inline red
+captions under Server and Local port fields render only on
+concrete problems. `onChange`-driven paste normaliser on Server
+self-corrects to `example.com` on the next runloop tick. New
+`@State domainAddError: String?` in `SettingsView` surfaces
+rejection reasons inline. `Profile.isStartable` is now gated on
+`serverValidation == .valid` AND `localPortValue != nil` (was:
+non-empty after trim, which let typo'd ports through to engine
+validate). `SettingsView.addDomain` routes through `normaliseServer`
+plus a new `isPlausibleDomainShape` (loose RFC-1123 shape, ≤ 253
+chars, must contain a dot, no leading/trailing dot, no empty
+labels — rejects scheme prefixes, paths, and single-label like
+`localhost`). Closes audit findings D-1 through D-4. Process
+note: a Swift 6 strict-concurrency gap was caught during local
+Debug xcodebuild before the PR, same class as v2.0.29 which had
+surfaced only at `cut_release.sh` time; local Debug build added
+to the pre-PR ritual.
 
 ## [2.0.29] — 2026-05-09 — Deterministic Error Reporting (`ErrorLayer` taxonomy)
 
-> **No more *"Couldn't start Smart Mode"* with no signal whether
-> to check your wifi, your server, or your app.** When a connection
-> fails, the banner chip now pinpoints the broken node — `[Local]`,
-> `[Upstream]`, or `[VPS]` — without the operator having to run
-> `Diag` manually.
-
-Final intelligence layer added to the `v2.0.28` Seamless Recovery
-Protocol. The orchestrator now classifies connection-failure paths
-into one of three layers and renders the verdict as a chip on the
-`HeaderView` error banner. Passive — the classifier only runs on
-failure, never during normal operation; energy posture from the
-v2.0.28 audit is preserved.
-
-### Added
-
-- **`ErrorLayer` enum** — public `Sendable Codable Equatable`,
-  three cases:
-  - `.local` — the issue is on the Mac (`naive` not running, OS
-    firewall, saved credentials wrong).
-  - `.upstream` — the issue is between the Mac and the public
-    internet (ISP, Wi-Fi, captive portal, DNS).
-  - `.vps` — the issue is the user's NaiveProxy server (hostname
-    doesn't resolve, `:443` refuses, daemon rejecting handshake).
-  Carries `diagnosticLabel` (chip text) and `humanExplanation`
-  (used by `Disclaimer.md` § "Reporting issues" + the `Diag`
-  button's transcript export).
-- **`TunnelOrchestrator.lastErrorLayer: ErrorLayer?`** —
-  observable state slot; cleared on successful start / mode-switch.
-- **`TunnelOrchestrator.classifyConnectionFailure()`** — runs
-  two parallel reachability probes (Apple's NCSI endpoint for
-  general upstream + a direct TCP probe to the user's VPS
-  hostname bypassing the system proxy) with a 3-second budget.
-  Decision matrix:
-  | | Apple ✓ | Apple ✗ |
-  |---|---|---|
-  | **VPS ✓** | `.local` | `.upstream`* |
-  | **VPS ✗** | `.vps` | `.upstream` |
-  *Apple unreachable but VPS reachable typically indicates ISP
-  NCSI blocking or a captive portal that lets the user's VPS
-  through; `.upstream` is the most actionable verdict.
-- **`TunnelOrchestrator.recordClassifiedError(_:)`** — async
-  helper that runs the classifier, then records the error with
-  the resulting layer. Used by the connection-failure paths in
-  `startCore` and the wake-recovery branch of `handleSystemDidWake`.
-
-### Changed
-
-- **`recordError(_:layer:)`** signature. Existing call sites
-  unchanged in behaviour — `layer:` defaults to `nil` so plain-text
-  rendering is preserved everywhere except the connection paths.
-- **Wake-recovery path** (`handleSystemDidWake`) now calls
-  `recordClassifiedError` on failure. Pre-2.0.29 the message was
-  *"auto-recovery after sleep failed — click a mode to restart
-  manually."* The chip now provides the actionable node directly
-  (e.g. `[VPS]` after waking onto a network that blocks the
-  operator's server).
-- **`HeaderView.errorBanner`** — renders the layer chip leading
-  the banner message. `nil` layer → no chip, exact pre-2.0.29
-  rendering. Layer present → compact uppercase pill (`LOCAL`,
-  `UPSTREAM`, `VPS`) above the message in the same banner.
-  Accessibility label updated to read *"Error in `<Layer>` layer"*.
-
-### Hardcoded `.local` (no classifier needed)
-
-Three call sites are local-by-construction — running the
-classifier would only confirm what the caller already knows:
-
-- `engine failed to start: …` (orchestrator bootstrap throws)
-- `naive binary unusable / inspection failed` (binary picker)
-- `Critical: …. Auto-stopping.` (anomaly auto-stop)
-
-### Out of scope (deliberate)
-
-- **Microsecond telemetry & persistent Performance HUD** — both
-  rejected as speculative noise per the audit response. Only the
-  `ErrorLayer` taxonomy was authorised for v2.0.29.
-- **Auto-respawn on engine crash** — boundary preserved per the
-  *"system resilience, not unauthorised persistence"* framing
-  from v2.0.28.
+The connection-failure banner now pinpoints the broken node:
+`[Local]` / `[Upstream]` / `[VPS]` so operators don't have to run
+Diag manually. New `ErrorLayer` enum (public Sendable Codable
+Equatable) with three cases, each carrying `diagnosticLabel`
+(chip text) and `humanExplanation` (used by Disclaimer.md §
+"Reporting issues" + the Diag transcript export). New
+`TunnelOrchestrator.lastErrorLayer: ErrorLayer?` observable slot
+clears on successful start / mode-switch. `classifyConnectionFailure()`
+runs two parallel reachability probes — Apple's NCSI endpoint
+for general upstream + direct TCP to the user's VPS hostname
+bypassing the system proxy — with a 3-second budget; decision
+matrix: Apple✓+VPS✓ → `.local`, Apple✗+VPS✓ → `.upstream` (ISP
+NCSI block / captive portal letting user's VPS through),
+Apple✓+VPS✗ → `.vps`, Apple✗+VPS✗ → `.upstream`. New
+`recordClassifiedError(_:)` async helper used by `startCore`
+connection-failure paths and the wake-recovery branch of
+`handleSystemDidWake`. `recordError(_:layer:)` defaults
+`layer:` to nil so existing call sites are byte-equivalent.
+`HeaderView.errorBanner` renders a compact uppercase pill
+(`LOCAL` / `UPSTREAM` / `VPS`) above the message when layer is
+present; accessibility reads "Error in `<Layer>` layer".
+Three call sites are local-by-construction and skip the
+classifier (engine bootstrap throw, naive binary unusable,
+anomaly auto-stop). Passive — classifier only runs on failure;
+v2.0.28 energy posture preserved.
 
 ## [2.0.28] — 2026-05-09 — Seamless Recovery Protocol (sleep/wake survival)
 
-> **End of *"click Stop, then restart your mode."*** The system can
-> now sleep, the laptop can close, the network can vanish — when the
-> machine comes back, the proxy is already running again.
-
-Three wired fixes covering the F-1 / F-2 / F-4 audit findings.
-Pre-v2.0.28 the orchestrator only listened for `didWakeNotification`;
-on wake it sent one probe and, if the probe failed, surfaced
-*"connection became unresponsive while system slept — click Stop,
-then restart your mode"* and waited for the operator to act. The
-audit also surfaced that the lsof-based `monitor_loop` ran every 5 s
-across the entire sleep window even though no hardware state could
-change. This release closes both gaps with one cohesive recovery
-protocol.
-
-### Added
-
-- **`willSleepNotification` listener (F-1).** A new `sleepObserver`
-  in `AppDelegate` subscribes to `NSWorkspace.willSleepNotification`
-  and routes it into `TunnelOrchestrator.handleSystemWillSleep()`.
-  The orchestrator pins the active mode in `modeBeforeSleep`, flips
-  `sleepWakeState = .pausing`, and calls `stop()` to drain cleanly
-  *before* the system suspends. Local-only mode is exempt — its
-  SOCKS listener has no upstream TCP to lose during sleep.
-- **Autonomous wake recovery (F-2).** `handleSystemDidWake()` is
-  rewritten with two paths:
-  - **Path A — clean checkpoint (preferred).** If `sleepWakeState
-    == .paused` and `modeBeforeSleep` is set, the orchestrator
-    flips to `.recovering`, waits 500 ms for the network stack to
-    settle (DNS TTLs reset, route table sync, Wi-Fi association
-    complete), then re-applies the prior mode via `switchMode(to:)`.
-    End state: `.idle`, mode restored, no operator click.
-  - **Path B — missing checkpoint (fallback).** If we somehow
-    missed `willSleep` (app launched mid-sleep, or notification
-    raced the suspend), fall through to the prior probe-only
-    behaviour from v0.1.7.18 so the zombie state still surfaces.
-- **`SleepWakeState` enum.** Public `Sendable Codable` finite-state-
-  machine type owned by the orchestrator: `.idle / .pausing /
-  .paused / .recovering`. Drives the new pill labels below.
-
-### Changed
-
-- **`HeaderStatusPill` renders the recovery phases (F-2).** New
-  `sleepWakeState:` parameter (default `.idle` — old call sites
-  unchanged in behaviour). Non-`.idle` values take precedence
-  over `isRunning` / `lastError`:
-  | State | Pill colour | Pill text |
-  | --- | --- | --- |
-  | `.pausing` | amber | *Pausing for sleep…* |
-  | `.paused` | secondary | *Asleep* |
-  | `.recovering` | amber | *Recovering after wake…* |
-  Steady-state rendering (`.idle`) is unchanged.
-
-### Performance / Energy
-
-- **`monitor_loop` is now intelligent (F-4).** The 5-second lsof
-  cadence in the Rust core was unconditional pre-v2.0.28; it ran
-  through every system suspend. Because `handleSystemWillSleep`
-  now calls `stop()` (which terminates the engine subprocess
-  cleanly), the supervised PID is gone for the duration of the
-  sleep window and `monitor_loop` exits naturally on its own
-  *"supervised process gone"* check. No new protocol surface, no
-  pause/resume RPC — the existing subprocess-lifecycle gate does
-  the right thing once the engine actually shuts down on sleep.
-  Net effect: zero lsof invocations during system sleep,
-  vs. one every 5 seconds pre-fix.
-
-### Out of scope (deliberate)
-
-- **Auto-respawn on engine crash (F-3).** Maintained the existing
-  boundary: if the user explicitly stops the engine it stays
-  stopped. The recovery protocol shipped here is system-resilience
-  scoped, not unauthorised-persistence scoped.
-- **Window-occluded conditional cadence.** Behaviour change for the
-  foreground-but-occluded case is a UX call deferred until evidence
-  surfaces.
-- **Memory tightening (F-7 / F-8 / F-9).** Audit confirmed the
-  existing discipline; speculative tightening is off the table.
+End of "click Stop, then restart your mode" after sleep. F-1:
+new `sleepObserver` in `AppDelegate` subscribes to
+`NSWorkspace.willSleepNotification` and routes to
+`TunnelOrchestrator.handleSystemWillSleep()` which pins the
+active mode in `modeBeforeSleep`, flips
+`sleepWakeState = .pausing`, and calls `stop()` to drain cleanly
+before suspend (Local-only mode exempt — no upstream TCP).
+F-2: `handleSystemDidWake()` has two paths — Path A (clean
+checkpoint, preferred) flips to `.recovering`, waits 500 ms for
+DNS/routes/Wi-Fi to settle, then re-applies the prior mode via
+`switchMode(to:)` with no operator click; Path B (missing
+checkpoint, fallback) falls through to v0.1.7.18 probe-only
+behaviour so a zombie state still surfaces if `willSleep` was
+missed. New `SleepWakeState` enum (`.idle / .pausing / .paused
+/ .recovering`) drives new `HeaderStatusPill` labels — `Pausing
+for sleep…` (amber), `Asleep` (secondary), `Recovering after
+wake…` (amber). F-4: the 5-second lsof `monitor_loop` was
+unconditional pre-fix and ran through every system suspend;
+because `handleSystemWillSleep` now stops the engine cleanly,
+the supervised PID is gone and `monitor_loop` exits naturally
+on its existing "supervised process gone" check — zero lsof
+invocations during sleep vs one every 5 seconds. F-3 (engine
+auto-respawn on crash) deliberately out of scope per the
+system-resilience-not-unauthorised-persistence boundary.
 
 ## [2.0.27] — 2026-05-09 (Hotfix: NaiveUpdater self-heals stale lastInstalledTag)
 
-Single-line behaviour fix in `NaiveUpdater`. Mirrors the v2.0.24
-fix to `RustCoreUpdater` (PR #31): same defect class, same fix
-shape, different updater. No protocol or infrastructure change.
-
-### Fixed
-
-- **`NaiveUpdater.checkForUpdates` self-heals when the managed
-  `naive` binary is missing.** Pre-fix symptom (now reachable for
-  the bundled-`naive` panel rather than just the engine panel):
-  with `~/Library/Application Support/COOL-TUNNEL/naive-managed`
-  deleted (Application Support cleanup, manual delete, fresh Mac
-  with iCloud-synced UserDefaults from a previous host that did
-  install it), the panel would say *"You're on the latest version
-  (X)."* while the binary was in fact missing — because
-  `lastInstalledTag` in UserDefaults remained authoritative for
-  the currency check.
-
-  At the top of `checkForUpdates`, if the file at `installedURL`
-  doesn't exist on disk, `lastInstalledTag` is now cleared before
-  the tag-currency check runs. The next state the user sees is
-  `.available(tag)` with a real *"Update to vX.Y.Z"* button, so a
-  single click recovers the binary.
-
-- **Sister-bug discovery process.** This was a sister bug we
-  should have caught when fixing `RustCoreUpdater` in #31; the
-  audit suite doesn't yet have a codified gate for *"parity-
-  required across the three updaters (App / Naive / RustCore)."*
-  No change to the audit suite this release — single-occurrence
-  fix landed first; if a third asymmetry surfaces in a future
-  round-N review, that's the trigger for codifying the gate.
+Single-line fix mirroring the v2.0.24 `RustCoreUpdater` fix
+(PR #31) at the bundled-`naive` panel. `NaiveUpdater.checkForUpdates`
+now clears stale `lastInstalledTag` from UserDefaults at the top
+when the file at `installedURL` doesn't exist on disk, so the
+panel can no longer report "You're on the latest version" while
+the binary is missing (reproducible via Application Support
+cleanup, manual delete, or fresh Mac with iCloud-synced UserDefaults
+from a previous host). Next state is `.available(tag)` with a
+real "Update to vX.Y.Z" button. Sister bug we should have caught
+when fixing `RustCoreUpdater`; if a third updater-asymmetry
+surfaces, that's the trigger to codify a parity-required audit
+gate.
 
 ## [2.0.26] — 2026-05-08 (Licence: Apache-2.0 → AGPL-3.0-only)
 
-> **Abandoned all commercial restrictions in favor of absolute
-> transparency and open-source stewardship.**
->
-> *This project belongs to the community. coolwhite LLC chooses
-> transparency over profit, and freedom over control.*
+Strategic licence transition under the coolwhite LLC copyright
+anchor, aligned with the simultaneous switch on the upstream
+Cool Tunnel Server stack. Forward-only — every release tagged
+on or before v2.0.25 remains Apache-2.0; AGPL-3.0-only applies
+prospectively. LICENSE replaced with verbatim FSF GNU AGPLv3
+text. 67 source files (`.rs` + `.swift` under `core/` +
+`COOL-TUNNEL/`) gain an SPDX header:
 
-Strategic licence transition under the **coolwhite LLC** copyright
-anchor, aligned with the simultaneous switch on the upstream Cool
-Tunnel Server stack. Forward-only — every release tagged on or
-before `v2.0.25` remains Apache-2.0 for anyone who downloaded it;
-AGPL-3.0-only applies prospectively from this tag.
+```
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 coolwhite LLC
+// See LICENSE for full terms.
+```
 
-### Changed
-
-- **`LICENSE`** replaced with the verbatim FSF GNU Affero General
-  Public License v3 text (`gnu.org/licenses/agpl-3.0.txt`).
-- **67 source files** (`.rs` + `.swift` under `core/` + `COOL-TUNNEL/`)
-  carry an SPDX short-form header:
-
-  ```
-  // SPDX-License-Identifier: AGPL-3.0-only
-  // Copyright (C) 2026 coolwhite LLC
-  // See LICENSE for full terms.
-  ```
-
-  Modern lawyer-blessed shorthand; full preamble lives in `LICENSE`.
-- **`core/src/main.rs`** and **`COOL-TUNNEL/App/CoolTunnelApp.swift`**
-  carry an additional intent-of-licence note at the entry point:
-  *"This software is a sanctuary for personal privacy. Any
-  redistribution or modification must strictly adhere to the
-  AGPL-3.0 terms to ensure the spirit of freedom remains
-  untainted."*
-- **`core/Cargo.toml`**: `license = "AGPL-3.0-only"`,
-  `authors = ["coolwhite LLC"]`. `Cargo.lock` refreshed.
-- **`MARKETING_VERSION`** in the Xcode project: `2.0.25 → 2.0.26`
-  (Debug + Release configs).
-- **`README.md`**, **`NOTICE`**, **`Disclaimer.md`**,
-  **`COOL-TUNNEL/Views/AcknowledgementsView.swift`** rewritten to
-  reference AGPL-3.0 throughout. Bundled-component compatibility
-  table preserved (NaiveProxy BSD-3, Rust crate set MIT/Apache-2.0/
-  BSD-3/ISC/MPL-2.0 — all AGPL-3.0-compatible). Apple SDK headers
-  and SF Symbols are used by reference, not redistributed in
-  source form, so their proprietary terms do not propagate.
-
-### Why
-
-Coolwhite LLC chose the **Lighthouse** over the **Fortress**: the
-project exists to provide order and transparency, not to collect
-fees. The Apache-2.0 → AGPL-3.0 transition closes the SaaS loophole
-for any future modified server-side variant while keeping the
-client itself fully open and freely redistributable.
-
-### What this means in practice
-
-| Audience | Effect |
-| --- | --- |
-| End users | None. The `.dmg` you download still installs the same way. |
-| Forks / packagers | Modifications must be released under AGPL-3.0 with source available; AGPL § 13 obliges source-availability for modified versions run as a network service. |
-| Enterprises wanting to embed | Talk to `coolwhite LLC`. The AGPL § 13 source-availability obligation is the trigger to re-evaluate. |
+`core/Cargo.toml`: `license = "AGPL-3.0-only"`,
+`authors = ["coolwhite LLC"]`. README, NOTICE, Disclaimer,
+and AcknowledgementsView rewritten. Bundled-component
+compatibility table preserved (NaiveProxy BSD-3, Rust crate
+set MIT/Apache-2.0/BSD-3/ISC/MPL-2.0 — all AGPL-3.0-compatible);
+Apple SDK headers + SF Symbols used by reference, not
+redistributed in source form, so their proprietary terms do
+not propagate. Closes the SaaS loophole for any future
+modified server-side variant via AGPL §13 source-availability,
+keeps the client fully open. End-users see no install change;
+forks/packagers must release under AGPL-3.0 with source
+available.
 
 ## [2.0.25] — 2026-05-08 (Hotfix: subscription-imported password persists)
 
-Single fix to a silent persistence bug in the subscription-import
-flow. Without this, importing a subscription URL would briefly
-appear to work — the profile fields populated, the success banner
-fired — but the password never reached
-`~/Library/Application Support/COOL-TUNNEL/credentials.json`. On
-the next launch the profile was missing or stripped of credentials,
-forcing the user to re-enter the password by hand.
-
-### Fixed
-
-- **`TunnelOrchestrator.selectedProfile` setter — persist when id
-  not in list.** The setter was update-in-place only:
-  `if let index = profiles.firstIndex { profiles[index] = updated }`.
-  Profiles assigned through `selectedProfile =` whose id wasn't
-  already in `profiles` were silently dropped — `selectedProfileID`
-  advanced to the new id but `profiles` (and therefore
-  `profileStore.save(profiles:)` and the credential store) never
-  saw them. `importFromSubscriptionURL` falls back to
-  `UUID().uuidString` when no profile is selected; that fresh UUID
-  was never in `profiles`, the setter dropped the assignment, and
-  the imported password never persisted. Append-when-not-found
-  makes any value assigned through `selectedProfile =` durable.
-
-### How it broke
-
-Any path that assigns a brand-new `Profile` to `selectedProfile`
-when the existing selection is empty or dangling: subscription
-import (the failure mode users actually hit), and any future flow
-that wants to atomically swap in a freshly-constructed profile.
-Existing call sites — the `ConnectionFormView` field bindings and
-the `addProfile` path — assign profiles already in the array, so
-they were unaffected and remain so post-fix.
+Single fix to a silent persistence bug: importing a subscription
+URL appeared to work (fields populated, success banner) but the
+password never reached `credentials.json` and was missing on
+next launch. `TunnelOrchestrator.selectedProfile` setter was
+update-in-place only (`if let index = profiles.firstIndex`); a
+profile assigned through `selectedProfile =` whose id wasn't
+already in `profiles` got silently dropped — `selectedProfileID`
+advanced but `profiles` and the credential store never saw it.
+`importFromSubscriptionURL` falls back to `UUID().uuidString`
+when no profile is selected, so the fresh UUID was never in
+`profiles`. Append-when-not-found makes any value assigned
+through `selectedProfile =` durable. Existing call sites
+(ConnectionFormView field bindings, addProfile) assign profiles
+already in the array, so they were unaffected and remain so.
 
 ## [2.0.24] — 2026-05-08 (Hotfix: managed-engine self-heal)
 
-Single fix. The Rust Core (engine) panel in Settings could surface
-a contradictory state when the managed binary at
-`~/Library/Application Support/COOL-TUNNEL/cool-tunnel-core-managed`
-was missing — green "You're on the latest version ()." with empty
-parens *alongside* red "binary not found." Cause: a stale
-`lastInstalledTag` entry in UserDefaults claimed currency against
-a binary that no longer existed on disk, and the empty
-`currentVersion` (because `Test` had not yet run) bled through to
-the message template.
-
-### Fixed
-
-- **`RustCoreUpdater.checkForUpdates`** now self-heals: if
-  `installedURL` doesn't exist on disk, `lastInstalledTag` is
-  cleared *before* the tag-currency check runs. The next state
-  the user sees is `.available(tag)` with a real "Update to vX.Y.Z"
-  button, so a single click recovers the engine.
-- **`SettingsView.rustUpdaterMessage`** falls back to the resolved
-  release tag if `currentVersion` is empty so the parens never
-  render blank — defence in depth for any path that bypasses the
-  self-heal.
-
-### How it broke
-
-Any path that disconnects the persisted tag from the actual binary
-file: Application Support cleanup, manual delete, fresh-Mac
-UserDefaults sync via iCloud, an interrupted `update()` call that
-wrote `lastInstalledTag` before the atomic install completed.
-Pre-2.0.24, the panel was unrecoverable except via `Choose…` or
-`Reset` — neither of which is discoverable from the NG state.
+Rust Core panel in Settings could surface a contradictory state
+when the managed binary at `cool-tunnel-core-managed` was missing
+— green "You're on the latest version ()." with empty parens
+alongside red "binary not found." A stale `lastInstalledTag` in
+UserDefaults claimed currency against a non-existent binary, and
+the empty `currentVersion` bled through. `RustCoreUpdater.checkForUpdates`
+now self-heals: if `installedURL` doesn't exist on disk,
+`lastInstalledTag` is cleared before the tag-currency check, so
+the next state is `.available(tag)` with a real "Update to vX.Y.Z"
+button. Defence in depth: `SettingsView.rustUpdaterMessage` falls
+back to the resolved release tag if `currentVersion` is empty so
+parens never render blank. Pre-fix the panel was unrecoverable
+except via `Choose…` / `Reset`, neither discoverable from the
+NG state.
 
 ## [2.0.23] — 2026-05-07 (Auto-updater fix: macOS 15+/26 incompatibility)
 
-One real shipping bug. v2.0.22 (and every release before it) shipped
-an in-app updater path that silently fails on macOS 15 / 26 (Sequoia
-/ Tahoe) when the bundle is `.pkg`-installed (root-owned in
-`/Applications`). User clicks Update → admin password prompt
-appears → user enters it → osascript reports success → app
-terminates expecting helper to swap and relaunch → **helper
-never actually runs** → on manual restart the user is back on the
-old version with no signal anything went wrong.
-
-### Fixed
-
-- **AppUpdater silent failure on root-owned bundles in macOS 15+/26.**
-  Previously, AppUpdater ran the entire relaunch helper inside a
-  privileged shell:
-  ```
-  osascript -e 'do shell script "/bin/bash wrapper.sh"
-                with administrator privileges'
-  ```
-  where `wrapper.sh` was supposed to detach the real helper via
-  `nohup ... &; disown` so osascript could return promptly while
-  the helper kept running as root long enough to wait for the
-  parent PID, do the bundle swap, and relaunch. macOS 15+ / 26
-  (Tahoe) **kills children of the authorization-elevated shell on
-  exit regardless of `nohup`/`disown`** — `nohup ... &; disown`
-  worked for decades but Apple changed the rules. The wrapper
-  exited 0, osascript reported success, AppUpdater proceeded to
-  `state = .relaunching` and terminated, but the real helper was
-  killed before its first non-trivial line (`exec 2>>"$LOG"`)
-  ever executed — the relaunch log file mtime didn't even update.
-
-  New flow: use `osascript ... with administrator privileges` for
-  ONLY a `chown` (a fast atomic operation that doesn't need to
-  background), then fall through to the regular user-owned spawn
-  path. After the chown the bundle is owned by the current user,
-  the relaunch helper spawned via `Process()` inherits the user's
-  normal session (no sandbox issue), and future updates skip the
-  password prompt entirely. Defence in depth: `lstat()` after the
-  osascript call to verify the chown actually took effect.
-
-  Diagnosed via `log show` against a failed v2.0.21→v2.0.22
-  attempt: `authd` reported `Succeeded authorizing right
-  'system.privilege.admin' by client '/usr/bin/osascript'` at
-  21:15:14.385, the wrapper script ran as root and exited 0, the
-  parent app exited cleanly at 21:15:24 — and yet the helper
-  script's first `echo` to its log never appeared.
-
-  User-visible behaviour:
-
-  | Scenario | Before | After |
-  | --- | --- | --- |
-  | First update on a `.pkg`-installed bundle | Silent failure | One admin-password prompt for the chown, update completes |
-  | Subsequent updates | Re-prompted on every update (when working at all) | Zero password prompts — bundle is now user-owned |
-  | User cancels password prompt | "Update cancelled — admin password not entered." | Same |
-  | `.dmg`-installed (user-owned) bundles | Worked | Unchanged |
-
-### Bundled
-- NaiveProxy v148.0.7778.96-2 (unchanged)
-- Cool Tunnel Core v2.0.23
+AppUpdater silently failed on macOS 15/26 (Sequoia/Tahoe) when
+the bundle was `.pkg`-installed (root-owned in `/Applications`).
+Pre-fix flow ran the entire relaunch helper inside a privileged
+shell via `osascript ... with administrator privileges`, with
+`wrapper.sh` supposed to detach the real helper via `nohup ... &;
+disown`. macOS 15+/26 **kills children of the authorization-elevated
+shell on exit regardless of `nohup`/`disown`** — `nohup`+`disown`
+worked for decades but Apple changed the rules. Symptom: wrapper
+exited 0, osascript reported success, app terminated, real helper
+was killed before its first non-trivial line. New flow: osascript
+runs ONLY a fast atomic `chown` to transfer ownership to the
+current user, then falls through to the regular user-owned spawn
+path. Subsequent updates skip the password prompt entirely.
+Defence in depth: `lstat()` after the osascript call verifies the
+chown took effect. Diagnosed via `log show` against a failed
+v2.0.21→v2.0.22 attempt: authd authorized the right, the wrapper
+ran as root and exited 0, the parent app exited cleanly — yet
+the helper's first `echo` to its log never appeared. `.dmg`-installed
+user-owned bundles unchanged.
 
 ---
 
 ## [2.0.22] — 2026-05-07 (v2.0.21 review-fallout: 4 rounds of code review, ~30 fixes)
 
-Four full rounds of code review against the v2.0.21 cycle, each
-spawning multiple parallel reviewers with different lenses
-(correctness, security, concurrency, perf, UX, supply-chain,
-docs). About 30 distinct fixes ship here — no new features, no
-wire-protocol change. Backward-compatible drop-in for v2.0.21.
+Four review rounds against the v2.0.21 cycle (correctness,
+security, concurrency, perf, UX, supply-chain, docs) landed
+~30 distinct fixes, no features, no wire-protocol change.
+Biggest single-finding payoff: every client-side error type
+except one defined `var localizedDescription` as a plain
+stored property without conforming to `LocalizedError`, so the
+`(error as? LocalizedError)?.errorDescription` cast at user-facing
+catch sites silently fell through and users saw Swift's default
+`"…CoolTunnel.CoreClientError error N."` instead of the
+carefully-written enum strings. Round 3 fixed every type
+(`CoreClientError`, `OrchestratorError`, `NaiveResolverError`,
+`RustCoreResolverError`, `CodeSignError`, `KeychainError`,
+`FileCredentialError`, `SubscriptionClientError`,
+`SubscriptionValidationError`) with `var errorDescription: String?`.
 
-The biggest single-finding payoff was a hidden UX disaster: every
-client-side error type except one defined `var localizedDescription`
-as a plain stored property without conforming to `LocalizedError`,
-so the `(error as? LocalizedError)?.errorDescription` cast at
-user-facing catch sites silently fell through and users saw
-Swift's default `"…CoolTunnel.CoreClientError error N."` instead
-of the carefully-written enum strings. Round 3 fixed it.
+Security: `SubscriptionClient` body-size cap (1 MB) now enforced
+during the read via streaming `bytes(for:)` accumulation — the
+mid-cycle `data(for:)` cap was reverted in round 4 because on
+a fast network a hostile panel could land ~1.25 GB before the
+post-hoc check fired. New `NoRedirectGuard` delegate refuses
+every redirect (default `URLSession` follows up to ~16 to any
+host). `Content-Type` sniff before JSON decode rejects cover-site
+HTML; multi-value `Content-Type` (RFC violation, observed in
+the wild) is parsed by splitting on `,` first then `;`.
+`Subscription.validate(now:)` now enforces 9 rules (was 4):
+`version == 1`, non-empty `profiles[]`, `profiles.count ≤ 16`,
+SSRF gate on host (loopback / private / link-local / `localhost`
+/ `*.local`), `capabilities.http3 == false`, `issued_at != 0`,
+`issued_at <= now + 60 s` skew, `expires_at >= issued_at`,
+`expires_at - issued_at <= 1 year`, `expires_at > now`,
+`now - issued_at <= 7 days`. `AntiTrackingFeature` decode is
+forward-compatible (manual Codable with `unknown(String)` sink
+— pre-fix unknown variants threw `tokenInvalid` and bricked the
+client). CI actions pinned to commit SHAs (tag-takeover defense).
+`security_check.sh` now runs from `cut_release.sh` step 8b
+(was opt-in); `cargo deny check` runs from `audit.sh` step 3b.
+`isExcludedFromBackupKey` set on Application Support directory
+(config.json carries cleartext proxy URL, credentials.json
+carries base64 passwords; both 0600 on disk but Time Machine
+snapshots are accessible to admin restoring user home).
+**IPv6 host parsing:** `ServerAddress::parse` previously used
+`rfind(':')` and silently mis-parsed bare `2001:db8::1` as
+host=`2001:db8:` port=`1`. Now accepts bracketed
+`[2001:db8::1]:443`, rejects bare multi-colon as
+`AmbiguousIPv6` with bracket-fix pointer. `RawProfile` redacted
+`Debug` pre-empts a future `tracing::warn!(?raw)` from leaking
+cleartext credentials. `engineStderrLogger` flipped to
+`privacy: .private`. `url.lastPathComponent` instead of `url.path`
+in resolver error strings (`url.path` leaks `/Users/<name>/`).
+`Text(verbatim:)` on panel-supplied `displayName` in
+ConnectionFormView (string-literal interpolation on
+`Text(_: LocalizedStringKey)` auto-renders markdown — a
+hostile `host: "**evil**.com"` would render bolded).
 
-### Security / hardening
-
-- **`SubscriptionClient` body-size cap is now load-bearing**
-  (1 MB, enforced **during** the read via streaming
-  `bytes(for:)` accumulation). The post-hoc `data(for:)` cap
-  introduced mid-cycle was reverted in round 4 — `data(for:)`
-  buffers the full body before the cap can fire, so on a fast
-  network (gigabit) a hostile or hijacked panel can land
-  ~1.25 GB in memory inside the 10 s `timeoutIntervalForResource`
-  window before the size check trips. Streaming bounds peak
-  memory at exactly `maxBytes` regardless of upstream
-  throughput.
-- **No-redirect delegate** on `SubscriptionClient` fetches.
-  Default `URLSession` follows up to ~16 redirects to any host;
-  a panel takeover responding `302 Location: https://attacker
-  .example/manifest.json` would silently move the documented
-  "TLS to the panel domain" trust anchor. `NoRedirectGuard`
-  refuses every redirect.
-- **`Content-Type` sniff** before JSON decode. Documented in
-  the file preamble pre-cycle but never implemented — the
-  cover-site path went straight to `JSONDecoder` on multi-MB
-  HTML. Multi-value `Content-Type` headers (RFC violation but
-  observed in the wild from misconfigured reverse proxies) are
-  parsed by splitting on `,` first then `;`.
-- **`Subscription.validate(now:)` now enforces 9 rules** (was
-  4): `version == 1`, non-empty `profiles[]`, `profiles.count ≤
-  16`, `host` not loopback / private / link-local / `localhost`
-  / `*.local` (closed-loop SSRF defense), `capabilities.http3 ==
-  false`, `issued_at != 0`, `issued_at <= now + 60 s` (forward
-  skew tolerance), `expires_at >= issued_at`, `expires_at -
-  issued_at <= 1 year`, `expires_at > now`, `now - issued_at
-  <= 7 days`. Each adds defense against a counterfeit panel
-  trying to bypass the freshness or staleness gates.
-- **`AntiTrackingFeature` decode is forward-compatible.** Was
-  auto-derived `String`-rawValue Codable that threw on any
-  unknown variant — adding any new flag server-side would brick
-  every v1 client with a misleading `tokenInvalid` UI. Now
-  manual Codable with an `unknown(String)` sink.
-- **CI actions pinned to commit SHAs** (`actions/checkout@v6`,
-  `actions/cache@v5`, `taiki-e/install-action@v2`). Tag-takeover
-  defense.
-- **`security_check.sh` now runs from `cut_release.sh`** as
-  step 8b. Was opt-in / documentation-only; release operators
-  who skipped it shipped without secret scan, embedded-Mach-O
-  code-sign verification, NaiveProxy SHA cross-check,
-  Info.plist version assertion, or LICENSE/NOTICE presence
-  check.
-- **`cargo deny check` runs from `audit.sh`** (step 3b).
-  Aligns the local synthetic CI gate with what `.github/
-  workflows/ci.yml` was already enforcing.
-- **`isExcludedFromBackupKey`** set on
-  `~/Library/Application Support/COOL-TUNNEL/`. `config.json`
-  carries the cleartext `https://user:pass@host` proxy URL and
-  `credentials.json` carries base64-encoded passwords; both are
-  0600 user-only on disk but Time Machine snapshots are
-  accessible to the next admin restoring the user's home.
-- **IPv6 host parsing.** `ServerAddress::parse` previously used
-  `rfind(':')` and silently mis-parsed bare `2001:db8::1` as
-  host=`2001:db8:` port=`1`. Now accepts bracketed form
-  `[2001:db8::1]:443`, rejects bare multi-colon strings as
-  `AmbiguousIPv6` with a pointer at the bracket fix.
-- **`RawProfile` redacted Debug.** Pre-empts a future
-  `tracing::warn!(?raw, "deserialize failed")` from dumping
-  cleartext credentials to the engine stderr stream.
-- **`engineStderrLogger` flipped to `privacy: .private`.**
-  Defense-in-depth — the engine's `tracing` is already clamped
-  to info, but the Swift forwarder was at `.public`.
-- **`url.lastPathComponent` instead of `url.path`** in
-  resolver error strings. `url.path` includes
-  `/Users/<name>/...` (macOS-username leak in user-visible
-  banners and support logs).
-- **`Text(verbatim:)` for panel-supplied `displayName`** in
-  `ConnectionFormView`. String-literal interpolation on
-  `Button(_: LocalizedStringKey)` and `Text(_: LocalizedStringKey)`
-  auto-renders markdown — a hostile panel returning
-  `host: "**evil**.com"` would render bolded.
-
-### Correctness
-
-- **`CoreClient` stderr-drain `Task` is now cancelled on
-  `terminate()`.** The previous `Task.detached` was never
-  stored, so rapid start/stop churn under handshake failure
-  parked one worker thread per attempt on the synchronous
-  `availableData` call until the kernel delivered EOF. Switched
-  the read primitive to `read(upToCount:)` (throws on closed
-  handle, returns nil on EOF) so close-then-cancel works
-  cleanly.
-- **`CoreClient.start()` TOCTOU closed.** The
-  `process == nil` guard ran *before* `await
-  CodeSignVerifier.verifyValid(...)`; two concurrent callers
-  could both pass and both reach `process.run()`. New
-  `starting: Bool` flag set before the first `await`.
-- **`StopProxy` Err-path now emits `StateChanged{false}`.**
-  When `supervisor.stop()` returned `Err(stop_failed)` the
-  user-emit was gated on `response_succeeded == true` and never
-  fired; combined with `monitor_loop`'s pre-claim of
-  `emitted_stopped = true`, the orchestrator never learned the
-  engine was stopped and the UI stuck on "running" indefinitely.
-  Distinguishes "transition committed" (Response | Error.code
-  ==`stop_failed`) from "no transition" (Error.code ==
-  `not_running`).
-- **Saturating arithmetic in `Subscription.validate(now:)`.**
-  `nowSecs &+ UInt64(maxForwardSkew)` was wrapping; on the
-  `nowSecs > UInt64.max - 60` edge a wrap would produce
-  `skewCeiling ≈ 0` and *every* legitimate `issuedAt` would
-  flag. Swapped to `addingReportingOverflow` saturating to
-  `UInt64.max`.
-
-### Performance
-
-- **`SubscriptionClient` Content-Type sniff** rejects cover-site
-  HTML before allocating bytes for a JSON decode pass on
-  multi-MB HTML.
-
-### UX
-
-- **All client error types now conform to `LocalizedError`** —
-  `CoreClientError`, `OrchestratorError`, `NaiveResolverError`,
-  `RustCoreResolverError`, `CodeSignError`, `KeychainError`,
-  `FileCredentialError`, `SubscriptionClientError`,
-  `SubscriptionValidationError`. Each renamed `var
-  localizedDescription` to `var errorDescription: String?`.
-  Three of them had no description at all — added per-case
-  English copy. The `(error as? LocalizedError)?.errorDescription`
-  cast now hits every type instead of falling through to
-  Swift's `"…error N."` default.
-
-### Tests
-
-- **`Hello`/`HelloReply`, `ProbeServer`/`ProbeReport`** wire
-  round-trip tests on the Rust side — none of the new variants
-  had pinning.
-- **`monitor_interval_secs` clamp helper** extracted from the
-  inline dispatch arm + 4 unit tests pinning `None`, in-range,
-  `Some(0)`, above-ceiling behaviour.
-- **`ServerAddress::parse` IPv6 cases** — 7 tests covering
-  bracketed-with-port, bracketed-without-port, bare-rejected,
-  unclosed-bracket, empty-host, invalid-port, junk-after-bracket,
-  empty-port-suffix.
-
-### Repository discipline (internal)
-
-- **`ProxyMode::title()` / `ProxyTestMode::title()` removed.**
-  Orphan UI helpers in a wire-only Serialize/Deserialize enum;
-  the Swift mirror at `Core/Protocol.swift` carries its own
-  strings and no Rust caller ever read them.
-- **Doc drift.** `Subscription.swift` file-header listed 4 of
-  the now-9 client checks; `core/src/lib.rs` Modules list was
-  missing 6 of 10 modules; `CHANGELOG`/`SUPPORT`/`README`/
-  `CONTRIBUTING` referenced the historical v0.1.7 LTSC line —
-  all updated to point at the v2.0.x line.
-- **`CoreClient.terminate()` comment** still said "EOF to the
-  drain loop's `availableData` call" after the round-2 switch
-  to `read(upToCount:)` — corrected.
-
-### Bundled
-- NaiveProxy v148.0.7778.96-2 (unchanged)
-- Cool Tunnel Core v2.0.22
-
----
+Correctness: `CoreClient` stderr-drain Task is now cancelled
+on `terminate()` (previously `Task.detached` was never stored,
+so rapid start/stop churn parked one worker per attempt on
+synchronous `availableData` until kernel EOF; switched read
+primitive to `read(upToCount:)` so close-then-cancel works).
+`CoreClient.start()` TOCTOU closed via new `starting: Bool`
+set before the first `await`. `StopProxy` Err-path now emits
+`StateChanged{false}` — pre-fix when `supervisor.stop()`
+returned `Err(stop_failed)` the user-emit was gated on
+`response_succeeded == true` and never fired; combined with
+`monitor_loop`'s pre-claim of `emitted_stopped = true`, the
+orchestrator never learned the engine was stopped and UI stuck
+on "running" indefinitely. Saturating arithmetic in
+`Subscription.validate(now:)` — `nowSecs &+ UInt64(maxForwardSkew)`
+wrapped at the `UInt64.max - 60` edge producing
+`skewCeiling ≈ 0` so every legitimate `issuedAt` flagged.
+Swapped to `addingReportingOverflow` saturating to UInt64.max.
+New tests: Hello/HelloReply + ProbeServer/ProbeReport wire
+round-trip (none of the new variants had pinning);
+`monitor_interval_secs` clamp helper + 4 unit tests for
+None/in-range/Some(0)/above-ceiling; 7 ServerAddress IPv6
+parse tests. Removed orphans: `ProxyMode::title()` /
+`ProxyTestMode::title()` (Swift mirror at `Core/Protocol.swift`
+carries its own strings; no Rust caller read them). Bundled
+NaiveProxy v148.0.7778.96-2 unchanged.
 
 ## [2.0.21] — 2026-05-06 (Connection robustness: handshake, pre-flight probe, subscription validation)
 
 Two-phase hardening of the Swift↔Rust JSON-over-stdio bridge
-and the subscription-import path. No wire-incompatible change —
-old engines that lack the new `Hello` method are accepted as
-legacy — but every fresh launch now performs a structured probe
-before traffic flows, and every subscription manifest is
-validated against the documented v1 schema before the first
-profile is written. One real bug shipped along with the
-robustness work: subscribers on non-default panel ports were
-silently falling back to `:443`. Landed in #17.
-
-### Added
-- **`Hello` / `HelloReply` handshake (`PROTOCOL_VERSION = 1`).**
-  `CoreClient.start()` runs the handshake immediately after
-  spawning the engine subprocess. Engines that lack the method
-  (return `invalid_request`) are accepted as legacy. A hard
-  protocol mismatch surfaces
-  `CoreClientError.protocolVersionMismatch` and tears the
-  subprocess down before `start()` returns, so a stale engine
-  never lingers behind a failed launch.
-- **`ProbeServer { profile, timeout_secs }` request.** New
-  `core/src/preflight.rs` runs DNS lookup + a single TCP
-  connect with per-step deadlines (clamped 1–30 s; default
-  5 s). Always resolves to a structured `ProbeReport` with
-  `dns_resolve_ms` / `tcp_connect_ms` for both reachable and
-  unreachable cases, so the UI can render timing alongside the
-  failure mode rather than catching a transport exception.
-  Surfaced in Swift as
-  `CoreClient.probe(profile:timeoutSecs:)`.
-- **`monitor_interval_secs` is configurable** on `StartProxy`
-  (clamped 1–60 s; default 5 s preserved). Plumbed through
-  `start_proxy` → `monitor_loop`.
-- **Per-request `tracing` span.** Dispatch body wrapped in
-  `tracing::info_span!("dispatch", request_id)` so every log
-  line emitted under a request handler carries the Swift
-  caller's `Request.id` for cross-stack correlation.
-- **`SubscriptionManifestV1` schema mirror in Swift.** New
-  `Core/Subscription.swift` mirrors the full ct-protocol
-  manifest (`version`, `profiles[]`, `capabilities`,
-  `issued_at`, `expires_at`, `note`, `signature`) plus a
-  `validate(now:)` enforcing `version = 1`, non-empty profiles,
-  `expires_at` in the future, and the documented 7-day
-  freshness ceiling.
-- **`SubscriptionClient` actor.** New
-  `Core/SubscriptionClient.swift` fetches with an ephemeral
-  `URLSession` (`reloadIgnoringLocalCacheData`, `urlCache=nil`,
-  10 s timeout) and decodes; throws structured
-  `SubscriptionClientError` cases for transport / HTTP /
-  cover-site / validation failures. HMAC verification
-  deliberately skipped — the panel signs with the server-only
-  `APP_KEY`, so client-side HMAC is impossible. Trust anchor
-  is TLS to the panel domain (Caddy + Let's Encrypt cert);
-  rationale documented at the top of `Subscription.swift`.
-
-### Fixed
-- **Subscription import preserves the panel port.** The
-  previous importer dropped the manifest's `port` field, so
-  subscribers on non-default panels silently fell back to
-  `:443`. Now serialises `host:port` straight from
-  `ProfileV1`.
-
-### Changed
-- **`TunnelOrchestrator.importFromSubscriptionURL`** refactored
-  to use the new `SubscriptionClient` via a private
-  `translate(_:)` helper. Adds three new
-  `SubscriptionImportError` cases —
-  `unsupportedVersion(got:)`, `manifestExpired`,
-  `manifestStale(daysOld:)` — with actionable banner copy in
-  `errorDescription`.
-- **Removed dead code.** The per-orchestrator private
-  `SubscriptionManifest` struct (only decoded host / username /
-  password) is gone; replaced by the full V1 mirror.
-
-### Repository discipline (internal)
-- **Audit schema-sync probe follows the decoder.** PR #17 moved
-  the `SubscriptionManifest` decoder out of `TunnelOrchestrator`
-  into `Core/Subscription.swift`; the audit step's hard-coded
-  `ORCH_FILE` path didn't follow, so the v2.0.21 binary cut
-  failed at `audit.sh` step 7 with four "Swift decoder missing
-  field" reports even though the decoder was in place. The
-  probe now greps `COOL-TUNNEL/Core/*.swift` recursively and
-  is robust to future file moves within `Core/`.
-
-### Bundled
-- NaiveProxy v148.0.7778.96-2 (unchanged)
-- Cool Tunnel Core v2.0.21
-
----
+and the subscription-import path. New `Hello` / `HelloReply`
+handshake (`PROTOCOL_VERSION = 1`) runs immediately after
+spawning the engine; engines that lack the method (return
+`invalid_request`) are accepted as legacy, hard mismatch
+surfaces `CoreClientError.protocolVersionMismatch` and tears
+the subprocess down before `start()` returns. New
+`ProbeServer { profile, timeout_secs }` request in
+`core/src/preflight.rs` runs DNS lookup + TCP connect with
+per-step deadlines (clamped 1–30 s, default 5 s); resolves to
+a structured `ProbeReport` with `dns_resolve_ms` /
+`tcp_connect_ms` for both reachable and unreachable cases.
+`monitor_interval_secs` is now configurable on `StartProxy`
+(clamped 1–60 s, default 5 s). Per-request `tracing` span
+wraps the dispatch body so log lines under a handler carry the
+Swift caller's `Request.id`. New `SubscriptionManifestV1`
+Swift mirror at `Core/Subscription.swift` (full schema:
+version, profiles, capabilities, issued_at, expires_at, note,
+signature) plus `validate(now:)`. New `SubscriptionClient`
+actor fetches with ephemeral `URLSession`
+(`reloadIgnoringLocalCacheData`, `urlCache=nil`, 10 s timeout)
+and decodes; throws structured `SubscriptionClientError`.
+HMAC deliberately skipped — panel signs with server-only
+`APP_KEY` so client-side HMAC is impossible; trust anchor is
+TLS to the panel domain. **Real bug fix:** subscription
+import previously dropped the manifest's `port` field, so
+subscribers on non-default panels silently fell back to `:443`;
+now serialises `host:port` straight from `ProfileV1`.
+`importFromSubscriptionURL` refactored to use the new client
+via `translate(_:)`; three new error cases
+(`unsupportedVersion(got:)`, `manifestExpired`,
+`manifestStale(daysOld:)`). Old per-orchestrator private
+`SubscriptionManifest` struct removed. Audit schema-sync probe
+now greps `Core/*.swift` recursively (the v2.0.21 cut failed
+on the hard-coded `ORCH_FILE` path after the decoder moved out
+of TunnelOrchestrator). Landed in #17. NaiveProxy
+v148.0.7778.96-2 unchanged.
 
 ## [2.0.20] — 2026-05-06 (Xcode 26.4 macOS-SDK build hotfix)
 
-One Swift-side build hotfix caught at the v2.0.19 binary cut.
-The fix landed on `main` after the v2.0.19 tag and so is not in
-the v2.0.19 release artefact — v2.0.20 ships it. No engine
-change; `cool-tunnel-core` is recompiled only because the
-xcodeproj `MARKETING_VERSION` and `core/Cargo.toml` advance in
-lock-step (B5 anti-drift) and the bundled binary's
-`--version` string is asserted by `cut_release.sh` step 8.
-
-### Fixed
-- **`textInputAutocapitalization` guarded for macOS.** The
-  subscription-import field's `.textInputAutocapitalization(.never)`
-  is an iOS-only `View` modifier; on the Xcode 26.4 macOS SDK the
-  call trips `error: value of type 'some View' has no member
-  'textInputAutocapitalization'`. The line was added in the
-  v2.0.18 subscription-import UI cycle (#15) but tolerated by the
-  prior SDK. Wrapped in `#if !os(macOS)` / `#endif` — semantically
-  a no-op on the only target this project ships, ready for an
-  eventual iOS target. Caught at the v2.0.19 binary cut, fixed
-  on `main` at 50c511b but post-tag, so released here.
-
----
+The subscription-import field's `.textInputAutocapitalization(.never)`
+is an iOS-only View modifier; on Xcode 26.4 macOS SDK the call
+trips `error: value of type 'some View' has no member 'textInputAutocapitalization'`.
+Added in v2.0.18 (#15) but tolerated by the prior SDK. Wrapped
+in `#if !os(macOS)` — semantically a no-op on the only target
+this project ships, ready for an eventual iOS target. Caught at
+v2.0.19 binary cut, fixed at 50c511b post-tag, released here.
 
 ## [2.0.19] — 2026-05-06 (Engine-side validation gap closed)
 
-One engine-layer fix that closes the audit ADR's "engine-side
-validation gap" (`docs/adr/0001-audit-rules-locked-2026-05-05.md`
-§Open work), plus two routine GitHub Actions version bumps from
-Dependabot. No user-visible behaviour change in the Mac app —
-the fix is engine-internal and matters for any caller that
-bypasses the Swift Start button (CLI fixture, iOS port,
-scripted test).
-
-### Fixed
-- **`validate_profile` returns a structured failure for invalid
-  profiles.** Previously, an invalid `Profile` tripped serde's
-  `try_from` rejection at the outer `Request` deserialiser,
-  surfacing as `Outbound::Error` with `code: "invalid_request"` —
-  the right shape for "you sent me bad data" but the wrong shape
-  for a *probe* asking "is this profile valid?". The
-  `RequestKind::ValidateProfile` variant now carries `RawProfile`
-  (the unvalidated wire shape); the handler runs
-  `Profile::try_from(raw)` explicitly and emits
-  `Outbound::Response` with `ValidationReport { ok, reason }` in
-  both the valid and invalid case. Aligns stdio mode with HTTP
-  server-mode (which already returned 200 + `ok:false`) — the
-  two modes had a stated divergence "by design"; that design is
-  now uniform. The Swift caller at
-  `TunnelOrchestrator.swift:834` already had the
-  `validation.ok == false` branch coded; under the prior design
-  that branch was dead code. Defence in depth for the
-  empty-password class — PR #12 fixed it at the UI layer in
-  v2.0.17; this closes the same gap at the engine. Wire-format
-  bytes unchanged. 132 / 132 tests pass (+2 new). Fixed in #14.
-
-### Repository discipline (internal)
-- **GitHub Actions versions bumped** by Dependabot, both rebased
-  past the swift-format reconciliation (#11 in v2.0.17) and
-  brought current with `main` before merge:
-  - `actions/checkout` v4 → v6 (#2)
-  - `actions/cache` v4 → v5 (#1)
-
----
+Closes the audit ADR's engine-side validation gap.
+`RequestKind::ValidateProfile` previously took an already-deserialised
+`Profile`, so an invalid profile tripped serde's `try_from`
+rejection at the outer `Request` deserialiser, surfacing as
+`Outbound::Error` `code: "invalid_request"` — the right shape
+for "you sent me bad data" but the wrong shape for a probe
+asking "is this profile valid?". The variant now carries
+`RawProfile`; the handler runs `Profile::try_from(raw)` itself
+and emits `Outbound::Response` with `ValidationReport { ok,
+reason }` in both valid and invalid cases. Aligns stdio mode
+with HTTP server-mode (which already returned 200 + ok:false).
+The Swift caller already had the `validation.ok == false`
+branch coded; pre-fix that branch was dead code. Wire-format
+bytes unchanged. Defence in depth for the empty-password class
+PR #12 fixed at the UI layer in v2.0.17. Plus Dependabot bumps:
+`actions/checkout` v4→v6, `actions/cache` v4→v5. 132/132 tests
+(+2 new). Fixed in #14.
 
 ## [2.0.17] — 2026-05-06 (Start-button validation + audit gate locked)
 
-One user-visible bug fix plus a repository-discipline cycle that
-locks the CI gate that should have caught the drift this cycle
-absorbed.
-
-### Fixed
-- **Start button now refuses to launch on an incomplete profile.**
-  Previously, a profile with an empty Password (or Username,
-  Server, Local Port) was still considered "selected" by the
-  Start button's enabled-check, so clicking Start would spawn
-  `naive` with empty credentials, the upstream would reject the
-  auth, and diagnostics surfaced a generic `× upstream_via_socks`
-  failure with no signal that the cause was an unfilled form
-  field. Now: Start is disabled until every required field is
-  filled (whitespace-trim), the tooltip names what's missing
-  (`"Fill in server, username, password, and local port to
-  start"`), and VoiceOver announces the same. Stop stays enabled
-  while running, preserving the recovery invariant. Fixed in #12.
-
-### Repository discipline (internal)
-- **CI gate locked.** Required status checks on `main` are now
-  enforced with `strict: true`: `Rust (build + clippy + test)`,
-  `ShellCheck`, and `Swift (format lint)` must all be green
-  before a PR can merge. Previously CI was advisory; drift
-  accumulated post-merge across all three axes — this release
-  absorbs that drift in one cycle.
-- **Lint-floor reconciliation.**
-  - `cargo fmt --all` absorbed accumulated rustfmt drift across
-    `core/src/{redaction,client_mode,main}.rs` and
-    `core/tests/chaos.rs`. (#9)
-  - `xcrun swift-format format -i` absorbed ~40 swift-format
-    violations across 13 files in `COOL-TUNNEL/{Core,
-    SystemIntegration, Persistence, Views}/`. (#11)
-  - `.github/workflows/ci.yml` now invokes `xcrun swift-format`
-    instead of bare `swift-format` so the toolchain binary is
-    found on macos-14 runners regardless of `$PATH` state. The
-    Swift lint job had been silently exiting 127 on every run
-    since the `--lint` step landed. (#9)
-- **Script hygiene.**
-  - `scripts/cut_release.sh:92` Xcode-DerivedData lookup now
-    carries an explicit `# shellcheck disable=SC2012` with
-    justification (path is constrained, BSD `find` lacks
-    `-printf`). (#10)
-  - `scripts/fetch_naive.sh` no longer rewrites
-    `naive.upstream.json` when the three SHAs are unchanged —
-    eliminates the permanently-dirty working tree that
-    accumulated on every fetch. (#10)
-- **Contributor onboarding.** `CONTRIBUTING.md` lists
-  `cargo install cargo-deny` as a build prerequisite and adds
-  `cargo deny check` to the local test-sweep section. (#9)
-- **GitHub repo metadata.** Topics set: `proxy`, `naive`,
-  `naiveproxy`, `tunnel`, `macos`, `swiftui`, `rust`,
-  `censorship`.
-
-Architecture decision recorded at
-`docs/adr/0001-audit-rules-locked-2026-05-05.md`. `required_signatures`
-on `main` remains deferred pending maintainer signing setup.
-
-### Bundled
-- NaiveProxy v148.0.7778.96-2 (unchanged)
-- Cool Tunnel Core v2.0.17
+Start button now refuses to launch on an incomplete profile.
+Pre-fix a profile with empty Password (or Username, Server,
+Local Port) was still considered "selected" by the enabled-check,
+so clicking Start spawned `naive` with empty credentials,
+upstream rejected the auth, and diagnostics surfaced a generic
+`× upstream_via_socks` failure with no signal the cause was an
+unfilled form field. Now: Start is disabled until every required
+field is filled (whitespace-trim), tooltip names what's missing,
+VoiceOver announces the same. Stop stays enabled while running
+preserving the recovery invariant. Fixed in #12. Plus
+repository-discipline cycle: required status checks on `main`
+now enforced with `strict: true` (Rust, ShellCheck, Swift format
+lint must all be green before merge — CI was previously advisory
+and drift had accumulated across all three axes). Lint-floor
+reconciliation: `cargo fmt --all` (#9) absorbed rustfmt drift;
+`xcrun swift-format format -i` (#11) absorbed ~40 violations
+across 13 files; ci.yml now invokes `xcrun swift-format` instead
+of bare `swift-format` so the toolchain binary is found on
+macos-14 runners (the lint job had been silently exiting 127
+since the `--lint` step landed). Script hygiene (#10):
+explicit shellcheck disable on `cut_release.sh:92` DerivedData
+lookup; `fetch_naive.sh` no longer rewrites `naive.upstream.json`
+when SHAs are unchanged (kills the permanently-dirty working
+tree). CONTRIBUTING.md adds `cargo install cargo-deny` +
+`cargo deny check` (#9). GitHub topics set. ADR recorded at
+`docs/adr/0001-audit-rules-locked-2026-05-05.md`.
+`required_signatures` deferred. NaiveProxy v148.0.7778.96-2
+unchanged.
 
 ---
 
 ## [2.0.16] — 2026-05-05 (hotfix v2.0.15: Xcode project version drift)
 
-v2.0.15 shipped with the bundled `cool-tunnel-core` and
-`Cargo.toml` correctly at 2.0.15 but the .app's Info.plist
-`CFBundleShortVersionString` still at 2.0.14 — the Xcode
-project's `MARKETING_VERSION` build setting wasn't bumped in
-lock-step with the Rust crate. The in-app updater's
-`verifyExtractedApp` (AU-7) correctly caught the mismatch and
-refused to install:
-
->   Update failed: New app's version does not match the release
->   tag 2.0.15. Refusing to install.
-
-This is exactly the version-drift defense AU-7 was added for —
-working as intended — but the user-visible result was an
-unusable update for anyone on v2.0.14 trying to upgrade. v2.0.16
-is binary-identical to what v2.0.15 was supposed to be, with two
-fixes:
-
-1. `MARKETING_VERSION` in
-   `COOL-TUNNEL.xcodeproj/project.pbxproj` bumped to 2.0.16 (both
-   Debug and Release configurations). The .app's Info.plist
-   `CFBundleShortVersionString` now matches Cargo.toml + the
-   bundled Rust binary's `--version`.
-
-2. **U#7:** `scripts/package_release.sh` now verifies the
-   freshly-built .app's `CFBundleShortVersionString` matches the
-   requested version BEFORE producing the .dmg / .pkg / .zip.
-   Same shape as the existing U#5 check that catches stale
-   bundled `cool-tunnel-core`. If `MARKETING_VERSION` is ever
-   missed again, the release fails at packaging time on the
-   build machine — the broken bundle never leaves it.
-
-The v2.0.15 release page on GitHub stays as a historical
-artifact; users on v2.0.14 retrying their in-app updater will
-now pick up v2.0.16 (the new latest) and install cleanly.
-
-### Bundled
-- NaiveProxy v148.0.7778.96-2 (unchanged)
-- Cool Tunnel Core v2.0.16
-
----
+v2.0.15 shipped with bundled `cool-tunnel-core` + Cargo.toml at
+2.0.15 but the .app's Info.plist `CFBundleShortVersionString`
+still at 2.0.14 — Xcode's `MARKETING_VERSION` wasn't bumped in
+lock-step. The in-app updater's `verifyExtractedApp` (AU-7)
+correctly caught the mismatch and refused to install ("Refusing
+to install"), exactly as designed — but the user-visible result
+was an unusable update for anyone on v2.0.14. v2.0.16 bumps
+`MARKETING_VERSION` to 2.0.16 (Debug + Release) so Info.plist
+matches Cargo.toml + the bundled binary `--version`. Plus U#7:
+`package_release.sh` now verifies the freshly-built .app's
+`CFBundleShortVersionString` matches the requested version BEFORE
+producing the .dmg/.pkg/.zip (same shape as the existing U#5
+check). If MARKETING_VERSION is ever missed again, the release
+fails at packaging time on the build machine.
 
 ## [2.0.15] — 2026-05-05 (post-swap liveness probe + updater hardening)
 
-Two fixes on top of v2.0.14: a liveness probe that closes the
-last semantic gap in the no-restart hot-swap, and a
-security-audit follow-up that caps the in-app Rust-core
-updater's manifest fetch at 1 MB.
-
-### Liveness probe after no-restart hot-swap (UX-F#7)
-
-v2.0.14's `applyModeWithoutRestart` leaves naive untouched
-during a Smart/Global/Local switch — the orchestrator only
-reconfigures system proxy settings. The
-`transitionInFlight` gate (UX-F#5) suppresses any
-`stateChanged(false)` event delivered during that ~50 ms
-window so the UI doesn't blink. The corner case v2.0.14 left
-unguarded: if naive happens to die in that exact window
-(OOM, kernel signal, panic), the suppression also hides the
-genuine death — the orchestrator declares the swap
-successful while naive is in fact dead. Browser stalls,
-Stop button stays red.
-
-v2.0.15 adds an explicit liveness probe:
-
-  - new engine RPC `probe_naive_live` returns
-    `{ running, pid }` from the dispatcher under the engine
-    state lock;
-  - `switchMode` calls `verifyNaiveLiveAfterHotSwap()` AFTER
-    `applyModeWithoutRestart` succeeds, BEFORE the success
-    log line. Throws on `running: false`, on engine-transport
-    failure, or on any unexpected response shape;
-  - the throw is caught one frame up in `switchMode`, logs at
-    `.notice` to the `HotSwap` os_log category, and falls
-    through to the existing full-restart path which respawns
-    naive with the correct config.
-
-The user never sees an error — the recovery path is a normal
-restart that takes ~250 ms. The live log shows ONE
-"switched from X to Y" line per click on either the
-hot-swap path or the recovery path.
-
-Belt-and-suspenders: the catch arm also sets
-`activeProfileEdited = true` so any future code path that
-re-checks the hot-swap gate sees this profile as ineligible
-until the next successful `startCore`. The current call's
-fallback is unconditional, so this only matters for future
-refactors — but it removes a footgun.
-
-### Updater hardening: 1 MB cap on the Rust-core manifest fetch
-
-`RustCoreUpdater.download` previously rode the shared
-`GitHubRedirectGuard.download` default of 100 MB for both
-the engine binary AND the SHA-256 manifest. The manifest is
-~250 bytes; capping it at 100 MB is two orders of magnitude
-looser than necessary. An attacker-shaped 100 MB "manifest"
-file from a compromised release-asset path would land on
-disk before `SHAVerifier.expectedHash` read it into memory
-via `String(contentsOf:)`.
-
-`AppUpdater` already caps its sha256 download at 1 MB
-(AppUpdater.swift:605); this brings `RustCoreUpdater` into
-line. `maxBytes` is now threaded through
-`RustCoreUpdater.download` (default still 100 MB so the
-binary fetch is unchanged); the manifest call site passes
-`1 * 1024 * 1024`.
-
-Came out of an end-to-end audit of the updater chain. The
-naive updater intentionally still has no SHA pin — the
-known limitation tracked in `SECURITY.md`.
-
-### Doc refresh
-
-README's "Pick this .dmg if you're not sure" line — bumped
-to `Cool-tunnel-v2.0.15.dmg`.
-
-### Validation
-- `cargo test --release` — 130/130 pass
-- `cargo clippy ... -- -D warnings` — clean
-- `xcodebuild Release` — succeeds
-
-### Bundled
-- NaiveProxy v148.0.7778.96-2 (unchanged from v2.0.14)
-- Cool Tunnel Core v2.0.15
-
----
+UX-F#7: v2.0.14's `applyModeWithoutRestart` left naive
+untouched during Smart/Global/Local switches and the
+`transitionInFlight` gate suppressed `stateChanged(false)`
+during the ~50 ms window so the UI didn't blink. Corner case:
+if naive died in that exact window (OOM, kernel signal,
+panic), the suppression hid the genuine death and the
+orchestrator declared the swap successful while naive was
+dead. Now `switchMode` calls a new `verifyNaiveLiveAfterHotSwap()`
+AFTER `applyModeWithoutRestart` succeeds and BEFORE the
+success log line; backed by a new `probe_naive_live` engine
+RPC returning `{ running, pid }` under the engine state lock.
+Throw is caught and logged at `.notice` to the `HotSwap`
+os_log category, then falls through to the existing
+full-restart path. User sees no error — recovery is a ~250 ms
+restart, with exactly one "switched from X to Y" log line per
+click. Belt-and-suspenders: catch arm sets
+`activeProfileEdited = true` to remove a future-refactor
+footgun. Plus updater hardening: `RustCoreUpdater.download`
+previously rode the shared `GitHubRedirectGuard.download`
+default of 100 MB for both engine binary AND SHA-256 manifest;
+manifest is ~250 bytes so 100 MB cap was 2 orders of magnitude
+loose (attacker-shaped 100 MB "manifest" would land on disk
+before `SHAVerifier.expectedHash` read it). `maxBytes` now
+threaded through `RustCoreUpdater.download` (default 100 MB for
+binary; manifest call site passes `1 * 1024 * 1024`), matching
+the existing AppUpdater cap. NaiveUpdater intentionally still
+has no SHA pin (tracked in SECURITY.md). 130/130 tests.
 
 ## [2.0.14] — 2026-05-05 (mode switch is now invisible to traffic too)
 
-The functional companion to v2.0.13 (UX-F#5). Where v2.0.13
-made the mode switch *visually* invisible (button no longer
-blinks Stop→Start→Stop, picker no longer de-highlights),
-v2.0.14 makes it *functionally* invisible: the underlying
-naive process is no longer killed and re-spawned on every
-mode switch, so in-flight TCP connections survive and apps
-never see ~200-500 ms of `connection refused` during the
-swap.
-
-### Why the engine was restarting in the first place
-
-Pre-v2.0.14, `switchMode` was implemented as `stopQuiet();
-startQuiet()` — naive was sent `.stopProxy`, killed, then
-re-spawned via `.startProxy` with a freshly-resolved binary
-descriptor and a freshly-written config. That made sense
-when modes meant fundamentally different engine
-configurations, but in practice Smart / Global / Local only
-differ in:
-
-  - **system proxy configuration** (PAC URL vs SOCKS5 server
-    vs nothing), which is a `networksetup` operation
-    completely outside the engine; and
-  - **PAC file regeneration**, which only matters when the
-    new mode is Smart.
-
-The naive process binds to `127.0.0.1:port` with the same
-config in all three modes. Restarting it was wasted work that
-also broke every TCP connection currently flowing through the
-SOCKS5 listener.
-
-### How v2.0.14 hot-swaps without the restart
-
-New private path `applyModeWithoutRestart(_ newMode:)` in
-`TunnelOrchestrator`:
-
-  1. Regenerate the PAC file (only when switching *to* Smart;
-     parity with `startCore`'s PAC step).
-  2. Apply the system-proxy configuration via the existing
-     `SystemProxyController` API
-     (`enableSmartPAC` / `enableGlobalSOCKS` / `disableAll`).
-     The controller already clears the opposing mode
-     internally, so a switch from Smart to Global doesn't
-     leak PAC settings.
-  3. Update the `ProxyActiveFlag` recovery sentinel for the
-     new mode.
-  4. Publish `activeMode = newMode` as a single observable
-     transition. naive is untouched — same PID, same
-     listener, same TCP connections.
-
-`switchMode` tries this path first. It falls through to the
-existing full restart when:
-
-  - `activeProfileEdited` is `true` (the user edited the
-    running profile — naive must restart to pick up the
-    edits, the same UX-F#3 banner still fires); or
-  - `selectedProfileID != activeProfileID` (the user switched
-    to a different profile — same reasoning); or
-  - `applyModeWithoutRestart` itself throws — the fallback's
-    `disableAll` cleans up partial `proxyController` state
-    and `startCore` reapplies the correct config.
-
-A new `activeProfileEdited: Bool` orchestrator flag is set by
-the existing UX-F#3 detection in `selectedProfile.set` and
-cleared at every successful `startCore`. Together with
-`selectedProfileID == activeProfileID`, it's the gate for
-"naive's running config matches the current profile".
-
-`applyModeWithoutRestart` clears `lastError` at the top,
-mirroring `startCore`'s optimistic-clear policy — a
-successful mode switch should not leave the user staring at a
-stale failure banner.
-
-A dedicated `Logger.cooltunnel("HotSwap")` os_log subsystem
-captures `.notice`-level diagnostics when the no-restart path
-fails and we fall back. Surfaces in `log show --predicate
-'subsystem == "space.coolwhite.cooltunnel" AND category ==
-"HotSwap"'`.
-
-### Behaviour matrix
-
-|                                 | pre-v2.0.13 | v2.0.13 (UX-F#5) | v2.0.14 (UX-F#6) |
-|---------------------------------|:-----------:|:----------------:|:----------------:|
-| Stop button blink               | yes         | no               | no               |
-| Picker lag                      | no          | no               | no               |
-| Engine restart on mode switch   | yes         | yes              | **no** *         |
-| In-flight TCP connections drop  | yes         | yes              | **no** *         |
-
-\* When the active profile is unchanged. Edited-profile or
-profile-switch cases still take the full restart path so
-naive picks up the new config — same UX-F#3 banner fires.
-
-### Files changed
-
-- `COOL-TUNNEL/Core/TunnelOrchestrator.swift` — new
-  `applyModeWithoutRestart` method, new `activeProfileEdited`
-  flag, `switchMode` gates the no-restart path on profile
-  parity, `Logger.cooltunnel("HotSwap")` for diagnostics.
-
-### Validation
-
-- `cargo test --release` — 130/130 pass (engine-side
-  unchanged but included for completeness).
-- `cargo clippy --release --all-targets -- -D warnings` —
-  clean.
-- `xcodebuild Release` — succeeds.
-- `scripts/cut_release.sh 2.0.14` — green; all five artefacts
-  emitted.
-- Manual: `nc -v 127.0.0.1 1080` survives unbroken across
-  rapid Smart / Global / Local clicks; `pgrep -f
-  Resources/naive` stays at the same PID through the whole
-  sequence; live log shows one `switched from X to Y` line
-  per click.
-
-Merged via PR #4.
-
----
+Functional companion to v2.0.13. Pre-fix, `switchMode` was
+implemented as `stopQuiet(); startQuiet()` — naive was sent
+`.stopProxy`, killed, then re-spawned with a freshly-resolved
+binary and config. Smart / Global / Local actually only differ
+in system proxy configuration (`networksetup` operation outside
+the engine) and PAC file regeneration; naive binds to
+`127.0.0.1:port` with the same config in all three modes, so
+restarting it was wasted work that broke every TCP connection
+flowing through the SOCKS5 listener (~200–500 ms of `connection
+refused` during the swap). New private
+`applyModeWithoutRestart(_ newMode:)` regenerates the PAC file
+(Smart only), applies the system-proxy configuration via the
+existing `SystemProxyController` API, updates the
+`ProxyActiveFlag` sentinel, and publishes `activeMode = newMode`
+as a single observable transition. naive is untouched — same
+PID, same listener, same TCP connections. `switchMode` tries
+this first; falls through to full restart on
+`activeProfileEdited == true`, `selectedProfileID != activeProfileID`,
+or any throw (fallback's `disableAll` cleans up partial state).
+New `activeProfileEdited` orchestrator flag set by the existing
+UX-F#3 detection and cleared at every successful `startCore` —
+together with profile-parity it's the gate for "naive's running
+config matches the current profile". Dedicated
+`Logger.cooltunnel("HotSwap")` os_log subsystem captures
+`.notice`-level diagnostics on fallback. Manual validation: `nc
+-v 127.0.0.1 1080` survives unbroken across rapid mode clicks;
+`pgrep -f Resources/naive` stays at the same PID. PR #4.
 
 ## [2.0.13] — 2026-05-05 (mode-switch UX: no more Stop→Start→Stop button blink)
 
-A user reported that clicking through Smart / Global / Local
-modes while connected made the primary action button visibly
-flicker `Stop → Start → Stop` and the live log spam
-"switched from X to Y" lines as fast as they could click.
-The button blink was the visible artifact of a deeper
-two-step state transition the orchestrator was publishing
-mid-swap.
-
-### Root cause
-
-`switchMode(to:)` was implemented as `stopQuiet(); startQuiet()`.
-Both halves wrote to the observable `isRunning` and `activeMode`
-properties:
-
-  - `stopQuiet` wrote `isRunning = false`, `activeMode = .stopped`
-    after sending `.stopProxy` to the engine.
-  - `startCore` wrote `isRunning = true`, `activeMode = newMode`
-    at the very end of the bring-up.
-
-Between the two writes, SwiftUI got at least one render
-opportunity (every `await` yield is a render boundary), so
-the Stop button visibly flipped through "Start" and the mode
-picker briefly de-highlighted every segment. The engine also
-emitted `stateChanged(false)` then `stateChanged(true)` events
-in response to the stop/start commands; the event handler at
-`handle(event:)` *also* wrote those values to the public
-state, so even when `stopQuiet` was made silent the engine
-event would re-introduce the flicker.
-
-Plus, the picker's binding read `orchestrator.activeMode`
-while running and `pendingMode` while stopped — so once the
-orchestrator stopped flickering through `.stopped`, the
-picker became *laggy* (showed the old mode for the full
-duration of the engine restart) instead of jumping to the
-clicked mode.
-
-### Fix (UX-F#5)
-
-Three coordinated changes so the user perceives a single
-instant transition:
-
-  1. **`stopQuiet(publishStoppedState: Bool = true)`** — added
-     a parameter that suppresses the `isRunning` /
-     `activeMode` flips. `switchMode` calls with `false`. All
-     legacy callers default to `true` and behave as before.
-
-  2. **`handle(event:)` — `stateChanged` early-return when
-     `transitionInFlight`** — the engine's stop/start events
-     during a hot-swap arrive as separate `stateChanged`
-     frames; we ignore them while `switchMode` owns the
-     public state. The natural-death recovery banner stays
-     intact for `stateChanged(false)` events that arrive
-     outside a transition (genuine naive crashes).
-
-  3. **`ControlPanelView.modeBinding.get` reads `pendingMode`
-     directly** — the picker reflects the clicked mode
-     instantly instead of waiting for `activeMode` to catch
-     up at the end of the engine restart. The existing
-     `.onChange(of: orchestrator.activeMode)` handler keeps
-     `pendingMode` in sync when the running mode changes
-     from another surface (menu-bar tap, deep-link).
-
-Failure recovery: if `startQuiet` throws after a successful
-`stopQuiet(publishStoppedState: false)`, the engine is
-genuinely dead — `switchMode` restores truthful state
+Clicking through Smart / Global / Local modes while connected
+made the primary action button visibly flicker `Stop → Start
+→ Stop`. Root cause: `switchMode(to:)` was `stopQuiet();
+startQuiet()` with both halves writing `isRunning` / `activeMode`
+and SwiftUI getting render opportunities at every `await` yield.
+Engine `stateChanged(false)` / `stateChanged(true)` events also
+rewrote those values via `handle(event:)`, so silencing
+`stopQuiet` wasn't enough. Plus the picker's binding read
+`orchestrator.activeMode` while running and `pendingMode` while
+stopped, so it became laggy once the orchestrator stopped
+flickering. Three coordinated fixes: (1) `stopQuiet(publishStoppedState:
+Bool = true)` parameter suppresses the public-state flips
+(switchMode passes `false`, legacy callers default to `true`);
+(2) `handle(event:).stateChanged` early-returns when
+`transitionInFlight` (natural-death recovery banner still fires
+outside transitions); (3) `ControlPanelView.modeBinding.get`
+reads `pendingMode` directly so the picker reflects the clicked
+mode instantly. Failure recovery: if `startQuiet` throws after
+a silent stop, `switchMode` restores truthful state
 (`isRunning = false`, `activeMode = .stopped`) before
-re-throwing. The UI must not lie about a non-running engine.
-
-### Files changed
-
-- `COOL-TUNNEL/Core/TunnelOrchestrator.swift` — `switchMode`,
-  `stopQuiet`, and the `stateChanged` event handler.
-- `COOL-TUNNEL/Views/ControlPanelView.swift` — picker binding
-  + doc comment.
-
-### Validation
-
-- 130/130 Rust tests pass (no engine-side change; included
-  for completeness).
-- `cargo clippy -- -D warnings` clean.
-- Build succeeds.
-
-User-visible effect: clicking Smart / Global / Local now
-keeps the Stop button rock-stable in red, and the picker
-segment flips to the clicked mode within a frame. The single
-"switched from X to Y" log line still appears. Engine
-restart still happens behind the scenes — that's a separate
-optimization tracked for a future cycle (mode-switch could
-eventually skip the restart entirely since naive's bound
-port and config don't change between modes).
-
----
+re-throwing — UI must not lie about a non-running engine.
 
 ## [2.0.12] — 2026-05-05 (logic-integrity sweep: validate_profile semantics + clippy clean)
 
-The v2.0.7 → v2.0.11 stretch was an **industrial-hardening**
-arc: relaunch-stuck watchdog, .pkg admin-elevation, .pkg
-poka-yoke gate, LaunchServices cache flush. Each fix made the
-update *path* more robust under hostile filesystem and OS
-state. v2.0.12 closes that arc and shifts focus to **logic
-integrity** — the *engine's* contracts now match the tests
-that describe them, and the lint baseline is clean again.
-
-### Two fixes, both behind the wire
-
-#### 1. `validate_profile` rejects invalid profiles at deserialization
-
-The stdio test
-`tests/protocol_roundtrip.rs::rejects_invalid_profile_during_deserialization`
-had been failing on `main` since v0.1.7.16 (Rust-F#1). The
-test sends a `validate_profile` request with `localPort: "0"`
-and expects an `Outbound::Error` frame with code
-`invalid_request`. Instead the engine returned a *successful*
-`Outbound::Response` carrying
-`ValidationReport { ok: false, reason: "invalid profile" }`.
-
-**Root cause:** the v0.1.7.16 change moved
-`RequestKind::ValidateProfile` to carry an unvalidated
-`RawProfile` so the dispatcher could surface the `ok: false`
-branch of `ValidationReport`. That design fits the HTTP server
-mode (SM-3 — clients want a uniform 200-with-payload), but
-stdio mode treats every "you sent me bad data" as an
-`Outbound::Error`. The test was written for the original
-"fail at serde-deserialize" behavior and never updated.
-
-**Fix:** revert `ValidateProfile`'s wire variant to carry a
-fully-validated `Profile`. Validation runs at serde
-deserialization through Profile's `try_from = "RawProfile"`
-attribute, so an invalid profile fails the outer
-`from_value::<Request>` call upstream and emits an
-`invalid_request` error frame. The dispatcher arm collapses
-to a clean unconditional `Ok(ValidationReport { ok: true,
-reason: None })`.
-
-`server_mode.rs` (HTTP `/naive/validate`) is **unchanged** —
-it still returns 200-with-`ok:false` per SM-3, deliberately
-diverging from stdio. Doc comments on both sides now spell
-out the divergence.
-
-Merged via PR #3.
-
-#### 2. Clippy `-D warnings` baseline restored
-
-A newer Rust toolchain pedantic-lint update added two checks
-that triggered in `core/src/server_mode.rs`:
-
-- `clippy::needless_pass_by_value` on
-  `ApiError::from_json_rejection` — body only used `err` for
-  `tracing::warn!(error = %err, …)` (Display via reference).
-  Switched to `&JsonRejection`; updated the two `map_err`
-  call sites to pass a reference.
-- `clippy::doc_overindented_list_items` on the `naive_validate`
-  doc — the `Err(e) →` bullet's continuation was indented 16
-  spaces past `///`. Reduced to 5 spaces so the continuation
-  aligns with the bullet's text-start (standard markdown rule).
-
-`cargo clippy --release --all-targets -- -D warnings` now
-exits 0.
-
-### Validation
-
-- `cargo test --release` — **130/130 pass** (was: 129/130 with
-  `rejects_invalid_profile_during_deserialization` failing on
-  v2.0.11).
-  - lib unit tests: 104/104
-  - chaos: 18/18
-  - protocol_roundtrip: 6/6 (the previously-failing test is
-    now green)
-  - doc tests: 2/2
-- `cargo clippy --release --all-targets -- -D warnings` — clean.
-- Full release pipeline (`scripts/cut_release.sh 2.0.12`) —
-  green: universal binary built, `--version` reports 2.0.12,
-  bundled naive verified against upstream pin, all four
-  artefacts + sha256 manifest emitted.
-
-### Files changed
-
-- `core/src/protocol.rs` — `RequestKind::ValidateProfile`
-  variant + doc comment.
-- `core/src/client_mode.rs` — dispatcher arm simplified;
-  unused `Profile` import dropped.
-- `core/src/server_mode.rs` — `from_json_rejection` takes
-  `&JsonRejection`; doc list continuation re-indented.
-- `core/Cargo.toml`, `core/Cargo.lock`, project.pbxproj —
-  version 2.0.11 → 2.0.12.
-
----
+Closes a stdio-vs-HTTP divergence and restores the clippy
+baseline. Test
+`protocol_roundtrip.rs::rejects_invalid_profile_during_deserialization`
+had been failing since v0.1.7.16: it sends `validate_profile`
+with `localPort: "0"` and expects `Outbound::Error` code
+`invalid_request`, but the engine returned a successful
+`Outbound::Response` with `ValidationReport { ok: false }`. The
+v0.1.7.16 change had moved `RequestKind::ValidateProfile` to
+carry an unvalidated `RawProfile` so the dispatcher could
+surface `ok: false` — right shape for HTTP server mode (clients
+want uniform 200-with-payload per SM-3), wrong for stdio mode
+which treats bad data as `Outbound::Error`. Fix reverts the
+wire variant to carry a fully-validated `Profile`; validation
+runs at serde deserialization through Profile's `try_from
+= "RawProfile"`, so invalid profiles fail the outer
+`from_value::<Request>` and emit `invalid_request`. Dispatcher
+arm collapses to unconditional `Ok(ValidationReport { ok: true,
+reason: None })`. `server_mode.rs` HTTP `/naive/validate`
+unchanged — still returns 200 + ok:false per SM-3, deliberate
+divergence now spelled out in doc comments on both sides. PR #3.
+Plus clippy: `needless_pass_by_value` on
+`ApiError::from_json_rejection` switched to `&JsonRejection`;
+`doc_overindented_list_items` on the naive_validate doc list
+continuation reduced from 16 to 5 spaces. 130/130 tests
+(was 129/130).
 
 ## [2.0.11] — 2026-05-05 (lsregister fix: app no longer shows old version after in-app update)
 
-After updating via the in-app updater (especially from a
-`.pkg`-installed, root-owned bundle), restarting the app
-from the Dock showed the old version instead of the newly
-installed one.
-
-**Root cause:** the relaunch helper swaps the bundle via an
-`mv`-pair — old → `.old-update`, staged → `$OLD_APP`. The
-inode at `$OLD_APP` changes; LaunchServices may retain a
-stale cache entry for the old inode and serve the cached
-(old) bundle metadata on the next `open` from the Dock or
-Finder, even though the correct new `.app` is on disk.
-
-**Fix:** the relaunch script now calls
-
-```bash
-lsregister -f "$OLD_APP"
-```
-
-immediately after the chown (admin-elevated path) / bundle
-swap (regular path), before the `open`/`launchctl asuser open`.
-`-f` forces LaunchServices to invalidate and rebuild its
-database entry for that exact path, so subsequent opens
-always get the freshly installed bundle.
-
-On the admin-elevated path (`launchctl asuser`) the call
-is routed through `launchctl asuser ${ORIG_UID}` so the
-*user-scoped* LaunchServices database is updated — running
-`lsregister` as root alone would leave the per-user database
-stale. Falls through silently if the binary is absent
-(should never happen on stock macOS; it ships with the OS).
-
-### Files changed
-
-- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` — step 5
-  of the relaunch script.
-
----
+After in-app update (especially from a `.pkg`-installed
+root-owned bundle), restarting from the Dock showed the old
+version. The relaunch helper swaps the bundle via an `mv`-pair
+so the inode at `$OLD_APP` changes, and LaunchServices may
+retain a stale cache entry for the old inode and serve the
+cached metadata on the next `open` from the Dock/Finder. Fix:
+relaunch script now calls `lsregister -f "$OLD_APP"`
+immediately after the chown (admin-elevated path) or bundle
+swap (regular path), before the `open` / `launchctl asuser
+open`. `-f` forces LaunchServices to invalidate and rebuild
+its database entry. On the admin-elevated path the call is
+routed through `launchctl asuser ${ORIG_UID}` so the user-scoped
+database is updated (running lsregister as root alone leaves
+the per-user database stale). Falls through silently if the
+binary is absent.
 
 ## [2.0.10] — 2026-05-05 (.pkg installer poka-yoke: blocks when app is running)
 
-A user asked for a poka-yoke (mistake-proof) gate on the
-manual `.pkg` installer: if Cool Tunnel is currently running,
-the installer should refuse to proceed and ask the user to
-quit the app first. Pre-2.0.10 the installer would happily
-try to overwrite the running bundle, with two failure modes:
-
-  1. macOS refuses (text-busy / EACCES on the executable
-     segment), leaving the user with a partially-replaced
-     bundle and no clear path forward.
-  2. The bundle WAS replaced but the running process
-     continues with the old code in memory; the user thinks
-     they're on the new version but the still-running
-     instance is the old one, until they happen to relaunch.
-
-### How the gate works
-
-The .pkg is now a **distribution package** (built with
-`productbuild --distribution …`) wrapping the existing
-component. The distribution descriptor carries an
-`installation-check` JavaScript that runs *before* any
-install action:
-
-```javascript
-function cool_tunnel_install_check() {
-    var status = system.run("/usr/bin/pgrep", "-x", "Cool Tunnel");
-    if (status === 0) {
-        // App is running → block the install.
-        my.result.title = "Cool Tunnel is running";
-        my.result.message = "Please quit Cool Tunnel and re-open this installer to continue. ...";
-        my.result.type = "Fatal";
-        return false;
-    }
-    return true;
-}
-```
-
-`pgrep -x "Cool Tunnel"` matches the exact executable name
-(`Contents/MacOS/Cool Tunnel`, set by `PRODUCT_NAME` in
-pbxproj). Exit status 0 means a match was found ⇒ block;
-non-zero means safe to install.
-
-If `pgrep` itself fails to launch (vanishingly rare on stock
-macOS — it ships with the OS), the check **falls through to
-allow** rather than block. Better to let the user proceed
-than to permanently brick the installer behind a check we
-can't run reliably.
-
-### What changed in the build pipeline
-
-- **New file:** `scripts/Distribution.xml.template` carrying
-  the JS check. Note that XML forbids double hyphens inside
-  comments, so the file uses pipes (`|`) instead of em-dashes
-  in prose; rephrasing to use double hyphens would make
-  `productbuild` reject the file.
-- **`package_release.sh` reworked:** the .pkg step now does
-  `pkgbuild` → component, `awk` substitutes `{{VERSION}}`
-  into the template, then `productbuild --distribution …`
-  emits the final wrapper.
-- **Output identifier unchanged** (`space.coolwhite.cooltunnel.pkg`)
-  so a productbuild-signed update still upgrades in place
-  rather than installing alongside.
-
-### Combination with v2.0.9 admin-elevated in-app updates
-
-The two paths are complementary, not redundant:
-
-- **v2.0.9 in-app updater:** handles the "Cool Tunnel is
-  already running and the user clicks Update inside it" case
-  by routing the install through `osascript … with
-  administrator privileges` and a `launchctl asuser` relaunch.
-- **v2.0.10 .pkg installer gate:** handles the "Cool Tunnel
-  is running and the user double-clicks a downloaded .pkg in
-  Finder" case by blocking with a clear message before any
-  install action. After quitting and re-opening the installer,
-  the .pkg installs normally.
+Poka-yoke gate on the manual `.pkg` installer: if Cool Tunnel
+is currently running, the installer refuses to proceed. Pre-fix
+the installer would either fail with text-busy/EACCES on the
+executable segment (leaving the user with a partially-replaced
+bundle) or succeed at replacing on disk while the running process
+continues with old code in memory. The .pkg is now a distribution
+package (`productbuild --distribution`) wrapping the existing
+component; the distribution descriptor carries an
+`installation-check` JavaScript that runs before any install
+action and calls `pgrep -x "Cool Tunnel"` — exit 0 blocks with
+a clear "quit and re-open the installer" message, non-zero
+proceeds. If `pgrep` itself fails to launch (vanishingly rare),
+the check falls through to allow rather than block. Build
+pipeline: new `scripts/Distribution.xml.template` (XML forbids
+`--` in comments, so the file uses `|` in prose); `package_release.sh`
+substitutes `{{VERSION}}` via awk then runs `productbuild
+--distribution`. Output identifier
+(`space.coolwhite.cooltunnel.pkg`) unchanged so signed updates
+upgrade in place. Complementary to v2.0.9's in-app updater
+path: this handles double-click-in-Finder, that handles
+click-Update-inside-app.
 
 ## [2.0.9] — 2026-05-05 (.pkg-installed bundles can now self-update)
 
-A user reported that the in-app Update button on a
-.pkg-installed Cool Tunnel showed:
-
-> Cool Tunnel was installed via the .pkg installer, so its
-> bundle is owned by root. The in-app updater can't get past
-> that without admin auth. To self-update from here on:
-> 1. Quit Cool Tunnel.
-> 2. Drag /Applications/Cool Tunnel.app to the Trash (you'll
->    be asked for admin password).
-> 3. Reinstall by dragging Cool Tunnel from the .dmg or .zip
->    into /Applications.
-
-That's a bad UX. The user already cleared one admin-auth gate
-when running the .pkg installer, and what they really want is
-an in-app update path that handles the second gate the same
-way every other privileged macOS operation does — by showing
-the standard system authorisation dialog.
-
-### Auto-update now handles root-owned bundles
-
+Pre-fix, the in-app Update button on a .pkg-installed bundle
+told the user to drag-Trash and reinstall manually. Bad UX —
+the user had already cleared one admin-auth gate. Now
 `refuseReadOnlyInstall` is renamed to `preflightInstallability`
-and now **returns** `needsAdminElevation: Bool` for the
-root-owned case instead of throwing. When the flag is set,
-`spawnRelaunchHelper` routes the install through:
-
-```
-osascript -e 'do shell script "/bin/bash <wrapper>"
-              with prompt "Cool Tunnel needs to update its
-              application bundle. (It was originally installed
-              via the .pkg installer, so the bundle is owned
-              by root.)"
-              with administrator privileges'
-```
-
-The user sees the standard macOS authorisation sheet (Touch
-ID / password / Apple Watch). After authorisation:
-
-1. The privileged **wrapper** script runs as root, `nohup`s
-   the real relaunch helper into the background, and exits
-   fast — so `osascript` returns to the parent within a
-   second or two instead of blocking 30+ s on the parent-PID
-   wait. If the user cancels the dialog, `osascript` exits
-   non-zero and Cool Tunnel surfaces a friendly "Update
-   cancelled" message and stays running.
-2. The **real helper** (now running as root, detached, parent
-   = launchd) waits for Cool Tunnel to exit, performs the
-   atomic ditto/mv/mv swap exactly like the user-owned path,
-   and then runs two extra steps:
-   - `chown -R ${ORIG_UID}:staff "$OLD_APP"` — restores
-     ownership to the user, so **subsequent updates take the
-     regular no-prompt path**. The .pkg → first-update
-     transition is the only time the password dialog appears.
-   - `launchctl asuser ${ORIG_UID} open "$OLD_APP"` — relaunches
-     the new copy in the user's GUI session, NOT as root.
-     A bare `open` from a root process would launch the new
-     instance as root — which would mangle TCC grants and
-     keychain access.
-3. `ORIG_UID` is captured from `getuid()` in the parent app
-   (Swift) and interpolated into the script. Reading it
-   inside the privileged shell isn't safe — `id -u` returns
-   `0` there.
-
-### What stays the same
-
-- **chflags-locked bundle** (Get Info → Locked, or
-  `chflags uchg`) still throws — admin elevation can't fix
-  that, the user really does need to unlock it.
-- **Bundle owned by another non-root user** still throws —
-  weird state, deserves manual investigation rather than a
-  silent ownership change.
-- **Read-only volume / parent-not-writable for user-owned
-  bundle** still throws.
-- The user-owned (regular .dmg/.zip-installed) path is
-  byte-identical to v2.0.8: no osascript, no extra prompt,
-  just the existing detached `bash` spawn.
-
-The `osascript`'s `with prompt` parameter customises the
-dialog text so the user sees Cool Tunnel-specific copy
-explaining what's about to happen, rather than the generic
-"osascript wants to make changes" string.
+and returns `needsAdminElevation: Bool` for the root-owned case
+instead of throwing. When set, `spawnRelaunchHelper` routes
+through `osascript -e 'do shell script "..." with prompt "..."
+with administrator privileges'` showing the standard macOS
+auth sheet. After auth: the privileged wrapper runs as root,
+`nohup`s the real relaunch helper into the background and
+exits fast so osascript returns within ~2 s. The real helper
+(running as root, parent = launchd) waits for Cool Tunnel to
+exit, performs the atomic ditto/mv/mv swap, then runs
+`chown -R ${ORIG_UID}:staff "$OLD_APP"` to restore user
+ownership (subsequent updates take the no-prompt path — the
+.pkg → first-update transition is the only time the password
+dialog appears) and `launchctl asuser ${ORIG_UID} open "$OLD_APP"`
+to relaunch in the user's GUI session (a bare `open` from root
+would launch the new instance as root and mangle TCC grants +
+keychain access). `ORIG_UID` is captured from `getuid()` in
+Swift and interpolated (reading inside the privileged shell
+returns 0). chflags-locked bundles still throw, as do bundles
+owned by another non-root user and read-only volumes. The
+user-owned (.dmg/.zip-installed) path is byte-identical to
+v2.0.8.
 
 ## [2.0.8] — 2026-05-05 (UI compaction + appearance scroll-jump fix)
 
-Two surfaced-by-screenshot fixes shipped together.
-
-### 1. The whole upper-window chrome collapses to one row
-
-A user screenshot showed the upper-middle of the main window
-was nearly all blank. The status row (`● Not connected` /
-`Pick a mode below to connect.`) sat on its own line above
-the controls row (mode picker + Start + secondary buttons),
-and the firewall warning pill lived in a third corner of the
-header. Three separate rows of chrome before the form even
-started. The subtitle ("Pick a mode below to connect.")
-narrated an action whose UI sat three pixels below it.
-
-**Fix:** the entire header is now a **single horizontal row**:
-
-```
-●  Not connected    [Smart│Global│Local]    ▶ Start  ⚕  ⏱⌄  ⚙   [⚠ Firewall on]
-```
-
-- `HeaderView` is split into `HeaderStatusPill` (single-line
-  dot + headline) and `FirewallBadge` (separately placeable),
-  both `public` so the parent composes them.
-- The "Pick a mode below to connect." subtitle is **dropped**
-  — the mode picker is the action it was instructing.
-- `ControlPanelView` drops its internal flexible `Spacer`
-  between picker and buttons; those now form a tight
-  primary-action cluster.
-- The mode picker tightens from `maxWidth: 260 → 220` so the
-  whole row fits at the 780-pt window minWidth even with the
-  firewall badge on.
-- The top-pane `minHeight` drops `360 → 320` since the
-  reclaimed vertical space is real.
-
-The error banner still appears under the merged row when
-`lastError` is non-nil — that surface didn't change.
-
-### 2. Changing Appearance no longer scrolls Settings to the top
-
-A user reported that tapping Match System / Light / Dark in
-**Settings → Appearance** dumped the Settings ScrollView back
-to the top, losing whatever section they were reading.
-
-**Root cause:** v2.0.5's `conditionallyPreferredColorScheme`
-helper used an `if let scheme { … } else { self }` branch.
-Toggling between Match System (nil) and Light/Dark switched
-which branch was taken, which counts as a view-tree
-*structural* change to SwiftUI — every subtree below it,
-including the SettingsView's ScrollView, got rebuilt and
-lost its scroll position. Even toggling between Light and
-Dark within the `if` branch was enough to re-evaluate the
-modifier and cause the same churn.
-
-**Fix:** v2.0.8 drives appearance through **`NSApp.appearance`**
-(AppKit-level) instead of `.preferredColorScheme(_:)`
-(SwiftUI structural). `ContentView.body.task(id:
-appearanceMode)` calls a new `applyAppearance(_:)` that
-sets:
-
-- `.system` → `NSApp.appearance = nil` (follow system, the
-  AppKit-native equivalent of "Match System")
-- `.light` → `NSApp.appearance = NSAppearance(named: .aqua)`
-- `.dark` → `NSApp.appearance = NSAppearance(named: .darkAqua)`
-
-Cocoa propagates the resolved appearance to every NSWindow
-through `effectiveAppearance`. The SwiftUI view tree is
-**not rebuilt** because no view structure changed — only the
-resolved colours. The Settings ScrollView keeps its scroll
-position across every appearance toggle.
-
-This also lets us delete the `conditionallyPreferredColorScheme`
-View extension v2.0.5 added — the AppKit-native path
-sidesteps the `nil ≠ "follow system"` SwiftUI bug entirely
-without needing the conditional-modifier workaround.
+Two screenshot-driven fixes. (1) The upper-window chrome
+collapses to a single horizontal row: `●  Not connected
+[Smart│Global│Local]  ▶ Start  ⚕  ⏱⌄  ⚙  [⚠ Firewall on]`.
+`HeaderView` is split into `HeaderStatusPill` (single-line
+dot + headline) and `FirewallBadge` (separately placeable);
+the "Pick a mode below to connect." subtitle is dropped (the
+picker IS the action). `ControlPanelView` loses its internal
+flexible Spacer; mode picker tightens from maxWidth 260 → 220
+so the whole row fits at the 780pt minWidth even with the
+firewall badge. Top-pane minHeight drops 360 → 320. Error
+banner unchanged. (2) Tapping Match System / Light / Dark in
+Settings → Appearance scrolled the ScrollView back to the top.
+Root cause: v2.0.5's `conditionallyPreferredColorScheme` used
+an `if let scheme { ... } else { self }` branch — toggling
+between nil and a concrete value counted as a view-tree
+structural change, every subtree (including SettingsView's
+ScrollView) was rebuilt. Fix: drive appearance through
+`NSApp.appearance` (AppKit-level) instead of `.preferredColorScheme`
+(SwiftUI structural). `ContentView.body.task(id: appearanceMode)`
+sets `NSApp.appearance = nil` / `NSAppearance(named: .aqua)`
+/ `NSAppearance(named: .darkAqua)`; Cocoa propagates via
+`effectiveAppearance`. SwiftUI view tree is not rebuilt —
+ScrollView keeps its scroll position. The v2.0.5
+`conditionallyPreferredColorScheme` extension is deleted.
 
 ## [2.0.7] — 2026-05-05 (relaunch-stuck hotfix)
 
-Single-issue hotfix on top of v2.0.6.
-
-### Update flow could stall at "Relaunching…"
-
-After a successful in-app update, the UI transitioned to
-`.relaunching` ("The app will close in a moment.") and
-called `NSApp.terminate(nil)`. AppKit's
-`applicationShouldTerminate` returned `.terminateLater` and
-spawned a real shutdown Task plus a 5-second watchdog Task
-to fire `NSApp.reply(toApplicationShouldTerminate: true)`.
-
-In rare conditions — most commonly an in-flight URLSession
-holding the run loop, or a window-close animation racing
-the reply — neither Task fired soon enough and the process
-never exited. The relaunch helper kept waiting on our PID,
-the user saw the spinner stuck indefinitely, and only
-Force Quit recovered.
-
-**Fix (`SystemIntegration/AppUpdater.swift`):** schedule a
-`Task.detached` immediately before `NSApp.terminate(nil)`
-that calls `Darwin.exit(0)` after **8 seconds**,
-unconditionally. The clean shutdown path still has every
-chance to win (5 s watchdog, 8 s hard exit), and any
-system-proxy state we'd normally clean up in
+Update flow could stall at "Relaunching…" indefinitely. After
+a successful in-app update, UI transitioned to `.relaunching`
+and called `NSApp.terminate(nil)`. `applicationShouldTerminate`
+returned `.terminateLater` and spawned a shutdown Task plus a
+5-second watchdog to fire `reply(toApplicationShouldTerminate:
+true)`. In rare conditions (in-flight URLSession holding the
+run loop, window-close animation racing the reply), neither
+Task fired soon enough and the process never exited; the
+relaunch helper kept waiting on our PID and only Force Quit
+recovered. Fix: schedule a `Task.detached` immediately before
+`NSApp.terminate(nil)` that calls `Darwin.exit(0)` after 8
+seconds, unconditionally. Clean shutdown still wins under
+normal conditions (5 s watchdog inside 8 s hard exit). Any
+system-proxy state normally cleaned in
 `orchestrator.shutdown()` is recovered by the
-`recoverFromCrashIfNeeded` sweep on next launch — exactly
-the same path that handles a real crash.
-
-The detached Task does not depend on the MainActor or any
-SwiftUI run loop, so it fires even if the main thread is
-fully stuck.
-
-### Recovery for users currently stuck on v2.0.6
-
-If you're reading this from a stuck v2.0.6 "Relaunching…":
-
-1. Force Quit Cool Tunnel.
-2. Relaunch — the `recoverFromCrashIfNeeded` sweep clears
-   any leaked system-proxy state.
-3. Settings → Cool Tunnel → Update → install v2.0.7.
+`recoverFromCrashIfNeeded` sweep on next launch — same path
+as a real crash. The detached Task doesn't depend on MainActor
+or SwiftUI run loop. Recovery for users stuck on v2.0.6: Force
+Quit → relaunch → Settings → Update → v2.0.7.
 
 ## [2.0.6] — 2026-05-05 (resizable Live log + release-pipeline hygiene)
 
-Two changes shipped together:
-
-### 1. Live log no longer hides the Server form
-
-The four panes used to live in a single `VStack`. Live log
-had `frame(minHeight: 220)` but no upper bound, so on a tall
-window it ate every extra pixel — the Server form's
-Password and Local-port rows plus the explanatory footer
-disappeared off the bottom of the window with no scroll.
-
-**Fix:** switched the main layout to `VSplitView`, which
-gives the user a draggable divider between the Form pane
-(top) and the Live log (bottom). Pull the divider down to
-surface the hidden Server rows; pull it up for live-tail
-use. Both halves keep their own internal scrolling within
-the user-chosen split.
-
-- Top pane minimum: 360 pt (room for header + control row
-  + four Server form rows + footer text without truncation).
-- Bottom pane: 80 pt minimum, 220 pt ideal, no max — the
-  user resizes freely above the floor.
-
-### 2. `scripts/cut_release.sh` — single-command release prep
-
-Pre-2.0.6 the release flow was implicit: a developer was
-expected to run `fetch_naive.sh`, `cargo clean`, bump
-versions, build Release, then `package_release.sh`. Skip
-any step and you ship a release with stale bundled binaries
-— exactly the *"the apps bundle has 2.0.3 inside a 2.0.5
-.app"* surprise the user reported.
-
-**New:** `scripts/cut_release.sh <VERSION>` runs every
-freshness step in order with hard preconditions:
-
-1. `scripts/fetch_naive.sh` — pulls latest upstream naive
-   into `COOL-TUNNEL/naive` and updates
-   `naive.upstream.json`.
-2. `cargo clean` in `core/` — guarantees the next Xcode
-   build cannot reuse stale rust artefacts.
-3. Verify `core/Cargo.toml` matches the requested version
-   (refuse to proceed otherwise).
-4. `cargo update -p cool-tunnel-core` — refreshes
-   `Cargo.lock` for the new version.
-5. `xcodebuild Release` — Xcode's Build Rust core run
-   script phase now produces a fresh universal cool-
-   tunnel-core because step 2 cleared the cache.
-6. Verify the freshly-built bundled cool-tunnel-core's
-   `--version` matches the requested version.
-7. Verify the bundled naive's SHA-256 matches the pinned
-   manifest in `naive.upstream.json`.
-8. Hand the .app to `package_release.sh`, which runs its
-   own preconditions and emits the .dmg / .pkg / .zip /
-   core-binary / .sha256.
-
-After this completes, `dist/Cool-tunnel-v…` is ready to
-upload via `gh release create`.
-
----
+Two changes. (1) Live log no longer hides the Server form: the
+four panes lived in a single `VStack` and Live log had
+`frame(minHeight: 220)` but no upper bound, so on a tall window
+it ate every extra pixel — Password + Local-port rows + footer
+disappeared off the bottom with no scroll. Switched the main
+layout to `VSplitView` (draggable divider). Top pane min 360pt
+(header + control row + four Server rows + footer); bottom pane
+min 80pt, ideal 220pt, no max. (2) New `scripts/cut_release.sh
+<VERSION>` runs every freshness step in order with hard
+preconditions: `fetch_naive.sh` → `cargo clean` in `core/` →
+verify `core/Cargo.toml` matches → `cargo update -p cool-tunnel-core`
+→ `xcodebuild Release` → verify freshly-built bundled
+`cool-tunnel-core`'s `--version` matches → verify bundled
+naive's SHA-256 against the pinned manifest → hand to
+`package_release.sh`. Pre-2.0.6 the release flow was implicit;
+skipping any step shipped stale bundled binaries (the "2.0.3
+inside a 2.0.5 .app" surprise).
 
 ## [2.0.5] — 2026-05-05 (hotfix bundle: AppUpdater pre-flight + Match System appearance)
 
-Three issues found in user testing of v2.0.4:
-
-### 1. "Match System" appearance stayed locked dark/light
-
-`.preferredColorScheme(nil)` does NOT mean "follow system" the
-way the docs suggest on macOS — once the modifier has been
-applied with a concrete `.light` or `.dark` and then re-applied
-with `nil`, the scheme stays *locked* at whatever was last
-concrete. Users picked Match System and the app stayed in the
-previous mode regardless of their System Settings → Appearance.
-
-**Fix:** new `conditionallyPreferredColorScheme(_:)` view
-helper that simply DOES NOT apply the modifier when the value
-is `nil`. SwiftUI then follows the window's `NSAppearance`
-dynamically, which is what Match System should always have
-done.
-
-### 2. AppUpdater pre-flight kept rejecting writable bundles
-
-The v2.0.3 `Darwin.access(W_OK)` check was over-restrictive on
-macOS 14+ — even after the user toggled Cool Tunnel ON in
-System Settings → Privacy & Security → App Management,
-`access(W_OK)` kept returning `false` (TCC permission grants
-don't consistently propagate to `access(2)` syscalls in the
-running process until the process is restarted, and even then
-sometimes not). The user got the same error after taking every
-step the message recommended.
-
-**Fix:** removed the `access(W_OK)` pre-flight. The pre-flight
-now only catches conditions we can prove block the install:
-- `chflags uchg|schg` (Locked checkbox / immutable flag)
-- root-owned bundle (`.pkg`-installer leaves the app owned by
-  root, blocks user-level `mv`)
-- bundle owned by another non-root user (rare; user-rename
-  edge case)
-
-Anything else (App Management TCC residue, exotic ACLs) is now
-trusted to surface from the relaunch helper's actual `mv`/`ditto`
-call, which logs to `~/Library/Logs/cool-tunnel-relaunch.log`.
-
-### 3. Update-failed banner truncated multi-line guidance
-
-The .pkg-ownership recovery message has multiple steps; the
-existing UI capped the error banner at 3 lines (`lineLimit(3)`)
-and gave only a Dismiss button. The user couldn't read past
-"...installed via the .pkg installer..." before the message
-hit the truncation.
-
-**Fix:** raised `lineLimit` to 12, restructured the banner as
-a `VStack` with a button row, and added a **"Reveal in Finder"**
-button next to Dismiss — one click takes the user to the
-bundle they need to drag to Trash for the manual reinstall.
-
-### Carved out
-
-- Deep-link to System Settings → Privacy & Security → App
-  Management. The error message now mentions the full path
-  textually; a one-click button is a 2.1 nicety.
-- Privileged-helper architecture (Sparkle-style `SMJobBless`
-  for self-update of root-owned bundles) — substantial
-  architecture change; deferred.
-
----
+Three v2.0.4 user-test issues. (1) "Match System" appearance
+stayed locked: `.preferredColorScheme(nil)` doesn't actually
+mean "follow system" on macOS — once applied with a concrete
+value and then re-applied with nil, the scheme stays locked
+at whatever was last concrete. New
+`conditionallyPreferredColorScheme(_:)` view helper simply
+doesn't apply the modifier when the value is nil, so SwiftUI
+follows the window's `NSAppearance` dynamically. (2) v2.0.3's
+`Darwin.access(W_OK)` check was over-restrictive on macOS 14+
+— even after toggling App Management ON, `access(W_OK)` kept
+returning false (TCC grants don't consistently propagate to
+`access(2)` until process restart, and sometimes not even
+then). Removed the W_OK pre-flight; pre-flight now only
+catches `chflags uchg|schg`, root-owned bundles, and bundles
+owned by another non-root user. Anything else (App Management
+TCC residue, exotic ACLs) is trusted to surface from the
+relaunch helper's actual `mv`/`ditto` call, which logs to
+`~/Library/Logs/cool-tunnel-relaunch.log`. (3) Update-failed
+banner truncated multi-line guidance: `lineLimit(3)` capped
+the .pkg-ownership recovery message, only a Dismiss button.
+Raised `lineLimit` to 12, restructured as a VStack with a
+button row, added a "Reveal in Finder" button next to Dismiss.
 
 ## [2.0.4] — 2026-05-05 (hotfix — phantom spinner next to "You're on the latest version")
 
-The Settings → Naive Binary and Settings → Rust Core sections
-left a small `ProgressView` spinner permanently spinning next
-to the "You're on the latest version (X)" text after a
-successful Check. Cosmetic — the check itself completed; just
-the indeterminate-progress glyph never went away.
-
-### Cause
-
-`updaterRow` and `rustUpdaterRow` both render a leading
-`ProgressView` whose `.frame(width: 80)` slot uses an inner
-switch over `updater.state`. v2.0.2 added the new `.checking
-/ .upToDate / .available` states but only added their text
-to `updaterMessage` — the row's `case .succeeded, .failed,
-.idle: EmptyView()` arm wasn't extended, so `.upToDate` and
+Settings → Naive Binary and Settings → Rust Core left a small
+`ProgressView` spinner permanently spinning next to the
+"You're on the latest version (X)" text after a successful
+Check. Cosmetic. `updaterRow` and `rustUpdaterRow` use an
+inner switch over `updater.state` for the spinner slot; v2.0.2
+added `.checking / .upToDate / .available` states but only
+added their text to `updaterMessage`, so `.upToDate` and
 `.available` fell into the `default: ProgressView()` arm.
-`.upToDate` and `.available` are *resting* states (the check
-finished; nothing's in flight), so they should render no
-spinner.
-
-### Fix
-
-Add `.upToDate, .available` to the `EmptyView` arm of both
-`updaterRow` and `rustUpdaterRow`. Two lines.
-
-After 2.0.4, the row renders just the message ("You're on
-the latest version (X).") with no leading spinner.
-
----
+Two-line fix adds them to the `EmptyView` arm in both rows.
 
 ## [2.0.3] — 2026-05-05 (hotfix — false-positive "bundle is locked" on Update)
 
-`AppUpdater.refuseReadOnlyInstall` over-reported "Cool Tunnel's
-bundle is locked. Right-click → Get Info → uncheck Locked"
-because it leaned on `URLResourceKey.isWritableKey`, which
-returns `false` for a *superset* of conditions:
-
-- the actual Locked-checkbox / `chflags uchg|schg` case (the
-  one the message addresses),
-- ACL inheritance and POSIX-mode quirks left by Time Machine
-  restores,
-- macOS 14+ App-Management TCC denials,
-- some signed-bundle metadata states on Sequoia.
-
-Users without an actually-locked bundle saw a hint pointing at
-a checkbox they'd find already unchecked.
-
-### Fix
-
-- **Probe `chflags` directly** via `lstat` + `st_flags &
-  (UF_IMMUTABLE | SF_IMMUTABLE)`. This is authoritative for
-  the Locked-checkbox case; the message stays accurate when
-  it fires.
-- **Fall back to `access(W_OK)`** for non-chflags causes (ACL,
-  TCC, mode bits). New, separate error message: "Cool Tunnel
-  can't modify its own bundle. On macOS 14 and later, open
-  System Settings → Privacy & Security → App Management and
-  turn on Cool Tunnel. If you've already done that — or if
-  you're on an older macOS — move the app to /Applications
-  and try Update again."
-- **Drop `URLResourceKey.isWritableKey` from the bundle-level
-  check.** The parent-folder check still uses it (where the
-  semantics are clean enough).
-
-After 2.0.3, you only see the Locked-checkbox hint when there
-is actually a Locked checkbox to uncheck.
-
----
+`AppUpdater.refuseReadOnlyInstall` over-reported "bundle is
+locked" because it leaned on `URLResourceKey.isWritableKey`,
+which returns false for a superset of conditions (actual
+chflags-locked, ACL/POSIX-mode quirks from Time Machine
+restores, macOS 14+ App-Management TCC denials, signed-bundle
+metadata states on Sequoia). Users without an actually-locked
+bundle saw the unchecked-already hint. Fix: probe `chflags`
+directly via `lstat` + `st_flags & (UF_IMMUTABLE |
+SF_IMMUTABLE)` for the authoritative Locked-checkbox detection,
+fall back to `access(W_OK)` for non-chflags causes with a new
+"can't modify its own bundle... System Settings → Privacy &
+Security → App Management" message. Dropped
+`URLResourceKey.isWritableKey` from the bundle-level check;
+parent-folder check still uses it.
 
 ## [2.0.2] — 2026-05-05 (Check-then-update for naive + rust core)
 
 `NaiveUpdater` and `RustCoreUpdater` now mirror `AppUpdater`'s
-check-then-update pattern. Pre-2.0.2 every "Update" click did
-a full download regardless of whether you were already on the
-latest — clicking "Update again" on naive pulled the same
-binary again because upstream's `-N` patch suffix re-tags the
-unchanged naive build, and the user-visible verdict pill never
-moved.
-
-### Bug surface
-
-- "Update again" button (naive + rust core) always fired a
-  fresh download. For naive specifically: upstream tags like
-  `v148.0.7778.96-2` re-publish the same naive binary under a
-  new tag suffix, so the download produced cosmetically
-  different bytes (different upstream packaging) but the
-  binary's `--version` stayed at `148.0.7778.96`. Wasteful,
-  confusing, and caused the verdict pill to never look
-  "settled."
-
-### Fix
-
-- **New states on both updaters:** `checking` /
-  `upToDate(currentVersion:latestTag:)` /
-  `available(tag:currentVersion:)`. State machine still
-  monotonic — in-flight checks/updates can't be clobbered.
-- **New method `checkForUpdates(currentVersion:)` on both
-  updaters.** Resolves the latest tag (one HTTP GET, no
-  binary fetch) and compares against the binary's `--version`
-  via `tagIsConsideredCurrent(_:forBinaryVersion:lastInstalled:)`.
-  Two paths qualify as "current": exact tag match against
-  the persisted `lastInstalledTag`, OR semver match after
-  stripping `v` prefix and `-N` suffix from the tag.
-- **`lastInstalledTag` persisted in `UserDefaults`** on both
-  updaters (keys `NaiveUpdater.lastInstalledTag` and
-  `RustCoreUpdater.lastInstalledTag`). Without persistence,
-  every relaunch would falsely report "Update available"
-  against an upstream patch tag the user already installed.
-- **`NaiveUpdater.update()` reuses the resolved tag from
-  `.available`.** Saves one HTTP roundtrip in the typical
-  Check → Update flow.
-- **SettingsView morphing button + subtitle** for both naive
-  and rust core sections, mirroring AppUpdater:
-  - `Check for Updates` (idle / upToDate / failed / succeeded)
-  - `Checking…` (in-flight)
-  - `Update to <tag>` (available)
-  - `Resolving… / Downloading… / Extracting… / Merging… /
-    Installing…` (pipeline phases)
-  - Subtitle reads `You're on the latest version (X)` when
-    `.upToDate`, exactly like AppUpdater.
-
-### Carved out
-
-- `NaiveUpdater.update()` and `RustCoreUpdater.update()`
-  paths still allow direct invocation (no Check first) for
-  back-compat with any future "force update" flow. The
-  Settings UI no longer routes there directly.
-
----
+check-then-update pattern. Pre-fix every "Update" click did a
+full download regardless; naive upstream tags like
+`v148.0.7778.96-2` re-publish the same binary under new tag
+suffixes so downloads produced cosmetically different bytes
+but the binary's `--version` stayed at `148.0.7778.96`. New
+states on both updaters: `checking` /
+`upToDate(currentVersion:latestTag:)` /
+`available(tag:currentVersion:)`. New
+`checkForUpdates(currentVersion:)` resolves the latest tag (one
+HTTP GET, no binary fetch) and compares via
+`tagIsConsideredCurrent(_:forBinaryVersion:lastInstalled:)` —
+exact tag match against persisted `lastInstalledTag` OR semver
+match after stripping `v` prefix and `-N` suffix.
+`lastInstalledTag` persisted in UserDefaults (keys
+`NaiveUpdater.lastInstalledTag` / `RustCoreUpdater.lastInstalledTag`);
+without persistence every relaunch would falsely report
+"Update available". `NaiveUpdater.update()` reuses the
+resolved tag from `.available` saving one HTTP roundtrip.
+SettingsView morphing button + subtitle (Check for Updates /
+Checking… / Update to <tag> / Resolving… / Downloading… /
+Extracting… / Merging… / Installing…) mirroring AppUpdater.
+Direct invocation of `update()` without a Check still allowed
+for any future force-update flow.
 
 ## [2.0.1] — 2026-05-05 (hotfix — Rust core version drift + updater verification)
 
-Hotfix on top of v2.0.0. Three findings closed, one user-facing
-bug, two preventive.
-
-### Bug fix
-
-- **`core/Cargo.toml` was never bumped from `0.1.7`.** The
-  Rust binary in v2.0.0's `cool-tunnel-core-v2.0.0-universal`
-  asset self-reported `cool-tunnel-core 0.1.7` because that's
-  what `env!("CARGO_PKG_VERSION")` resolved to at compile
-  time. Settings → Rust Core → Update on a v2.0.0 install
-  appeared to "succeed" (download + SHA-256 match passed) but
-  the verdict pill kept showing 0.1.7. Cargo.toml is now at
-  `2.0.1`; the rebuilt binary self-reports correctly. **U#1**
-
-### Updater hardening (catches future drift)
-
-- **RustCoreUpdater post-install `--version` verification.**
-  After `atomicallyInstall`, the updater now runs the new
-  binary's `--version` and refuses to enter `.succeeded` if
-  the self-reported semver doesn't match the release tag's
-  semver. Pre-2.0.1, the updater trusted the SHA-256 match —
-  which proves byte integrity but says nothing about whether
-  those bytes were built from a `Cargo.toml` matching the
-  tag. The new check would have caught v2.0.0's drift at
-  install time, surfacing a clear error instead of letting
-  the user discover it via the verdict pill. **U#2**
-
-### Build-pipeline hardening (catches drift at packaging)
-
-- **`scripts/package_release.sh` Cargo.toml precondition.**
-  At the top of the script: parse `core/Cargo.toml`'s
-  `version` field and exit with a clear error if it doesn't
-  match the version arg. Would have rejected v2.0.0's
-  packaging run with "core/Cargo.toml version is '0.1.7' but
-  you requested '2.0.0'." **U#6**
-
-- **`scripts/package_release.sh` Resources/cool-tunnel-core
-  precondition.** Verify the .app's bundled engine binary
-  self-reports the requested version too (catches the case
-  where Cargo.toml was bumped but the .app wasn't rebuilt
-  from it). **U#5**
-
-### Carved out for a future release
-
-- **U#3** (Settings UI shows two version sources without
-  reconciliation) — addressed in part by U#2's fail-fast
-  posture; the conflicting display will go away naturally
-  once a release ships with mismatched versions blocked at
-  install time. Pure-UI reconciliation pass deferred.
-- **U#4** (NaiveUpdater has the same "tag-only success"
-  shape as RustCoreUpdater pre-2.0.1) — naive is upstream-
-  authoritative (klzgrad publishes binary == tag) so the
-  divergence is very unlikely. Symmetry fix deferred.
-- **U#7** (`lastInstalledTag` short-circuit) — minor;
-  bandwidth optimisation only.
-
----
+`core/Cargo.toml` was never bumped from `0.1.7` in v2.0.0, so
+the Rust binary self-reported `cool-tunnel-core 0.1.7` (what
+`env!("CARGO_PKG_VERSION")` resolved to at compile time).
+Settings → Rust Core → Update on a v2.0.0 install appeared to
+succeed (SHA-256 match passed) but the verdict pill kept
+showing 0.1.7. Cargo.toml now at 2.0.1; rebuilt binary
+self-reports correctly. U#1. Plus two preventive hardenings:
+U#2 — `RustCoreUpdater` runs the new binary's `--version`
+after `atomicallyInstall` and refuses to enter `.succeeded`
+if the self-reported semver doesn't match the release tag
+(would have caught v2.0.0 drift at install). U#6 —
+`package_release.sh` Cargo.toml precondition: parse
+`core/Cargo.toml`'s `version` field and exit if it doesn't
+match the version arg (would have rejected v2.0.0 packaging
+with "version is '0.1.7' but you requested '2.0.0'"). U#5 —
+verify the .app's bundled engine `--version` matches too.
+U#3 / U#4 / U#7 deferred.
 
 ## [2.0.0] — 2026-05-05 (full identity rebuild — first-class macOS app)
 
 Major version. The v0.1.x line was a custom-painted experiment;
-v2.0 is what the same app looks like when every surface is built
-from the platform's own primitives. **27 files changed, +1479 /
-−1199**, with the entire `MalteseTheme.swift` palette module
-removed.
-
-The transformation was driven by a third-party UX audit applying
-Apple's editorial bar and a forensic-pass engine/lifecycle audit.
-Every P0 and P1 finding from both audits is closed; P2 went from
-0 / 12 to 12 / 12.
-
-### Engine + lifecycle (Phase 2.0.x)
-
-- **Engine errors no longer swallowed on Start.** `startCore` is
-  now wrapped in a do/catch that publishes any thrown failure to
-  `lastError` via `recordError(...)` before re-raising. Pre-2.0,
-  view callers had empty catch blocks expecting `lastError` to
-  carry the surface — but no path inside `startCore` ever set it
-  on failure, so a port collision produced silent UI on the
-  click of a mode chip.
-- **Phantom "naive stopped unexpectedly" banner gone.** New
-  `userStopInFlight` flag set during `stop()` / `stopQuiet()`
-  suppresses the recovery branch in
-  `handle(event:).stateChanged(false)` while the user's
-  intentional shutdown is mid-flight.
-- **Menu-bar / window race covered.** The new menu-bar Stop
-  routes through `switchMode(.stopped)` so the existing
-  `transitionInFlight` guard catches concurrent lifecycle
-  transitions.
-- **Orphan-naive sweep on launch.** `recoverFromCrashIfNeeded`
-  now `pgrep -x naive` + filters PIDs whose parent is launchd
-  (PID 1) → SIGTERM → 500 ms grace → SIGKILL. If the previous
-  run died with naive holding port 1080, the next launch is
-  deterministic.
-- **Structured logging across the failure path.** Every
-  formerly-empty `catch` in `ControlPanelView` /
-  `MenuBarStatusContent` / `LogConsoleView` / `HeaderView` now
-  traces through `Logger.cooltunnel("UI.X")` under one
-  `subsystem == "space.coolwhite.cooltunnel"` umbrella.
-
-### Brand normalization
-
-- **`PRODUCT_NAME` flipped to `Cool Tunnel`.** Bundle on disk
-  renames from `Cool tunnel.app` → `Cool Tunnel.app`; binary
-  inside `Contents/MacOS/` renames likewise; `CFBundleName`,
-  `CFBundleDisplayName`, App-menu items, and the About panel
-  all read `Cool Tunnel` consistently. Bundle identifier
-  (`space.coolwhite.naive`) is unchanged so
-  `refuseIfMultipleInstalls` still works across the rename.
-
-### Settings contract
-
-- **Removed the `draft: AppSettings` indirection.** Every
-  Settings field binds directly to `orchestrator.settings.X`
-  via `@Bindable`; a single form-level
-  `.onChange(of: bindable.settings)` fires the orchestrator's
-  debounced `persistSettings()` on any mutation. `commit()`
-  replaced with `dismiss()` that calls `flushSettings()` so a
-  Cmd+W followed immediately by Cmd+Q cannot drop the user's
-  last keystroke.
-- **`⌘,` / "Settings…" menu item** wired through a new
-  `CommandGroup(replacing: .appSettings)` that flips the
-  inline panel via `NotificationCenter`.
-
-### Menu bar
-
-- **First-class `MenuBarExtra` status item.** Glyph driven by
-  orchestrator state (`arrow.up.right.circle` /
-  `arrow.up.right.circle.fill` /
-  `exclamationmark.triangle.fill`).
-- Flat mode rows (Smart / Global / Local) replaced the
-  redundant Start-button-plus-Mode-submenu pair. Stop only
-  rendered when running. ⌘0 opens window, ⌘, opens Settings,
-  ⌘Q quits.
-
-### Visual identity
-
-- **Mode-aware pastel-gradient window background gone.** System
-  `.windowBackground` material everywhere; Light / Dark /
-  Increased Contrast resolved by AppKit.
-- **`HeaderView`** rewritten as a quiet status row — semantic
-  colour dot + headline + subtitle. No card, no gradient.
-- **`ControlPanelView`** uses real `Picker(.segmented)` for
-  mode + `.borderedProminent` Start/Stop with semantic tint.
-- **`ConnectionFormView`** is now
-  `Form { Section { … } }.formStyle(.grouped)` with standard
-  `TextField` / `SecureField` / `Picker` rows.
-- **`LogConsoleView`** uses `.regularMaterial` surface with
-  `.separatorColor` hairline; `.red` for stderr; `.bordered`
-  Clear button.
-
-### Big Sur+ icon
-
-- New procedural icon stack generated by
-  `scripts/generate_app_icon.swift` — squircle backdrop with
-  cool-blue gradient, three concentric tunnel rings with
-  one-point perspective vanishing toward upper-right, bright
-  vanishing-point highlight. All 13 sizes (16 px through
-  1024 px @1× and @2×) regenerated from one master.
-
-### Firewall deep-link
-
-- The orange "Firewall on" capsule is now a Button that opens
-  `x-apple.systempreferences:com.apple.preference.security?Firewall`
-  via `NSWorkspace.shared.open`. Two-tier fallback to the
-  System Settings root if the pane URL is rejected. Closes the
-  audit's "warning with no recourse" finding.
-
-### Open at Login
-
-- New `LoginItemRow` in Settings → Behaviour, backed by
-  `SMAppService.mainApp`. Renders `.notRegistered` /
-  `.enabled` / `.requiresApproval` cleanly; the
-  approval-pending state surfaces a `.link` button that
-  deep-links to System Settings → General → Login Items.
-
-### Log export pipeline
-
-- Inline filter (case-insensitive substring); count text
-  reads "X of Y" while filtering, "X lines" otherwise.
-- `⋯` actions menu: **Copy All** (⌘⇧C), **Save to File…**
-  (`.fileExporter` with `PlainTextDocument`), **Share…**
-  (`ShareLink`), **Clear**.
-- Drag-out: the scroll icon in the log header is
-  `.draggable(logAsText)` with a custom drag preview; drop
-  into TextEdit / Mail / Slack to export the full log as
-  plain text.
-- Per-row context menu: **Copy Line** / **Copy with Timestamp**.
-
-### Acknowledgements
-
-- New `AcknowledgementsView` opened from Settings → About →
-  Acknowledgements…. Three-entry attribution (NaiveProxy
-  BSD-3-Clause, Rust crate graph MIT/Apache-2.0, SF Symbols
-  Apple license) with system-material cards, license pills,
-  copyright lines, and external-link buttons. Required by
-  the bundled dependencies' license terms.
-
-### MalteseTheme retired
-
-- `Views/MalteseTheme.swift` deleted (412 lines). Every live
-  UI surface derives colour and typography from system
-  tokens: `Color.accentColor`,
-  `Color(nsColor: .windowBackgroundColor)`,
-  `Color(nsColor: .separatorColor)`, semantic `.red` /
-  `.orange` / `.green` / `.secondary`, and
-  `.system(.X, design: .monospaced)` for monospace.
-
-### Accessibility
-
-- **Reduce Motion respected.** `LogConsoleView` reads
-  `@Environment(\.accessibilityReduceMotion)` and gates both
-  the empty-state pulse AND the auto-scroll animation on it
-  (in addition to the existing hardware-tier `PerformanceProfile`
-  check).
-- **Drag-handle a11y.** The log scroll-icon drag handle is no
-  longer hidden from VoiceOver — it has an explicit label
-  ("Drag the log: N lines.") and hint.
-- **Empty-state semantics.** The "Waiting for the first log
-  line…" placeholder uses
-  `.accessibilityElement(children: .combine)` so VoiceOver
-  reads it as one logical statement.
-
-### Tooling
-
-- **`scripts/generate_app_icon.swift`** — new programmatic
-  icon generator. Re-run anytime the master changes; the
-  full 13-PNG asset stack regenerates in one command.
-
----
+v2.0 is what the same app looks like when every surface is
+built from platform primitives. 27 files changed, +1479 / −1199;
+the entire `MalteseTheme.swift` palette module (412 lines) is
+removed. Driven by a third-party UX audit applying Apple's
+editorial bar and a forensic engine/lifecycle audit; every P0
+and P1 finding is closed. Engine + lifecycle: `startCore` is
+now wrapped in do/catch that publishes thrown failures to
+`lastError` via `recordError(...)` before re-raising (pre-2.0
+view callers had empty catch blocks expecting lastError to
+carry the surface, but no path inside startCore ever set it
+on failure — port collisions produced silent UI). New
+`userStopInFlight` flag set during `stop()` / `stopQuiet()`
+suppresses the recovery branch in `handle(event:).stateChanged(false)`
+during intentional shutdowns (kills the phantom "naive stopped
+unexpectedly" banner). Menu-bar Stop routes through
+`switchMode(.stopped)` so the existing `transitionInFlight`
+guard catches concurrent lifecycle transitions.
+`recoverFromCrashIfNeeded` now does `pgrep -x naive` + filters
+PIDs whose parent is launchd → SIGTERM → 500ms → SIGKILL, so
+if a previous run died with naive holding port 1080 the next
+launch is deterministic. Every formerly-empty catch in
+ControlPanelView / MenuBarStatusContent / LogConsoleView /
+HeaderView now traces through `Logger.cooltunnel("UI.X")`
+under one `subsystem == "space.coolwhite.cooltunnel"` umbrella.
+Brand normalisation: `PRODUCT_NAME` flipped to `Cool Tunnel`;
+bundle on disk renames `Cool tunnel.app` → `Cool Tunnel.app`,
+binary inside `Contents/MacOS/` renames likewise, CFBundleName
+/ CFBundleDisplayName / App-menu / About panel all read
+`Cool Tunnel`. Bundle identifier `space.coolwhite.naive`
+unchanged so `refuseIfMultipleInstalls` still works. Settings
+contract: removed the `draft: AppSettings` indirection — every
+field binds directly to `orchestrator.settings.X` via
+`@Bindable`, single form-level `.onChange(of: bindable.settings)`
+fires debounced `persistSettings()`. `dismiss()` now calls
+`flushSettings()` so Cmd+W + Cmd+Q can't drop the last
+keystroke. `⌘,` / "Settings…" wired through a new
+`CommandGroup(replacing: .appSettings)`. Menu bar: first-class
+`MenuBarExtra` status item with state-driven glyphs; flat mode
+rows (Smart / Global / Local) replaced the redundant
+Start-button-plus-Mode-submenu pair. ⌘0 opens window, ⌘, opens
+Settings, ⌘Q quits. Visual identity: mode-aware pastel-gradient
+background gone — system `.windowBackground` material everywhere;
+HeaderView rewritten as a quiet status row; ControlPanelView
+uses real `Picker(.segmented)` + `.borderedProminent` Start/Stop;
+ConnectionFormView is now `Form { Section { … } }.formStyle(.grouped)`;
+LogConsoleView uses `.regularMaterial` + `.separatorColor`
+hairline. New procedural icon stack via
+`scripts/generate_app_icon.swift` (squircle backdrop, three
+concentric tunnel rings, one-point perspective). Firewall
+deep-link: orange "Firewall on" capsule is now a Button
+opening `x-apple.systempreferences:com.apple.preference.security?Firewall`
+via `NSWorkspace.shared.open` with two-tier fallback. New
+`LoginItemRow` backed by `SMAppService.mainApp` with
+approval-pending deep-link. Log export pipeline: inline filter
+(case-insensitive substring); `⋯` actions menu with Copy All
+(⌘⇧C), Save to File… (.fileExporter), Share… (ShareLink),
+Clear; scroll-icon drag-out via `.draggable(logAsText)` with
+custom preview; per-row context menu (Copy Line / Copy with
+Timestamp). New `AcknowledgementsView` with three-entry
+attribution (NaiveProxy BSD-3, Rust crate graph
+MIT/Apache-2.0, SF Symbols Apple). Accessibility: Reduce
+Motion respected (gates empty-state pulse + auto-scroll
+animation); drag-handle has explicit label/hint;
+"Waiting for the first log line…" placeholder uses
+`accessibilityElement(children: .combine)` so VoiceOver reads
+one logical statement.
 
 ## [0.1.7.21] — 2026-05-04 (LTSC patch — clarity sweep, deletions only)
 
-LTSC patch on the v0.1.7 line. **Net –287 lines.** No new
-features, no new fixes, no behavior change. Pure deletion of
-indirection wrappers, audit-history narrative, and stale docs
-that have stopped earning their place after 11 patches of
-accumulation.
-
-The bias: where two equivalent fixes exist for a finding,
-prefer deletion over refactor. Code is read 10× more than it
-is written; less to read is the highest-value clarity change.
-
-### What was deleted
-
-- **`AppUpdater.sha256(of:)`** — single-line wrapper that just
-  forwarded to `SHAVerifier.sha256(of:)`. Two callers now go
-  through `SHAVerifier` directly. Indirection saved zero
-  semantic content; deletion saves 6 lines + one less symbol
-  to grep.
-- **`AppUpdater.writeRelaunchScript`** — wrapper that did
-  `String → Data + RestrictedFile.write(mode: 0o700) +
-  error wrap`. Single caller (`spawnRelaunchHelper`).
-  Inlined the four operative lines at the call site;
-  deleted the function. Removes ~20 lines and an entry from
-  the function-name vocabulary the reader has to keep in
-  their head.
-- **`AppUpdater.swift` file header — release-history block.**
-  The "## v0.1.7.11 Rule-Maker hardening (Fifth audit cycle)"
-  section enumerated AU-1 through AU-15 with a ~6-line
-  paragraph each (~80 lines of release narrative). That's
-  what `CHANGELOG.md` is for; `git blame` finds the same
-  information per-line on demand. Header now describes the
-  pipeline + posture + open trade-offs in 65 lines instead
-  of 145.
-- **`docs/v0.1.5-roadmap.md`** — 209 lines of stale planning
-  notes. The agent's documentation review explicitly flagged
-  this as "now stale" two cycles ago; deferred and forgotten.
-  Removed. CONTRIBUTING.md's dangling link to it removed
-  too.
-- **`docs/session-prompts-summary.xlsx`** — accidentally
-  committed via `git add -A` in v0.1.7.16. Was a per-session
-  artifact, not project state. Removed.
-
-### What stayed
-
-The decomposition checklist also asked "could this be
-deleted?" of:
-
-- The audit-tag inline comments (`v0.1.7.X (FIX):` /
-  `R-F#N:` / `Q-F#N:` etc., ~93 hits in `AppUpdater.swift`).
-  KEPT for now — they describe genuine *invariants* at the
-  point of code, not just history (e.g. "the relaunch helper
-  trap installs only after step 4" is a real ordering
-  constraint a future reader needs to know). Trimming would
-  bleed into refactoring; deletion-only release stays
-  scoped.
-- The `activeProfileID` field added in v0.1.7.19. KEPT —
-  used by exactly one consumer today, but the consumer's
-  job (detect "user edited the active profile") cannot be
-  derived from existing state.
-- The `ProxyActiveFlag` module. KEPT — it's an actual
-  state machine (write on enable / clear on disable / read
-  on bootstrap), not indirection.
-
-### What this means
-
-For users: nothing. No behavior change.
-For maintainers: 287 fewer lines to read on next pass.
-File-header history is now where it belongs (the
-changelog), and two indirection layers are gone.
-
-### Verification
-
-- `xcodebuild Release` BUILD SUCCEEDED
-- No Rust changes; existing 104 lib + 18 chaos tests still
-  pass
+Net –287 lines. No behaviour change. Deleted:
+`AppUpdater.sha256(of:)` (single-line wrapper forwarding to
+`SHAVerifier.sha256(of:)`); `AppUpdater.writeRelaunchScript`
+(inlined the four operative lines into `spawnRelaunchHelper`);
+`AppUpdater.swift` file-header release-history block (~80
+lines of AU-1 through AU-15 narrative — that's what CHANGELOG
+is for); `docs/v0.1.5-roadmap.md` (209 lines stale planning,
+flagged "now stale" two cycles ago);
+`docs/session-prompts-summary.xlsx` (per-session artifact
+committed via `git add -A` in v0.1.7.16). Kept: audit-tag
+inline comments (describe invariants, not just history);
+`activeProfileID` field (used by exactly one consumer but
+not derivable from existing state); `ProxyActiveFlag` module
+(actual state machine, not indirection).
 
 ## [0.1.7.20] — 2026-05-04 (LTSC hotfix — multi-install false-positive)
 
-LTSC hotfix on the v0.1.7 line. Single fix; ships immediately.
-
-**Bug discovered in production:** v0.1.7.16's Edge-F#11
-multi-install detector (`refuseIfMultipleInstalls`) ran
-`mdfind kMDItemCFBundleIdentifier == "space.coolwhite.naive"`
-and treated every hit as a real user install. Spotlight
-indexes Xcode build artifacts in
-`~/Library/Developer/Xcode/DerivedData/` — for any developer
-who has Cool Tunnel checked out and has run `xcodebuild`
-even once, that's anywhere from 1 to 10+ extra hits. The
-in-app updater then refused with "Multiple copies were
-found" even though the user has only one real install in
-`/Applications/`.
-
-### What landed (1 fix)
-
-- **`AppUpdater.refuseIfMultipleInstalls` filters Xcode
-  build artifacts.** New helper
-  `isPlausibleUserInstall(_:)` excludes any `mdfind` hit
-  containing `/DerivedData/`, `/Build/Products/`, or
-  `/Library/Developer/Xcode/`, plus project-local
-  `build/DerivedData/` / `build/Build/Products/` paths.
-  Real installs (`/Applications/...`,
-  `~/Applications/...`, anywhere not matching those
-  patterns) are still detected — defenders against the
-  original Edge-F#11 failure mode (genuine duplicate
-  installs in `/Applications` + `~/Applications`) stays
-  in place.
-- **Error message lists the actual paths.** When the
-  refusal does fire on a real duplicate, the user-facing
-  message now enumerates each path so they don't have to
-  hunt in Finder by hand.
-
-### Verification
-
-- `xcodebuild Release` BUILD SUCCEEDED
-- No Rust changes; existing 104 lib + 18 chaos tests
-  still pass
-
-### Known affected users
-
-Any developer who has Cool Tunnel checked out from GitHub
-and has built it locally (Xcode auto-generates
-`DerivedData`). Users on the production `.app` who have
-NEVER opened the project in Xcode are unaffected.
-
-If you're running **v0.1.7.19 or earlier and seeing this**:
-either drag-install v0.1.7.20's `.dmg` over `/Applications`
-manually, or run
-`rm -rf ~/Library/Developer/Xcode/DerivedData/*` once to
-clear the Xcode caches that Spotlight is indexing (Xcode
-will regenerate them next build — no source loss).
+v0.1.7.16's Edge-F#11 multi-install detector
+(`refuseIfMultipleInstalls`) ran `mdfind
+kMDItemCFBundleIdentifier == "space.coolwhite.naive"` and
+treated every hit as a real install. Spotlight indexes Xcode
+build artifacts in DerivedData — any developer with the
+checkout who ran xcodebuild once had 1-10+ extra hits, and
+the in-app updater refused with "Multiple copies found" even
+though `/Applications/` had only one. New helper
+`isPlausibleUserInstall(_:)` excludes `mdfind` hits containing
+`/DerivedData/`, `/Build/Products/`, `/Library/Developer/Xcode/`,
+or project-local `build/DerivedData/` / `build/Build/Products/`.
+Real installs anywhere outside those patterns still detected.
+Error message now enumerates actual paths on real duplicates.
 
 ## [0.1.7.19] — 2026-05-04 (LTSC patch — 10 deferred-high cluster)
 
-LTSC patch on v0.1.7 line. 10 high-severity items pulled
-forward from the deferred backlog. Each is contained, each has
-real user impact, all 10 ship together as one focused release.
-
-### What landed
-
-- **UX-F#5 (high) — auto-revert proxy on naive crash.** In
-  `handle(event:)`, when `.stateChanged(false)` arrives outside
-  a user-initiated stop (i.e. naive died on its own — server
-  unreachable, segfault, OS killed it), the orchestrator now
-  also calls `proxyController.disableAll()` and clears the
-  proxy-active sentinel. Without this, macOS keeps routing at
-  `127.0.0.1:1080` where nothing is listening — user sees a
-  misleading "Idle" header but every browser request stalls.
-  Pairs with v0.1.7.17's `lastError` HeaderView banner: user
-  sees both that naive stopped AND that the proxy was reverted,
-  with a clear retry path.
-- **UX-F#16 (high) — engine pipe-death recovery.** When the
-  `subscribeToEvents` for-await stream ends outside shutdown
-  (cool-tunnel-core itself died — pipe broke, OS killed it),
-  the orchestrator now: reverts system proxy, flips
-  `didBootstrap = false` so the next mode click re-runs the
-  bootstrap path (which calls `core.start()` to respawn the
-  engine), and surfaces an actionable error. Previously the
-  message said "click Start again" — but Start clicks hit
-  `core.send(...)` which throws `.notRunning` since the engine
-  was dead. The new message tells users to click a mode chip
-  (which now correctly re-bootstraps).
-- **Subproc-F#11a (high) — CoreClient stderr drain.** The
-  long-lived engine subprocess's stderr was previously
-  inherited (no drain). A chatty engine writing >64 KiB to
-  stderr fills the kernel pipe buffer, blocks on its next
-  stderr write, and the engine deadlocks mid-request. Added
-  a detached drain task (`Task.detached(priority: .utility)`)
-  that reads stderr to EOF and forwards content to a
-  `Logger.cooltunnel("CoreClient.stderr")` for support
-  diagnosis.
-- **Subproc-F#11b (high) — SystemProxyController via
-  `Subprocess.run`.** Previously used the legacy
-  `process.waitUntilExit()` + `readDataToEndOfFile()`
-  pattern that v0.1.7.10's `Subprocess.swift` was built to
-  replace — exactly the pipe-deadlock scenario for
-  `networksetup -listallnetworkservices` on a Mac with many
-  network services. Now routes through `Subprocess.run` for
-  concurrent pipe drain + 30s timeout escalation + sanitized
-  env (free benefit from Subproc-F#3 below).
-- **Subproc-F#3 (high) — env sanitization in `Subprocess.run`.**
-  Previously children inherited the app's full env including
-  `DYLD_INSERT_LIBRARIES`, `OBJC_DEBUG_*`, `MallocStackLogging`,
-  which could bias trust-boundary tools like `codesign` and
-  `networksetup`. Children now receive a minimal env: PATH
-  set to `/usr/bin:/bin:/usr/sbin:/sbin` (no user `~/bin`
-  shadowing), HOME, LANG=C, LC_ALL=C. Locale-stable output
-  parsing is a free side benefit.
-- **Subproc-F#1 (med-high) — simplified SIGTERM→SIGKILL.**
-  Replaced the 3-step SIGTERM → 250ms → SIGINT → 250ms →
-  SIGKILL escalation with SIGTERM → 1s → SIGKILL. SIGINT was
-  not an escalation past SIGTERM — any child that traps SIGTERM
-  almost always also traps SIGINT (`naive` does both for
-  graceful shutdown). The middle step wasted time without
-  escalating; SIGTERM gets a longer 1s grace before the kill.
-- **Lifecycle-F#7 (high) — transition lock for mode
-  switching.** Added `private var transitionInFlight: Bool`
-  to `TunnelOrchestrator`. A rapid second click while a prior
-  `switchMode` is mid-flight (between `stopQuiet` and
-  `startCore`) is now a clean no-op. Without this, two
-  concurrent transitions raced on `paths.configFile`,
-  `proxyController` state, and `core.send(...)` ordering —
-  `naive`'s config file was last-writer-wins, system proxy
-  state was whatever the last `enableX` call applied,
-  multiple naive children could briefly exist.
-- **UX-F#3 (high) — profile mutation while connected
-  surfaces a banner.** New `activeProfileID` field captured
-  at `startCore` time. The `selectedProfile` setter compares
-  the new value against the current `profiles[id]` — if
-  they differ AND the engine is running on that profile,
-  sets `lastError` to: "Profile edits applied — click Stop,
-  then a mode chip to use them. The running connection is
-  still on the old config." Surfaces in HeaderView via
-  v0.1.7.17 UX-F#1's banner. Previously edits were silently
-  buffered with no UX hint.
-- **Networksetup localization (med) — `dropFirst(1)` legend
-  filter.** `activeServices()` previously filtered the first
-  line via `.contains("asterisk")` — broken on non-English
-  macOS where the legend is localized. `networksetup` always
-  emits exactly one legend line as the first line; the
-  stable, locale-independent filter is `dropFirst(1)`.
-- **Lifecycle-F#5 (med) — AppDelegate watchdog cancels the
-  shutdown Task.** Previously the watchdog fired
-  `replied.fire()` after 5s but didn't cancel the shutdown
-  Task. If shutdown finished at t=8s, it continued running
-  its body (calling `core.stop()` / `disableAll()`) on a
-  partially-released graph while AppKit was mid-teardown.
-  Now the watchdog explicitly `shutdownTask.cancel()` before
-  firing the reply.
-
-### Verification
-
-- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
-  concurrency
-- No Rust changes; existing 104 lib + 18 chaos tests still
-  pass
-
-### What this release changes for users
-
-Users won't notice anything if everything's working — the wins
-are in the failure paths:
-
-1. **naive dies on its own** (server unreachable, OS killed
-   it): system proxy is auto-reverted, error banner explains
-   what happened. Browser keeps working.
-2. **cool-tunnel-core dies**: clear recovery path; clicking
-   any mode chip re-launches the engine.
-3. **Mac sleeps + wakes** with TCP keepalives dropped (from
-   v0.1.7.18) AND **engine subprocess deadlocks under heavy
-   stderr** (this release): no longer possible.
-4. **Profile field edits while connected**: banner explains
-   why the new value isn't in effect.
-5. **Rapid mode chip clicks**: only the first wins; second
-   click is no-op until first transition completes.
-6. **Non-English macOS**: `activeServices()` correctly
-   identifies network services regardless of system language.
-7. **Force-quit via Activity Monitor at the wrong moment**:
-   AppDelegate's watchdog fires cleanly without the shutdown
-   Task continuing post-mortem.
-
-### Still deferred (3 of the 6-high cluster)
-
-These need infrastructure that doesn't fit a single session,
-unchanged from v0.1.7.18's deferral:
-
-- **NaiveProxy SHA pinning** — needs Cool Tunnel-side trusted-
-  versions manifest (v0.1.8 target)
-- **Password Secret newtype + zeroize** — needs Swift test
-  target first (v0.1.8 target)
-- **Swift test target** — architectural pbxproj editing risk
-  (v0.1.8 target)
+10 high-severity items pulled forward as one focused release.
+UX-F#5: auto-revert proxy on naive crash —
+`handle(event:).stateChanged(false)` outside a user-stop now
+calls `proxyController.disableAll()` and clears the sentinel
+(pre-fix macOS kept routing at `127.0.0.1:1080` with nothing
+listening, browser stalled, header said "Idle"). UX-F#16:
+engine pipe-death recovery — when `subscribeToEvents` ends
+outside shutdown, orchestrator reverts proxy, flips
+`didBootstrap = false` so the next mode click re-bootstraps,
+and surfaces an actionable error ("click a mode chip" instead
+of "click Start again" which would throw `.notRunning`).
+Subproc-F#11a: CoreClient stderr drain — engine stderr was
+inherited (no drain); chatty engine writing >64 KiB filled the
+kernel pipe buffer and deadlocked mid-request. Added
+`Task.detached(priority: .utility)` that reads stderr to EOF
+and forwards to `Logger.cooltunnel("CoreClient.stderr")`.
+Subproc-F#11b: SystemProxyController now routes through
+`Subprocess.run` (was the legacy `waitUntilExit() +
+readDataToEndOfFile()` pattern — exact pipe-deadlock scenario
+for `networksetup -listallnetworkservices` on a Mac with many
+services). Subproc-F#3: env sanitisation — children now receive
+minimal env (PATH=`/usr/bin:/bin:/usr/sbin:/sbin`, HOME, LANG=C,
+LC_ALL=C) instead of the app's full env including
+`DYLD_INSERT_LIBRARIES`, `OBJC_DEBUG_*`, `MallocStackLogging`
+which could bias trust-boundary tools like codesign and
+networksetup. Subproc-F#1: SIGTERM → 1s → SIGKILL replaces the
+3-step SIGTERM → 250ms → SIGINT → 250ms → SIGKILL ladder (SIGINT
+wasn't an escalation past SIGTERM; naive traps both for
+graceful shutdown, middle step wasted time). Lifecycle-F#7:
+new `transitionInFlight: Bool` on TunnelOrchestrator — rapid
+second click during a mid-flight `switchMode` is now a clean
+no-op (pre-fix two concurrent transitions raced on
+`paths.configFile`, `proxyController` state, and `core.send`
+ordering, with multiple naive children briefly existing).
+UX-F#3: profile mutation while connected surfaces a banner —
+new `activeProfileID` captured at `startCore` time; setter
+compares against current `profiles[id]` and sets lastError
+"Profile edits applied — click Stop, then a mode chip" when
+they differ on the running profile. `activeServices()`
+`dropFirst(1)` legend filter (was `.contains("asterisk")`,
+broken on non-English macOS). Lifecycle-F#5: AppDelegate
+watchdog now `shutdownTask.cancel()` before firing the reply
+(pre-fix the shutdown Task could continue running its body on
+a partially-released graph while AppKit was mid-teardown).
 
 ## [0.1.7.18] — 2026-05-04 (LTSC patch — focused high-severity cluster)
 
-LTSC patch on v0.1.7 line. Focused release: 3 high-severity
-deferred items from prior audit cycles, all with real user
-impact, all coordinated rather than grab-bag. The other 3 of
-the 6 high-severity outstanding items (NaiveProxy SHA pinning,
-Password zeroize newtype, Swift test target) are explicitly
-deferred to v0.1.8 — each requires infrastructure that doesn't
-fit a single release window.
-
-### What landed (3 fixes)
-
-- **Lifecycle-F#16 (high) — system proxy crash recovery via
-  sentinel file.** Previously, if Cool Tunnel crashed (SIGKILL,
-  kernel panic, abrupt power loss) while the system proxy was
-  enabled, macOS would carry the proxy state across reboots —
-  pointing at `127.0.0.1:1080` where nothing was listening.
-  Result: every browser request stalled until the user
-  manually opened System Settings → Network → Proxies and
-  unticked the boxes. Now: when proxy is enabled, write a
-  JSON sentinel to `~/Library/Application Support/COOL-TUNNEL/
-  proxy-active.flag`. On clean disable, delete it. On every
-  app launch, before any other startup work, check if the
-  sentinel exists; if it does, the previous run died with
-  proxy enabled — force `disableAll()` immediately and clear
-  the flag. The user gets back into a working network state
-  with no manual recovery.
-  - New file: `SystemIntegration/ProxyActiveFlag.swift`
-  - Wired into `TunnelOrchestrator.startCore` (write),
-    `stop` / `stopQuiet` / `shutdown` (clear), and a new
-    `recoverFromCrashIfNeeded` called by `bootstrapIfNeeded`
-    BEFORE any other startup work
-- **UX-F#4 (high) — `NSWorkspace.didWakeNotification`
-  handler.** A Mac that sleeps for >30 minutes often has its
-  TCP keepalives dropped. Previously: `naive` was alive but
-  every browser request stalled because the upstream
-  connection was dead, and the UI kept showing "Active" with
-  no recovery hint. Now: AppDelegate subscribes to
-  `didWakeNotification`; on wake, the orchestrator sends a
-  light-touch probe through the engine pipe. If the probe
-  throws (engine pipe died), the orchestrator records a
-  `lastError` rendered in the HeaderView banner (per
-  v0.1.7.17 UX-F#1) telling the user to click Stop and
-  restart their mode.
-- **Sw#C4 partial (high) — Rust Core update SHA-256 pinning.**
-  Previously, only the `.app` self-updater pinned SHA. Now
-  RustCoreUpdater also: downloads the
-  `Cool-tunnel-vX.Y.Z.sha256` manifest in parallel with the
-  engine binary; parses the line for the
-  `cool-tunnel-core-vX.Y.Z-universal` asset; refuses to adopt
-  on hash mismatch or missing manifest. Releases without the
-  manifest are skipped, not adopted unverified. The
-  infrastructure side already shipped in v0.1.7.12's
-  `package_release.sh` — every release manifest from then on
-  has included the engine line. Closes the
-  equivalent-of-Sw#C4 gap for the engine surface.
-  - New file: `SystemIntegration/SHAVerifier.swift` — extracted
-    from AppUpdater so both updaters share the streaming-SHA
-    + manifest-parser primitives
-  - `RustCoreUpdater.resolveLatestAsset` returns
-    `(tag, downloadURL, manifestURL, assetName)` instead of
-    `(tag, downloadURL)` — minimal API surface change
-
-### Verification
-
-- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
-  concurrency
-- 104 lib + 18 chaos Rust tests still green (no Rust changes
-  this release)
-
-### Deferred from the 6-high cluster (3 items)
-
-These need infrastructure work that doesn't fit one session:
-
-- **NaiveProxy SHA pinning** — requires Cool Tunnel-published
-  manifest of "trusted upstream Naive versions and hashes".
-  Generating that manifest requires manual verification per
-  upstream release; the in-app updater would then download
-  both upstream's binary and our manifest. **Targeted for
-  v0.1.8.**
-- **Password Secret newtype + zeroize** — replaces Swift
-  `String` storage with a `Secret` newtype that holds bytes
-  and zeros them in deinit. Touches CredentialStore,
-  FileCredentialStore, KeychainStore, plus every caller. Risk
-  too high without test coverage to confirm no regression
-  (which is the next item). **Targeted for v0.1.8 after the
-  test target lands.**
-- **Swift test target** — Adding XCTest target requires
-  pbxproj editing that's risky to do without Xcode UI in a
-  single session. **Targeted for v0.1.8** as architectural
-  work, prerequisite for Password Secret newtype.
+Three high-severity deferred items. Lifecycle-F#16: system
+proxy crash recovery via sentinel file. Pre-fix, if Cool Tunnel
+crashed (SIGKILL / kernel panic / power loss) with the system
+proxy enabled, macOS carried the proxy state across reboots
+pointing at `127.0.0.1:1080` where nothing listened, stalling
+every browser request until the user manually unticked the
+boxes in System Settings → Network → Proxies. New
+`SystemIntegration/ProxyActiveFlag.swift` writes a JSON
+sentinel at `~/Library/Application Support/COOL-TUNNEL/proxy-active.flag`
+on enable, deletes on clean disable, and a new
+`recoverFromCrashIfNeeded` (called by `bootstrapIfNeeded`
+BEFORE any other startup work) forces `disableAll()` and
+clears the flag if the sentinel survives a launch. UX-F#4:
+`NSWorkspace.didWakeNotification` handler — after >30 minute
+sleep, TCP keepalives often drop; pre-fix naive was alive but
+every browser request stalled and the UI kept showing "Active"
+with no recovery hint. Now AppDelegate subscribes to
+didWakeNotification and the orchestrator sends a light-touch
+probe through the engine pipe; on throw it records lastError
+rendered in the HeaderView banner. Sw#C4 partial: Rust Core
+SHA-256 pinning — pre-fix only the .app self-updater pinned
+SHA. RustCoreUpdater now downloads the `.sha256` manifest in
+parallel with the engine binary, parses for the
+`cool-tunnel-core-vX.Y.Z-universal` asset line, and refuses to
+adopt on mismatch or missing manifest. Releases without the
+manifest are skipped, not adopted unverified. New
+`SystemIntegration/SHAVerifier.swift` extracted from AppUpdater
+so both updaters share the streaming-SHA + manifest-parser
+primitives. NaiveProxy SHA pinning + Password Secret newtype
++ Swift test target stay deferred to v0.1.8 (require
+infrastructure outside this window).
 
 ## [0.1.7.17] — 2026-05-04 (LTSC patch — 100+ findings, 8 land)
 
-LTSC patch on v0.1.7 line. Eight specialized review agents in
-parallel returned **120 findings** across previously-untapped
-surfaces (persistence layer, app lifecycle + orchestrator,
-SystemIntegration utilities, Rust supervisor + monitor deep,
-diagnostics + redaction + protocol, domain types, real-user
-UX flows, build determinism + dep audit, subprocess +
-entitlements). 8 fixes land here, 112 deferred.
-
-One initial high-severity finding (Build-F#1: claimed `zmij`
-was a typo-squat in Cargo.lock) was investigated and
-**confirmed false-positive** — `zmij` is a real published
-crate ("A double-to-string conversion algorithm based on
-Schubfach and YY") that newer serde_json versions use in
-place of `ryu`. Cargo cache + checksum verified.
-
-### What landed (8 fixes)
-
-- **UX-F#1 (high) — `lastError` surfaced in HeaderView.**
-  `TunnelOrchestrator.recordError()` was setting `lastError`
-  on every failure (engine spawn fail, request timeout, naive
-  crash, stop fail, anomaly auto-stop, bootstrap disk-full)
-  but no view ever read it; errors only appeared as one
-  `[error]` line in the log console. The header now shows a
-  dismissible cherry-rose error banner directly under the
-  status pill — the same surface where users already look for
-  status. Added `TunnelOrchestrator.dismissLastError()` to keep
-  the public setter `private(set)`.
-- **Sup-F#6 (high) — lsof endpoint-aware loopback exclusion.**
-  v0.1.7.16 fixed IPv6 `[::1]` exclusion but used
-  substring-match against the entire line. A connection like
-  `127.0.0.1:54321 -> 1.2.3.4:443` (local client to remote
-  server) substring-matches `127.0.0.1` and got misclassified
-  as "not remote" — masking a genuine outbound flow that the
-  security monitor should be catching. Now: split on `->`,
-  check both endpoints separately, and only exclude when
-  BOTH are loopback.
-- **Domain-F#2 (high) — `Username::parse` rejects control
-  chars / `@` / `:`.** Previously the only validation was
-  "trimmed not empty"; a username like `"a@b:c\n/d"` parsed
-  successfully and produced ambiguous percent-encoding that
-  downstream HTTP-header writers could split on. Now: rejects
-  control chars (NUL, newlines, ANSI escapes) plus the
-  URL-userinfo metacharacters via new
-  `InvalidCredentials::IllegalUsernameChar(char)` variant.
-- **Diag-F#1 (high) — JSON / k=v credential redaction.**
-  Previously only URL userinfo + Authorization + Cookie were
-  redacted. naive's config-load errors dump partial JSON
-  like `"password":"…"`; curl -v emits `password: hunter2`
-  style banners. Both reached the UI verbatim. New
-  `JSON_KV_CRED_REGEX` covers `password`, `passwd`, `secret`,
-  `token`, `api_key`, `apikey`, `access_token`,
-  `refresh_token` — case-insensitive, optional surrounding
-  quotes on key + value.
-- **Build-F#6 (high) — `rust-toolchain.toml` pinned to
-  1.95.0.** Previously `channel = "stable"` floated, letting
-  rustc drift across CI runs. The LTSC posture pins
-  `Cargo.lock` with `--locked` but letting rustc itself
-  float is the inconsistent half. Bumps now require an
-  intentional version edit. Also added explicit
-  `targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]`
-  so universal builds don't need `rustup target add` in CI.
-- **Subproc-F#6 (high) — hardened runtime enabled.**
-  `pbxproj` had `ENABLE_APP_SANDBOX = NO` (correct — the app
-  needs to spawn `naive` and call `networksetup`) but no
-  `ENABLE_HARDENED_RUNTIME = YES`. Without it, ad-hoc-signed
-  builds run without library-validation gating; an attacker
-  with `DYLD_INSERT_LIBRARIES` access could inject. Now both
-  Debug and Release configs set `ENABLE_HARDENED_RUNTIME =
-  YES` + `OTHER_CODE_SIGN_FLAGS = "--options runtime"`.
-- **Pers-F#10 (high) — ProfileStore corrupt-JSON recovery.**
-  Previously `try? JSONDecoder().decode(...)` swallowed
-  decode errors and returned `[.default]`; the next
-  `save(profiles:)` then overwrote the corrupted-but-
-  recoverable blob with the default, **silently destroying
-  the user's profile list**. Now: on decode failure, copy the
-  corrupted blob to a backup key
-  (`profiles.broken.<ISO-timestamp>` in UserDefaults) and
-  `os_log` an error before falling back. The user (or
-  support) can recover via `defaults read`.
-
-### Deferred (112 findings)
-
-By severity tier:
-
-- **High (deferred ~10)**: SystemProxyController revert-on-
-  crash safety (sentinel file + LaunchAgent watcher) — needs
-  careful design across multiple files; targeted for v0.1.7.18.
-  Naive-crash auto-revert (UX-F#5). DNS hijack of
-  api.github.com lacks cert pinning (UX-F#11). Update
-  mid-connection 5s watchdog leaves system proxy enabled
-  (UX-F#8). Sleep/wake handler missing — naive can be a TCP
-  zombie with UI showing "Active". `setsocksfirewallproxy`
-  only covers SOCKS, not HTTP/HTTPS.
-- **Persistence security (~6)**: Password as Swift String
-  never zeroed (cred lifetime); Profile.password serialised
-  via Codable (storage surface); `selectedProfileID`
-  dangling references; `MigratingCredentialStore` orphan
-  duplicates; Keychain `WhenUnlocked` instead of
-  `ThisDeviceOnly`; SettingsStore `bool/stringArray`
-  unset-vs-false ambiguity.
-- **Subprocess + entitlement (~6)**: SIGTERM→SIGINT→SIGKILL
-  escalation order is suboptimal; env inheritance carries
-  DYLD_*/OBJC_* into children; CoreClient.start +
-  SystemProxyController.run bypass Subprocess.run; tar
-  extraction lacks `refuseExtractionEscapingSymlinks` (only
-  ditto path covered); `network.client/server` entitlements
-  unconstrained; quarantine xattr handling.
-- **Architectural (~5)**: pipeline extraction (Q-F#11
-  legacy); shared `Updater` protocol (don't); empty
-  `ViewModels/` directory; bundle ID legacy
-  `space.coolwhite.naive` vs `…cooltunnel`; build-time
-  `canonicalBundleID` from pbxproj.
-- **Test coverage (~10)**: NO Swift test target exists;
-  zero tests on persistence, SystemIntegration,
-  SystemProxyController.disableAll, server_mode HTTP API,
-  v0.1.7.13–.17 fixes; chaos suite is liveness-only.
-- **State-machine (~5)**: orchestrator transitions not
-  atomic; concurrent click handling; profile mutation
-  while connected uses stale credentials silently;
-  multiple orchestrator phase variables can drift; engine
-  death "click Start again" message tells users to do
-  something that throws notRunning.
-- **Performance (~6)**: log buffer `removeFirst(n)` is O(n);
-  `binding(for:)` round-trips on every keystroke; LazyVStack
-  autoscroll O(N) per log line; redaction regex without
-  `size_limit`; multiple `.lowercased()` calls already
-  redundant; `Logger.cooltunnel` reallocates per call.
-- **Documentation (~10)**: 23 MB → 45 MB drift caught in
-  v0.1.7.16; CONTRIBUTING references wrong package version;
-  NOTICE missing fonts; "macOS 26 Liquid Glass" aspirational
-  in SUPPORT.md; SECURITY.md "begins with 1999… ends with
-  ***REDACTED***" hint; jurisdiction missing in Disclaimer.md;
-  AppUpdater self-updater documented in v0.1.7.16 already.
-- **Domain validation (~6)**: ProfileId accepts empty;
-  Username/Password no max length; Password trim mutation;
-  ServerAddress accepts RFC-violating hostnames; Port
-  accepts `+0001080`; ProxyMode lacks Default; serde
-  `deny_unknown_fields` missing; no `#[serde(alias)]` for
-  future renames.
-- **CI hygiene (~5)**: actions/cache restore-keys allows PR
-  cross-branch poisoning; `--all-features` on clippy/test
-  enables features that never ship; `taiki-e/install-action@v2`
-  not pinned to SHA; license allow-list confidence threshold
-  0.93 risks false positives; deny.toml multiple-versions
-  brittle.
-- **Style + naming (~10)**: audit-tag comment density
-  (89+ refs); magic numbers (1024, 100MB, 64KiB, 30s, 120s)
-  overloaded; `Refusing to install/update/proceed` verb
-  drift; force-unwraps; logger placement (file-scope vs
-  static member) inconsistent.
-- **Don't-do-it (~25)**: AsyncStream pipeline migration;
-  shared Updater protocol; bash heredoc → resource file;
-  exact-allowlist hostname; `AvailableRelease` asymmetry;
-  several others. Flagged so the next reviewer doesn't
-  propose them.
-
-The full per-finding output is preserved in the review-agent
-transcripts at the time of this commit.
+8 specialised review agents returned 120 findings across
+persistence, lifecycle, supervisor/monitor, diagnostics,
+domain types, UX, build determinism, and subprocess hardening.
+8 land here. UX-F#1: `lastError` surfaced in HeaderView —
+`recordError()` was setting lastError on every failure but no
+view read it; errors appeared only as one `[error]` line in
+the log console. Header now shows a dismissible cherry-rose
+error banner directly under the status pill. New
+`dismissLastError()` keeps the public setter `private(set)`.
+Sup-F#6: lsof endpoint-aware loopback exclusion — v0.1.7.16
+fixed IPv6 `[::1]` exclusion but used substring-match against
+the entire line, so `127.0.0.1:54321 -> 1.2.3.4:443` was
+misclassified as "not remote" and masked a genuine outbound
+flow. Now split on `->`, check both endpoints separately,
+exclude only when BOTH are loopback. Domain-F#2: `Username::parse`
+rejects control chars + `@` + `:` (pre-fix `"a@b:c\n/d"`
+parsed and produced ambiguous percent-encoding that downstream
+HTTP-header writers could split on) via new
+`InvalidCredentials::IllegalUsernameChar(char)`. Diag-F#1:
+JSON / k=v credential redaction — new `JSON_KV_CRED_REGEX`
+covers `password`, `passwd`, `secret`, `token`, `api_key`,
+`apikey`, `access_token`, `refresh_token` case-insensitive
+(pre-fix only URL userinfo + Authorization + Cookie were
+redacted; naive's config-load errors dump `"password":"…"`,
+curl -v emits `password: hunter2`, both reached the UI
+verbatim). Build-F#6: `rust-toolchain.toml` pinned to 1.95.0
+(was `channel = "stable"` which floated across CI runs);
+added explicit `targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]`.
+Subproc-F#6: hardened runtime enabled in pbxproj —
+`ENABLE_HARDENED_RUNTIME = YES` + `OTHER_CODE_SIGN_FLAGS =
+"--options runtime"` on both Debug and Release. Pre-fix
+ad-hoc-signed builds ran without library-validation gating
+so a `DYLD_INSERT_LIBRARIES` attacker could inject.
+Pers-F#10: ProfileStore corrupt-JSON recovery — pre-fix
+`try? JSONDecoder().decode(...)` swallowed decode errors and
+returned `[.default]`, and the next `save(profiles:)`
+overwrote the corrupted-but-recoverable blob with the
+default, silently destroying the user's profile list. Now on
+decode failure: copy the blob to a `profiles.broken.<ISO>`
+backup key and os_log an error before falling back. Build-F#1
+(`zmij` typo-squat claim) was investigated and confirmed
+false-positive — `zmij` is a real published crate that newer
+serde_json uses in place of `ryu`. 112 deferred including
+SystemProxyController revert-on-crash (→ v0.1.7.18), Password
+Secret newtype + zeroize, Swift test target, NaiveProxy SHA
+pinning, and ~25 "don't-do-it" findings.
 
 ## [0.1.7.16] — 2026-05-04 (LTSC patch — broad-surface deep audit)
 
-LTSC patch on v0.1.7 line. Seven specialized review agents in
-parallel (Rust core, SwiftUI views, shell + tooling, test
-coverage, documentation, cross-cutting consistency, updater
-edge cases) returned **100 findings** — well above the 50+ asked
-for. Tight triage: **13 fixes land here**, 87 deferred with
-explicit categorization below.
-
-The fixes are spread across the surfaces that prior reviews
-hadn't deeply mined: the Rust core's protocol contract, the
-sibling updaters' API + logging discipline, real-user edge cases
-(disk full, multi-install), CI hardening, and documentation
-drift.
-
-### Rust core (3 fixes)
-
-- **Rust-F#1 — `validate_profile` contract honesty.** The
-  client-mode dispatcher's `RequestKind::ValidateProfile` arm
-  took an already-deserialized `Profile`, so the `ok:false`
-  branch of `ValidationReport` was structurally unreachable —
-  the same bug pattern SM-3 fixed in `server_mode.rs`. The
-  variant now carries `RawProfile` and the dispatcher runs
-  `Profile::try_from(raw)` itself, surfacing both branches.
-- **Rust-F#2 — IPv6 loopback in `lsof` remote classifier.**
-  `monitor::lsof::parse` only excluded `127.0.0.1` from the
-  "remote" classification. macOS uses `[::1]:port->[::1]:port`
-  for IPv6 ESTABLISHED lines; without the v6 loopback exclusion
-  an IPv6-first system's own loopback fanout could synthesize
-  a `TooManyRemote` anomaly. Now also excludes `[::1]`.
-- **Rust-F#4 — `unimplemented_method` Debug-format wire-side
-  scrub.** The wildcard arm in `dispatch()` previously embedded
-  `format!("…{kind:?}")` in the wire payload — a forward-compat
-  exfil channel: any future `RequestKind` variant with
-  attacker-influenceable fields would have its Debug
-  representation reach the client. Wire body is now a stable
-  payload-free string; the unknown variant goes to
-  `tracing::warn!` only.
-
-### Sibling updaters parity with AppUpdater (2 fixes)
-
-- **Cross-F#1 — `NaiveUpdater` + `RustCoreUpdater` API surface
-  narrowed to `internal`.** `AU-15` (v0.1.7.12) demoted only
-  AppUpdater. Both sibling updaters were still `public final
-  class …` with 9 `public` symbols each, despite SettingsView
-  being the sole consumer. Now matches AppUpdater + GitHubTrust:
-  `internal` (default) on the class and all members.
-- **Cross-F#2 — `Logger.cooltunnel("NaiveUpdater")` and
-  `…("RustCoreUpdater")` added.** Only AppUpdater had a Logger
-  before; the sibling updaters' security-relevant rejects
-  (untrusted host, oversize, network failure) had no
-  os_log breadcrumb. Now `error`-level on host/oversize hits,
-  `warning`-level on network failures — matching the discipline
-  AppUpdater established.
-
-### Updater edge cases (2 fixes)
-
-- **Edge-F#1 — disk-space pre-flight on tempRoot.**
-  `runPipeline` now calls `requireFreeSpace(at:atLeast:)` BEFORE
-  initiating the .zip download, requiring 300 MB available on
-  the volume containing tempRoot (≈ 100 MB .zip + 50 MB
-  extracted bundle + slack for the relaunch helper's STAGED
-  copy). Prevents the failure mode where a near-full volume
-  surfaces an attacker-influenceable "No space left on device"
-  ditto stderr message — and avoids the worst case where the
-  parent has terminated AND the helper hits ENOSPC mid-swap.
-- **Edge-F#11 — multi-install detection via Spotlight.**
-  Before any pipeline work, AppUpdater shells out to
-  `mdfind 'kMDItemCFBundleIdentifier == "space.coolwhite.naive"'`
-  to find every installed copy. If more than one exists
-  (e.g. `/Applications` + `~/Applications`), the update is
-  refused with: "Multiple copies of Cool Tunnel were found on
-  this Mac. Move all but one to the Trash, restart the app
-  you want to keep, and try Update again." Without this, the
-  helper updates one install but LaunchServices may launch the
-  other on next double-click — leaving a "successful" update
-  that doesn't appear to have changed anything.
-
-### CI + tooling (2 fixes)
-
-- **Shell-F#5 — `cargo build --locked` everywhere.**
-  `scripts/build_rust_core.sh` and three `cargo` invocations
-  in `.github/workflows/ci.yml` (clippy, test, build) now pass
-  `--locked`. Without it, a missing or out-of-date `Cargo.lock`
-  would be silently regenerated against newer transitive deps
-  — defeating the LTSC reproducibility posture the rest of the
-  build infrastructure tries to enforce.
-- **Shell-F#6 — least-privilege CI permissions + GitHub-token
-  scrub on checkout.** `.github/workflows/ci.yml` now declares
-  `permissions: { contents: read }` at the workflow level, and
-  every `actions/checkout@v4` invocation passes
-  `with: persist-credentials: false`. Without these, the
-  inherited org-default permissions could include `contents:
-  write` (or worse), and a compromised dependency or test
-  fixture could exfiltrate the GITHUB_TOKEN that
-  `actions/checkout` left in `.git/config`.
-
-### Documentation honesty (4 fixes)
-
-- **Doc-F#1 — Disclaimer corrected.** The "no data collection"
-  paragraph claimed credentials live in the macOS Keychain
-  with the rest in UserDefaults — both wrong. The actual
-  storage is `~/Library/Application Support/COOL-TUNNEL/
-  credentials.json` (mode 0600, parent dir 0700). Updated to
-  match reality and to mention the exact GitHub hosts the app
-  contacts during in-Settings updates.
-- **Doc-F#2 — README disk size from 23 MB to ~45 MB.** The
-  installed `.app` is now ~45 MB (universal `naive` Mach-O +
-  universal `cool-tunnel-core` engine + Swift app + assets);
-  the 23 MB figure was accurate pre-v0.1.7. Memory unchanged.
-- **Doc-F#3 — README documents the in-app self-updater.** The
-  user-facing "Updating without reinstalling the app" section
-  previously listed only the Naive Binary and Rust Core update
-  buttons, omitting the Cool Tunnel → Update button that
-  actually has SHA pinning. All three are now documented; the
-  SHA-pin gap on the other two is acknowledged with the v0.1.8
-  target.
-- **Doc-F#5 — SECURITY.md threat-model honesty about SHA-pin
-  gap.** The threat model now explicitly lists "Bit-flips
-  inside GitHub's release-asset CDN during a Naive Binary or
-  Rust Core update" under "Does NOT protect against", with the
-  full reasoning: redirect guard + size cap mitigate most of
-  the threat surface, but a CDN-internal byte tamper would
-  serve substituted bytes that local ad-hoc re-signing would
-  launder. Tracked for v0.1.8.
-
-### Tests + verification
-
-- `cargo check` clean (0 errors, 0 warnings)
-- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
-  concurrency
-- All 104 lib + 18 chaos tests still pass
-- `cargo test --locked --all-features` passes (the new
-  `--locked` flag enforces lockfile freshness)
-
-### Deferred (87 findings)
-
-Triaged into clear categories so the next maintainer (or
-release cycle) can pick up without re-reading the agent
-reports. The full per-finding output is preserved in the
-review-agent transcripts at the time of this commit.
-
-**SHA pinning for Naive + RustCore (v0.1.8 target)**: The
-single most-impactful deferred item. Both sibling updaters
-download attacker-influenceable bytes; only the .app's own
-self-updater pins SHA-256. The redirect guard + 100 MB cap
-help, but a CDN-internal tamper would serve substituted bytes
-that ad-hoc re-signing would launder. Sw#C4 was originally
-v0.2.0; SECURITY.md now commits to v0.1.8.
-
-**Test coverage (15 deferred)**: server-mode HTTP API has zero
-tests; the 7 Swift fixes shipped in v0.1.7.13/.14/.15 have NO
-tests of any kind; no end-to-end integration test for the JSON
-protocol or the HTTP server; chaos suite is liveness-only, no
-security boundaries; property-based testing missing for parsers;
-test fixtures hardcode "hunter2"/"secret". Whole test cycle
-worth scheduling.
-
-**SwiftUI render efficiency (8 deferred)**: `binding(for:)`
-round-trips full Profile on every keystroke causing global
-re-renders; `LazyVStack` autoscroll is O(N) per log line;
-`@State updater = NaiveUpdater(...)` re-instantiates on body
-recompute; `@Environment(\.colorScheme)` reads in three views
-duplicate work the dynamic NSColor provider already does.
-
-**Localization readiness (1 deferred)**: zero `String(localized:)`
-calls in the entire UI. Every visible string is a hardcoded
-Swift literal. The line-count display is grammatically wrong
-in English ("1 lines"). Untranslatable as-is.
-
-**Accessibility (1 deferred)**: decorative pulsing dot,
-gradient app icon, scroll/lightbulb icons all lack
-`.accessibilityHidden(true)` — VoiceOver walks into them
-unlabeled. Status pill should be a single combined element.
-
-**Architectural debt (4 deferred)**: extract
-`AppUpdaterPipeline` from AppUpdater (1402-line file is 85%
-nonisolated statics on a `@MainActor @Observable` class);
-build-time `canonicalBundleID` from pbxproj; `parse_args`
-clap migration; pipeline-actor split for the cross-platform
-v0.2.0 refactor.
-
-**Bash + supply chain (10 deferred)**: `fetch_naive.sh` claims
-to verify SHA but doesn't (writes the SHA from downloaded bytes,
-no pinned manifest); `taiki-e/install-action@v2` not pinned to
-SHA; `package_release.sh` doesn't actually invoke `gh release
-create`; `secret_check.sh` excludes `dist/` from the scan;
-cargo-deny advisory list lacks expirations; dependabot lacks
-`groups:`; `build.rs` doesn't honour `SOURCE_DATE_EPOCH`.
-
-**Documentation polish (8 deferred)**: SECURITY.md's
-"begins with 1999… ends with …***REDACTED***" gives away the password
-structure; SUPPORT.md's "macOS 26 Tahoe Liquid Glass" claim
-is aspirational; CONTRIBUTING references wrong package version;
-NOTICE doesn't mention Apple system fonts; no PR template;
-no "run a single test" snippet in CONTRIBUTING.
-
-**UI race conditions (1 deferred)**: ControlPanelView's Stop /
-Diag / Latency buttons spawn `Task { ... }` without sync gates.
-Lower priority because the underlying ops are idempotent at
-the orchestrator layer.
-
-**Performance / memory micro-opts (15 deferred)**: regex with
-default features pulls 1.5 MB unicode tables; `pid_alive`
-shells out per 5s tick instead of using
-`monitor_lifecycle`'s child.wait(); `EncodedCredentials::Drop`
-documents itself as theatre; redundant `.lowercased()` calls
-on already-canonical Foundation types; etc.
-
-**Style + naming (10 deferred)**: bundle-ID legacy
-(`space.coolwhite.naive` vs `…cooltunnel`); empty
-`ViewModels/` directory; audit-tag comment density; magic
-number `1024` overloaded; "Refusing to install/update/
-proceed" verb drift across error messages.
-
-**Don't-do-it findings (15)**: AsyncStream pipeline migration
-(callback shape is fine), shared `Updater` protocol (the three
-state machines diverge structurally), bash heredoc → resource
-file (current shape is more secure + auditable),
-`AvailableRelease` asymmetry (reflects real product asymmetry),
-exact-allowlist hostname (suffix matching is fine), several
-others. Flagged as "don't do" so the next reviewer doesn't
-propose them.
+7 review agents returned 100 findings across Rust core, Swift
+views, shell/tooling, test coverage, docs, and updater edge
+cases; 13 land here. Rust-F#1: `validate_profile` contract
+honesty — dispatcher arm took already-deserialised Profile so
+`ok:false` of ValidationReport was structurally unreachable
+(same pattern as SM-3 in server_mode); variant now carries
+RawProfile and the dispatcher runs `Profile::try_from(raw)`.
+Rust-F#2: `monitor::lsof::parse` IPv6 loopback exclusion —
+only `127.0.0.1` was excluded from "remote" classification;
+macOS uses `[::1]:port->[::1]:port` for IPv6 ESTABLISHED, so
+an IPv6-first system's loopback fanout synthesised
+`TooManyRemote` anomalies. Now also excludes `[::1]`. Rust-F#4:
+`unimplemented_method` wildcard arm in `dispatch()` previously
+embedded `format!("…{kind:?}")` in the wire payload — a
+forward-compat exfil channel. Wire body is now stable
+payload-free; unknown variant goes to `tracing::warn!` only.
+Cross-F#1: NaiveUpdater + RustCoreUpdater API surface
+narrowed to `internal` (matches AU-15 v0.1.7.12 demotion of
+AppUpdater). Cross-F#2: `Logger.cooltunnel("NaiveUpdater")`
++ `…("RustCoreUpdater")` added — security-relevant rejects
+(untrusted host, oversize, network failure) now have os_log
+breadcrumbs. Edge-F#1: disk-space pre-flight on tempRoot —
+runPipeline calls `requireFreeSpace(at:atLeast:)` requiring
+300 MB before .zip download (prevents ENOSPC mid-swap after
+parent termination). Edge-F#11: multi-install detection via
+`mdfind` — refuse update if `/Applications` + `~/Applications`
+both have copies (LaunchServices would launch the
+not-updated one). Shell-F#5: `cargo build --locked`
+everywhere (`build_rust_core.sh` + ci.yml clippy/test/build
+— missing/stale Cargo.lock was silently regenerated against
+newer transitive deps, defeating LTSC reproducibility).
+Shell-F#6: least-privilege CI permissions
+`{ contents: read }` at workflow level + `actions/checkout`
+`with: persist-credentials: false` (pre-fix inherited org
+defaults could be write or worse, GITHUB_TOKEN left in
+.git/config could be exfiltrated). Doc fixes: Disclaimer
+"no data collection" paragraph corrected (credentials live
+in `credentials.json` 0600, not Keychain); README disk size
+23 MB → ~45 MB (drift since v0.1.7); README documents the
+in-app self-updater explicitly; SECURITY.md threat-model
+acknowledges the SHA-pin gap for Naive + RustCore CDN
+tampering, tracked for v0.1.8. 87 deferred (NaiveProxy +
+RustCore SHA pinning, test coverage, SwiftUI render
+efficiency, localisation, accessibility, architectural
+debt, bash hardening, doc polish, performance, style, plus
+~15 "don't-do-it" findings flagged so future reviewers
+don't re-propose).
 
 ## [0.1.7.15] — 2026-05-04 (LTSC patch — deep audit, MainActor freeze fix)
 
-LTSC patch on v0.1.7 line. Deep three-angle review (adversarial
-security, Swift 6 concurrency, architectural design) returned 32
-findings; 7 land here, 25 deferred (low-severity / "don't do it"
-recommendations / future-cycle work).
-
-The headline finding is real: **NaiveUpdater + RustCoreUpdater
-were freezing the UI during updates** because their
-`runProcess(executable:arguments:) throws` synchronously called
-`Process.waitUntilExit()` from `@MainActor` context. AppUpdater
-fixed this pattern back in v0.1.7.10 by routing `ditto`
-through the async `Subprocess.run` helper, but the two cousin
-updaters were missed by that audit.
-
-### v0.1.7.15 fixes
-
-- **CONC-F#1 (high) — UI freeze during NaiveProxy + Rust core
-  updates.** Both updaters' `runProcess` is now async and routes
-  through `Subprocess.run` (concurrent pipe drain + 120 s timeout
-  escalation), matching `AppUpdater.unzip`. Their pipeline
-  helpers (`extractNaive`, `lipoCreate`, `adhocSign`,
-  `RustCoreUpdater.adhocSign`) are now `nonisolated async` and
-  awaited from `update()`. NaiveUpdater additionally extracts
-  the two arches in parallel via `async let` (~2× speedup on
-  the cold path). The Process-blocks-MainActor pattern is gone
-  from the codebase.
-- **SEC-F#8 (medium) — hard-link rejection in extraction
-  walker.** `refuseExtractionEscapingSymlinks` previously only
-  inspected `isSymbolicLink == true` entries; PKZip's
-  `ditto`-extension preserves hard links, so a malicious zip
-  that survives SHA verification could embed
-  `Cool tunnel.app/Contents/Resources/foo` as a hard link to
-  `/etc/passwd` or `~/.ssh/config`, leaving the bundle a
-  side-channel into user files. Now: any regular file with
-  `nlinks > 1` rejects with refuse-and-bail.
-- **SEC-F#6 (low) — `fchmod()` after `open()` in
-  `RestrictedFile.write`.** POSIX `open(2)` ANDs the supplied
-  mode with `~umask`; on a system with an unusual umask
-  (corporate-managed `0o077`, or a future caller passing
-  `0o755`) the file would be created with FEWER permissions
-  than requested. `fchmod(2)` doesn't honour umask, so calling
-  it explicitly after `open` guarantees the requested mode
-  regardless of environment. For the existing call sites
-  (credentials at 0o600, relaunch script at 0o700) the umask
-  interaction was a no-op, but locking the contract here means
-  future callers can rely on the requested mode.
-- **SEC-F#7 (low) — defend `~/Library/Logs/cool-tunnel/
-  relaunch.log` against pre-planted symlinks.** An attacker
-  with prior file-write access in the user's home (Threat T4)
-  could pre-create the log path as a symlink to `/dev/full` or
-  a root-owned location. The bash helper's `exec 2>>"$LOG"`
-  redirect would silently fail, defeating Q-F#2's whole point
-  (no diagnostic anywhere on update failure). Swift now
-  checks `isSymbolicLink` on the path before returning it; if
-  the file exists and isn't a regular file, it's unlinked so
-  bash creates a fresh one.
-- **ARCH-F#1 (medium) — single shared `UpdaterError` enum.**
-  Three updaters carried three identical
-  `enum X: Error, Sendable, Equatable { case message(String) }`
-  declarations: `AppUpdater.UpdaterError` (nested),
-  `NaiveUpdater.UpdaterError` (file-scope), and
-  `RustCoreUpdater.RustUpdaterError` (file-scope, renamed to
-  prevent collision with NaiveUpdater's). Consolidated to a
-  single module-level `UpdaterError` in
-  `SystemIntegration/UpdaterError.swift`; all three updaters
-  now share it.
-- **ARCH-F#2 (medium) — size cap on shared
-  `GitHubRedirectGuard.download`.** Previously only
-  `AppUpdater.download` had a per-asset cap (.sha256 1 MB,
-  .zip 100 MB). NaiveUpdater + RustCoreUpdater inherited none,
-  so a confused-deputy or attacker-shaped API response
-  pointing at a 4 GB file at a trusted GitHub host would
-  happily fill the user's disk. Added `maxBytes: Int64 = 100
-  * 1024 * 1024` parameter (default = 100 MB) and an
-  `OversizeDownloadError` carrier; the two cousins inherit
-  the cap as defense-in-depth.
-- **SEC-F#11 (low) — `Cache-Control: no-cache` header on
-  metadata fetches.** A network-position attacker (Threat T1)
-  serving a captured pre-security-fix `/releases/latest`
-  response could otherwise downgrade the offered version even
-  through HTTPS (replay of integrity-protected bytes is still
-  replayable). All three updaters' GitHub releases-API
-  requests now send `Cache-Control: no-cache` to discourage
-  edge caching / 0-RTT replay.
-
-### Tests + verification
-
-- `xcodebuild Release` BUILD SUCCEEDED under Swift 6 strict
-  concurrency (every helper conversion to `nonisolated async`
-  type-checked clean).
-- No Rust changes; existing 104 lib + 18 chaos tests still
-  pass from v0.1.7.13.
-- v0.1.7.15 ships the same five assets as v0.1.7.14
-  (`.dmg`, `.pkg`, `.zip`, `cool-tunnel-core` engine,
-  `.sha256` manifest).
-
-### Deferred (25 findings)
-
-The deep review's most impactful deferred items, with rationale:
-
-- **SEC-F#1 + F#2 (high) — SHA pinning for NaiveUpdater +
-  RustCoreUpdater.** The redirect guard (v0.1.7.13) and size
-  cap (this release) cover most of the threat surface, but a
-  CDN-internal byte tamper at `objects.githubusercontent.com`
-  would still serve substituted bytes. Cool Tunnel-published
-  SHA manifests for both binaries close that gap. **Targeted
-  for v0.1.8** rather than v0.2.0 — the security agent's
-  argument that the v0.2.0 timeline isn't defensible if it's
-  more than ~30 days out is correct. Tracked.
-- **SEC-F#4 + F#5 (medium) — relaunch helper recovery
-  improvements (notify on `mv` failure, verify post-launch).**
-  Real UX gaps but each requires careful design (osascript
-  notifications, post-launch poll). Punt to a polish cycle.
-- **CONC-F#3 (medium) — `.relaunching` recovery deadline.**
-  Theoretical (`applicationShouldTerminate` always returns
-  `.terminateLater` with a watchdog in this app); track for
-  the v0.2.0 cross-platform refactor.
-- **CONC-F#4 (medium) — Task cancellation handling.** Storing
-  the in-flight `Task` and cancelling on `reset()` /
-  `deinit`. Real but cooperative-cancellation semantics need
-  careful design across the three updaters.
-- **ARCH-F#3 (medium) — extract `AppUpdaterPipeline` from
-  `AppUpdater`.** Q-F#11 deferred; same answer.
-- **ARCH-F#4 (low) — build-time `canonicalBundleID`.**
-  Pre-empting a hypothetical fork rename; no fork imminent.
-- 19 other findings are low-severity (style, micro-opts,
-  comment trim, "don't do it" recommendations).
+3-angle review (adversarial security, Swift 6 concurrency,
+architectural) returned 32 findings; 7 land. CONC-F#1
+(headline): NaiveUpdater + RustCoreUpdater were freezing the
+UI during updates because `runProcess` synchronously called
+`Process.waitUntilExit()` from `@MainActor` context.
+AppUpdater fixed this pattern in v0.1.7.10 via `Subprocess.run`
+but the cousin updaters were missed. Both `runProcess`
+methods are now async and route through Subprocess.run
+(concurrent pipe drain + 120 s timeout escalation); helpers
+(`extractNaive`, `lipoCreate`, `adhocSign`,
+`RustCoreUpdater.adhocSign`) are `nonisolated async`.
+NaiveUpdater extracts the two arches in parallel via
+`async let` (~2× speedup). SEC-F#8: hard-link rejection in
+`refuseExtractionEscapingSymlinks` — pre-fix only inspected
+symlinks, so a malicious zip surviving SHA verification could
+embed `Cool tunnel.app/Contents/Resources/foo` as a hard
+link to `/etc/passwd` or `~/.ssh/config`. Now any regular
+file with `nlinks > 1` rejects. SEC-F#6: `fchmod()` after
+`open()` in `RestrictedFile.write` — POSIX `open(2)` ANDs
+the supplied mode with `~umask`, so an unusual umask
+(corporate-managed `0o077`) creates the file with fewer
+perms than requested. `fchmod(2)` doesn't honour umask, so
+calling it guarantees the requested mode regardless of
+environment. SEC-F#7: defend `~/Library/Logs/cool-tunnel/relaunch.log`
+against pre-planted symlinks — an attacker with prior
+file-write access (T4) could pre-create the path as a
+symlink to `/dev/full` or a root-owned location, the bash
+helper's `exec 2>>"$LOG"` would silently fail. Swift now
+checks `isSymbolicLink` and unlinks if non-regular.
+ARCH-F#1: single shared `SystemIntegration/UpdaterError.swift`
+replaces three identical `enum X: Error, Sendable,
+Equatable { case message(String) }` declarations. ARCH-F#2:
+size cap on shared `GitHubRedirectGuard.download` — only
+AppUpdater.download had a cap; sibling updaters could fetch
+a 4 GB file from a trusted GitHub host with no limit. New
+`maxBytes: Int64 = 100 * 1024 * 1024` parameter +
+`OversizeDownloadError`. SEC-F#11: `Cache-Control: no-cache`
+header on metadata fetches — network-position attacker (T1)
+serving a captured `/releases/latest` could otherwise
+downgrade the offered version even through HTTPS (replay of
+integrity-protected bytes is still replayable). NaiveUpdater
++ RustCoreUpdater SHA pinning (SEC-F#1/2) deferred to v0.1.8.
 
 ## [0.1.7.14] — 2026-05-04 (LTSC patch — second simplify pass)
 
-LTSC patch on v0.1.7 line. Second-pass simplify review of
-v0.1.7.13 found 18 follow-on findings; 7 land in this release
-(1 high-impact dedup, 2 medium real-bug fixes, 4 quick wins).
-11 deferred (subjective comment trim, stylistic placement,
-trivial micro-opts where churn outweighs gain).
-
-### Highlights
-
-- **R-F#2 (high) — Naive/RustCore download dedup.** v0.1.7.13
-  applied the same "host check + URLRequest +
-  download(for:delegate:) + status check + fileExists/
-  removeItem/moveItem" sequence to both `NaiveUpdater.download`
-  and `RustCoreUpdater.download`. The two implementations
-  drifted into line-for-line twins (~22 lines × 2). Extracted
-  to `GitHubRedirectGuard.download(url:to:)` static helper.
-  Both call sites collapse to a 3-line `do/catch` mapping
-  `UntrustedGitHubHostError` to their respective updater
-  error types. AppUpdater's `download` stays bespoke because
-  it layers a per-asset size cap (.sha256 1 MB / .zip 100 MB)
-  that the others don't need.
-- **Q-F#1 (med) — bash mkdir-before-redirect silent fail.**
-  v0.1.7.13's `Q-F#2` redirect (`exec 2>>"$LOG"`) was preceded
-  by a bash-side `mkdir -p "$(dirname "$LOG")"` — but the
-  Swift `makeRelaunchLogPath()` already creates the directory
-  before spawning the script, AND the bash mkdir's failure
-  path was silent (with `set -eu`, mkdir failure aborts; with
-  `task.standardError = nil` on the parent's spawn, the
-  diagnostic vanished). The bash mkdir is now removed; Swift
-  alone owns the dir creation. The exec failure path is still
-  silent on a degenerate "dir exists but file can't be opened"
-  case but that's vanishingly rare on macOS and no worse than
-  pre-Q-F#2 behaviour.
-- **R-F#1 (med) — `Logger.cooltunnel(_:)` factory extension.**
-  Three Logger declarations (`CoreClient.logger`,
-  `AppUpdater.appUpdaterLogger`, `GitHubTrust.trustLogger`)
-  each spelled out
-  `Logger(subsystem: "space.coolwhite.cooltunnel", category: ...)`
-  with the subsystem string as a literal. The
-  orphan-subsystem regression that R-F#2 just fixed in v0.1.7.13
-  (the legacy `"com.cool-tunnel.app"` string) becomes
-  structurally impossible: only one place knows the subsystem
-  identifier now.
-
-### Quick wins
-
-- **Q-F#2 (low) — `makeRelaunchLogPath` force-unwrap fixed.**
-  `FileManager.default.urls(for:in:).first!` violated the
-  project's documented avoid-bare-`!` convention from the
-  v0.1.5.9 audit. Replaced with a throwing guard that surfaces
-  an `UpdaterError.message` if the user Library directory is
-  somehow unreachable.
-- **E-F#3 (low) — dropped redundant `.lowercased()`.**
-  `isTrustedGitHubURL` was calling `.lowercased()` on
-  `url.scheme` and `url.host`. Foundation already canonicalises
-  both to lowercase per RFC 3986 §3.1 / §3.2.2; the explicit
-  lowercase was wasted allocation per call.
-- **Q-F#5 (low) — `canonicalPathComponents` returns Optional.**
-  Removed the `errorMessage:` parameter that threaded a
-  user-facing error string through the realpath wrapper. The
-  helper now returns `[String]?`; the two call sites
-  (container + per-symlink-target) handle their own throws
-  with their own messages. Cleaner separation of "is this
-  POSIX call possible" from "what UX wording does the caller
-  want".
-- **Q-F#7 (low) — trimmed stale `AU-1` doc on
-  `writeRelaunchScript`.** The function body was simplified
-  in v0.1.7.13's R-F#1 (delegate to `RestrictedFile.write`)
-  but the old doc still described the bespoke
-  `O_CREAT|O_EXCL` + write + fsync + close FD-lifecycle that
-  the function no longer does. Trimmed to a one-liner that
-  describes the new shape.
-
-### Tests + verification
-
-- `xcodebuild Release` BUILD SUCCEEDED (Swift 6 strict
-  concurrency)
-- No Rust changes in this release; existing 104 lib + 18 chaos
-  tests still pass
-- `Cool-tunnel-v0.1.7.14.dmg` ships the same five assets as
-  v0.1.7.13 (`.dmg`, `.pkg`, `.zip`, `cool-tunnel-core` engine,
-  `.sha256` manifest)
-
-### Deferred (11 findings)
-
-- **Q-F#3 — Logger placement (file-scope vs static member).**
-  Stylistic; either is defensible.
-- **Q-F#4 — `trustedHostSuffixes` placement.** Module-level
-  fine for one consumer.
-- **Q-F#6 — `RestrictedFile.write` doc duplicate paragraphs.**
-  Subjective.
-- **Q-F#8 — `assetURL` defence-in-depth check is dead on a
-  hardcoded URL.** Kept as a tripwire if `assetURL` ever
-  takes dynamic input.
-- **Q-F#9 — error wording drift between Naive and RustCore.**
-  Now mostly resolved by R-F#2 (both go through the same
-  helper); minor text differences in the wrap remain.
-- **Q-F#10 — `MAX_PAC_DOMAIN_BYTES` audit-trail comment.**
-  Same Q-F#3 deferral pattern as last release.
-- **R-F#3 — `~/Library/Logs/cool-tunnel/` derivation in
-  `AppSupportPaths`.** One call site; not worth churn.
-- **R-F#4 — `InvalidServer::TooLong` hardcodes 253.**
-  thiserror format-string limitation; punt.
-- **E-F#1 — drop one of two host validations per download.**
-  Effectively addressed by R-F#2 (the helper validates once;
-  the upstream `validateInstallAssets` / `resolveLatestAsset`
-  / `assetURL` checks remain as defence-in-depth at a
-  different seam).
-- **E-F#2 — URL roundtrip in `canonicalPathComponents`.**
-  Gated by the 1024-symlink cap; not hot.
-- **E-F#4 — bake `"."` prefix into suffix list.** Trivial
-  micro-opt; allocations are negligible at 2 entries / call.
+7 of 18 simplify-review follow-ons land. R-F#2: Naive/RustCore
+download dedup — v0.1.7.13's host check + URLRequest +
+download(for:delegate:) + status check + fileExists/removeItem/moveItem
+sequence drifted into line-for-line twins (~22 lines × 2);
+extracted to `GitHubRedirectGuard.download(url:to:)` static
+helper, both call sites now 3-line `do/catch` mapping
+`UntrustedGitHubHostError`. AppUpdater's download stays
+bespoke (layers per-asset size cap). Q-F#1: bash
+mkdir-before-redirect silent fail — Swift's
+`makeRelaunchLogPath()` already creates the dir before
+spawning the script, and bash mkdir failure path was silent
+(`task.standardError = nil` on parent spawn made the
+diagnostic vanish under `set -eu`). Bash mkdir removed. R-F#1:
+new `Logger.cooltunnel(_:)` factory extension — three Logger
+declarations each spelled out
+`Logger(subsystem: "space.coolwhite.cooltunnel", category: ...)`
+with the subsystem as a literal; orphan-subsystem regression
+(the legacy `"com.cool-tunnel.app"` string fixed in v0.1.7.13)
+becomes structurally impossible. Q-F#2: `makeRelaunchLogPath`
+force-unwrap replaced with throwing guard. E-F#3: dropped
+redundant `.lowercased()` on `url.scheme` and `url.host` in
+`isTrustedGitHubURL` (Foundation already canonicalises per
+RFC 3986). Q-F#5: `canonicalPathComponents` returns `[String]?`
+instead of threading an `errorMessage:` parameter through the
+realpath wrapper. Q-F#7: trimmed stale AU-1 doc on
+`writeRelaunchScript`. 11 deferred (style, micro-opts).
 
 ## [0.1.7.13] — 2026-05-04 (LTSC patch — post-cycle simplify pass)
 
-LTSC patch on the v0.1.7 line. Simplify-pass review of
-v0.1.7.11 + v0.1.7.12 found **31 follow-on findings** across
-three review angles (reuse, quality, efficiency); 12 are
-landed in this release, 19 are deferred (subjective comment
-narrative, architectural pipeline-actor split, and trivial
-allocation cleanups documented as won't-fix). Cross-cutting
-theme: the audit cycle hardened `AppUpdater` extensively but
-left `NaiveUpdater` and `RustCoreUpdater` exposed to the same
-class of redirect / host-substitution attacks. v0.1.7.13
-closes that gap.
-
-### Cross-updater hardening (R-F#4 — security)
-
-- **New `SystemIntegration/GitHubTrust.swift`.** Extracts
-  `isTrustedGitHubURL(_:)` and `GitHubRedirectGuard` from
-  `AppUpdater.swift` (where they were `fileprivate`) into a
-  shared module. `GitHubRedirectGuard.shared` is a stateless
-  singleton (E-F#3 fix — the prior per-request allocation
-  became wasted work).
-- **`NaiveUpdater.swift` adopts the trust boundary.** The
-  upstream-binary fetch (klzgrad/naiveproxy releases) now uses
-  `URLSession.shared.data/download(for:delegate:
-  GitHubRedirectGuard.shared)` and validates every URL via
-  `isTrustedGitHubURL` before download. Without this, the
-  un-pinned binary fetch could be redirected to an attacker-
-  controlled host with no SHA verification to catch the
-  substitution. (SHA pinning for NaiveUpdater + RustCoreUpdater
-  is still deferred to v0.2.0 per Sw#C4 — but the redirect
-  guard means a CDN takeover or upstream redirect
-  misconfiguration alone is no longer sufficient to ship a
-  substituted binary.)
-- **`RustCoreUpdater.swift` adopts the trust boundary.** Same
-  changes for the `cool-tunnel-core` binary fetch from
-  coo1white/cool-tunnel releases.
-
-### AppUpdater cleanup + correctness (7 findings)
-
-- **Q-F#1 (R4) — `@discardableResult` removed from
-  `markEnteringCheck` / `markEnteringDownload`.** The whole
-  point of the Bool return added in v0.1.7.12 (AU-13) was that
-  the caller MUST consume it before spawning the follow-up
-  Task; `@discardableResult` defeated that — a future site
-  writing `appUpdater.markEnteringCheck(); Task { … }` would
-  re-introduce the race silently. Removing the attribute makes
-  the warning machinery enforce the AU-13 invariant at compile
-  time.
-- **Q-F#2 (R4) — bash relaunch helper redirects stderr to a
-  log file.** AU-11's `preswap_trap` echoes recovery hints
-  (paths to `$TEMP_ROOT` and `$BACKUP`) to stderr — but the
-  spawning Swift code sets `task.standardError = nil`
-  (helper runs detached after `NSApp.terminate`), so the
-  output went to `/dev/null`. The script now `exec 2>>"$LOG"`
-  to `~/Library/Logs/cool-tunnel/relaunch.log` so the
-  recovery hint actually reaches a file the user (or support)
-  can `tail`. Added `makeRelaunchLogPath()` Swift helper that
-  ensures the log directory exists.
-- **R-F#1 (reuse) — `writeRelaunchScript` delegates to
-  `RestrictedFile.write`.** Generalised `RestrictedFile.write`
-  with a `mode: mode_t = 0o600` parameter (default preserves
-  every existing call site for credential files); AppUpdater's
-  bespoke `O_CREAT|O_EXCL` + write + fsync + close FD-lifecycle
-  code (~50 lines) collapses to a single
-  `RestrictedFile.write(data, to: scriptURL, mode: 0o700)`
-  call. Removes the second-implementation drift risk.
-- **R-F#2 (reuse) — `os.Logger` migration.** Replaced the
-  legacy `OSLog(subsystem:category:)` + `os_log` pair with the
-  modern `Logger(subsystem:category:)` API matching
-  `CoreClient.swift`'s convention. Also fixed the orphan
-  subsystem string `"com.cool-tunnel.app"` to the project-wide
-  `"space.coolwhite.cooltunnel"` so support's
-  `log show --predicate 'subsystem == "..."'` queries surface
-  every component under one umbrella. Calls now use typed
-  interpolation with explicit `, privacy: .public` — the
-  values being logged (URLs, version strings, status codes)
-  are deliberately diagnostic, not user secrets.
-- **R-F#7 (reuse) — `canonicalPathComponents` helper.**
-  Centralised the `realpath(3)` + `String(cString:)` + `free` +
-  `URL.pathComponents` extraction the symlink-escape walker
-  was doing twice (once for the container, once per symlink
-  target). Both call sites are now one-liners; the rename-and-
-  free dance lives in one place where future tightening
-  (e.g. switching to `realpath(_, buf)` to avoid the
-  caller-frees pattern) only touches one site.
-- **E-F#1 (R3) — parallel .zip + .sha256 download.** The two
-  fetches are independent (manifest doesn't gate the .zip
-  request) but ran serially. `async let` joins them in
-  parallel; the manifest fetch typically completes during the
-  .zip's TLS handshake, ~2× speedup on the user-visible cold
-  path.
-- **E-F#6 (R3) — drop TOCTOU `fileExists` / `removeItem`
-  before `moveItem`.** `tempRoot` is freshly mkdtemp'd per
-  pipeline run; destination collision is impossible by
-  construction. The pre-check was wasted work AND a TOCTOU
-  anti-pattern. `moveItem` alone is correct.
-- **E-F#8 (R2) — entry-count cap on extraction symlink walk.**
-  An attacker-shaped zip could plant 10k+ symlinks (each ~30
-  bytes; the 100 MB Sw-H3 cap allows ~3M empty entries); each
-  triggers a `realpath(3)` syscall, an attacker-controlled
-  work multiplier on the user's update path. Now bails after
-  1024 symlinks (far above any legitimate macOS bundle).
-
-### Other ((4 findings)
-
-- **Q-F#7 — bare `Sendable` (commented) on
-  `GitHubRedirectGuard`.** Class is `final` with zero stored
-  properties; the `@unchecked Sendable` is required only
-  because `NSObject` ancestor isn't `Sendable`-marked — but
-  the conformance is genuinely sound. Moved to `GitHubTrust.swift`
-  with a comment explaining specifically why `@unchecked` is
-  the right shape (unchecked because of NSObject, but no
-  mutable state to be unsafe about).
-- **R-F#3 (reuse) — single-source `MAX_PAC_DOMAIN_BYTES`.**
-  v0.1.7.12 introduced `MAX_PAC_DOMAIN_BYTES: usize = 253`
-  in `server_mode.rs` with a comment about RFC 1035; the
-  same number was already declared in
-  `domain::server::ServerAddress::MAX_LEN` (private). Promoted
-  the latter to `pub const` and made `server_mode` reference
-  it. Future revisions to the limit propagate automatically;
-  no drift risk.
-- **R-F#1 sibling effect — generalised `RestrictedFile.write`
-  for `mode: mode_t`.** Touched separately because the
-  signature is part of the project's atomic-write API — every
-  call site (currently credential storage at 0o600 mode +
-  AppUpdater at 0o700 mode) now flows through the same
-  primitive.
-- **E-F#3 (R3) — single shared `GitHubRedirectGuard`
-  instance.** `static let shared = GitHubRedirectGuard()`
-  replaces the per-request allocation. Trivial in absolute
-  terms; the value is symbolic alignment.
-
-### Deferred (19 findings)
-
-Worth noting which findings did NOT land:
-
-- **Q-F#3 (med) audit-trail comment narrative.** The fix-history
-  comments (`v0.1.7.10 fix:`, `**AU-1 fix:**`, etc.) are
-  subjective; they help reviewers correlate code with
-  CHANGELOG entries. Punt.
-- **Q-F#11 (low) — pipeline-actor architectural split.** A
-  ~40% rewrite where `AppUpdater` keeps only state and the
-  pipeline becomes a `struct AppUpdaterPipeline`. Real value
-  but the right time is v0.2.0 when the cross-platform
-  refactor lands.
-- **Q-F#8 (low) — `parse_args` clap migration.** Audit
-  explicitly rejected clap as overkill at two flags; this
-  punt continues at four.
-- **R-F#5, R-F#6 (low) — SHA / semver helper extraction.**
-  No second caller exists yet (hash verification on
-  Naive/RustCore is deferred to v0.2.0 with SHA pinning);
-  premature without one.
-- The remaining 14 are all low-severity (allocation
-  micro-opts, comment style, minor refactor) where the cost
-  of churn outweighs the gain. Documented in the simplify
-  agent reports for the record.
-
-### Tests + verification
-
-- `cargo check` clean (0 errors, 0 warnings)
-- `cargo test --lib` 104/104 pass
-- `cargo test --test chaos` 18/18 pass
-- `xcodebuild Release` BUILD SUCCEEDED (Swift 6 strict
-  concurrency)
+12 of 31 simplify findings land. Cross-cutting theme:
+v0.1.7.11/.12 hardened AppUpdater extensively but left
+NaiveUpdater + RustCoreUpdater exposed to the same redirect /
+host-substitution attacks. R-F#4: new
+`SystemIntegration/GitHubTrust.swift` extracts
+`isTrustedGitHubURL(_:)` and `GitHubRedirectGuard` from
+AppUpdater (was `fileprivate`) into a shared module;
+`GitHubRedirectGuard.shared` is a stateless singleton.
+NaiveUpdater + RustCoreUpdater now use
+`URLSession.shared.data/download(for:delegate:
+GitHubRedirectGuard.shared)` and validate every URL via
+`isTrustedGitHubURL` before download. SHA pinning for the
+two still deferred per Sw#C4, but a CDN takeover or upstream
+redirect misconfiguration alone is no longer sufficient.
+Q-F#1: `@discardableResult` removed from `markEnteringCheck`
+/ `markEnteringDownload` so the v0.1.7.12 AU-13 invariant is
+compile-time-enforced. Q-F#2: bash relaunch helper now
+`exec 2>>"$LOG"` to `~/Library/Logs/cool-tunnel/relaunch.log`
+so AU-11's `preswap_trap` recovery hints actually reach a
+file (pre-fix the Swift spawn set `task.standardError = nil`
+sending stderr to `/dev/null`). New Swift
+`makeRelaunchLogPath()` helper creates the dir. R-F#1:
+`writeRelaunchScript` delegates to a generalised
+`RestrictedFile.write(_:to:mode:)` (~50 lines of bespoke
+`O_CREAT|O_EXCL` + write + fsync + close FD-lifecycle
+collapses to one call). R-F#2: `os.Logger` migration —
+replaced legacy `OSLog(subsystem:category:)` + `os_log`
+with `Logger(subsystem:category:)`, fixed the orphan
+subsystem string `"com.cool-tunnel.app"` to project-wide
+`"space.coolwhite.cooltunnel"` so support's `log show`
+queries surface every component under one umbrella. Calls
+use typed interpolation with explicit `, privacy: .public`.
+R-F#7: `canonicalPathComponents` helper centralises
+`realpath(3)` + `String(cString:)` + `free` + `pathComponents`
+extraction the symlink-escape walker was doing twice. E-F#1:
+parallel .zip + .sha256 download via `async let` (manifest
+fetch completes during .zip TLS handshake, ~2× speedup on
+cold path). E-F#6: drop TOCTOU `fileExists` + `removeItem`
+before `moveItem` (`tempRoot` is freshly mkdtemp'd per
+pipeline run; destination collision impossible). E-F#8:
+entry-count cap on extraction symlink walk — bails after
+1024 symlinks (was unbounded; an attacker-shaped zip could
+plant 10k+ for a `realpath(3)` work-multiplier inside the
+Sw-H3 100 MB cap). R-F#3: `MAX_PAC_DOMAIN_BYTES` promoted
+to `ServerAddress::MAX_LEN pub const` (v0.1.7.12 had two
+copies of the RFC 1035 limit; drift risk closed).
 
 ## [0.1.7.12] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 2)
 
-LTSC patch on the v0.1.7 line. Lands the remaining 11 findings
-from the Fifth audit cycle's Rule Maker rubric — the medium /
-low quality-pass tier. Each fix addresses a root cause
-identified by the audit; v0.1.7.11 covered the 8 critical /
-high security-critical fixes plus 5 medium/low where the call
-was unambiguous. With this release the audit cycle's full
-findings list is closed.
-
-### AppUpdater.swift (7 findings)
-
-- **AU-6 (R2, R4) — canonical bundle ID const, not
-  `Bundle.main.bundleIdentifier`.** `verifyExtractedApp` now
-  compares the new bundle's `CFBundleIdentifier` against a
-  hard-coded `canonicalBundleID = "space.coolwhite.naive"`
-  baked into the binary, instead of against
-  `Bundle.main.bundleIdentifier` (which reads from the running
-  process's plist — attacker-controllable if the running app
-  was ever substituted, anchoring the trust comparison in the
-  attacker's input). The constant matches
-  `PRODUCT_BUNDLE_IDENTIFIER` in the Xcode project; if the
-  bundle ID legitimately changes, both must update in
-  lock-step.
-- **AU-8 (R1) — download error message scrubs asset filename.**
-  The user-facing message no longer names the failing artifact
-  (.zip vs .sha256) or the HTTP status. The asset name isn't
-  directly attacker-controlled but the stage tells an
-  observer-on-the-wire which artifact failed, helping calibrate
-  a partial-block attack against the manifest specifically
-  (the SHA-pin root of trust). Stage detail goes to `os_log`
-  for support.
-- **AU-9 (R2, R4) — read-only check covers bundle perms and
-  parent writability.** `refuseReadOnlyInstall` now tests
-  three things: the parent volume isn't read-only (DMG mount),
-  the parent folder is writable for the current user (admin
-  ACL, MDM lockdown), AND the bundle itself isn't immutable
-  (Get Info → Locked, `chflags uchg`). Previously only the
-  first was checked; the other two failure modes slipped
-  through pre-terminate, leaving the user with no app and no
-  UI to report once `NSApp.terminate` had fired.
-- **AU-10 (R4) — relaunch helper uses `open PATH`, not
-  `open -a NAME`.** `open -a` performs name-based app lookup;
-  with bundle paths containing spaces ("/Applications/Cool
-  tunnel.app") bash word-splits and `-a` treats "Cool" as
-  the app name and "tunnel.app" as a document, misfiring the
-  relaunch. The bareword form opens the bundle directly.
-- **AU-11 (R4) — pre-swap trap preserves recovery materials.**
-  The bash relaunch helper installs a `preswap_trap` at the
-  top that *retains* `$TEMP_ROOT` (containing the
-  verified-good extracted .app) and the `$BACKUP` (if mid-
-  rollback) on any error before the swap commits. Only after
-  step 4 (BACKUP removed → swap fully succeeded) does the
-  trap get replaced with the destructive cleanup. Previously
-  a rollback failure during step 3 would also delete
-  `$TEMP_ROOT`, leaving the user with neither the new app
-  nor a known-good copy to recover from.
-- **AU-13 (R1, R4) — `markEnteringCheck` /
-  `markEnteringDownload` return `Bool`; spawn is conditional
-  on the actual flip.** Settings click handlers used to call
-  `guard !appUpdater.isInFlight else { return };
-  appUpdater.markEnteringCheck(); Task { ... }` — three
-  separate steps that allowed a redundant `Task` to spawn
-  when a fast double-click hit the second click's
-  `!isInFlight` check before SwiftUI re-rendered (or when
-  state was reset by another path between the two flags).
-  Now the flip and the spawn are atomic: the click handler
-  is `guard appUpdater.markEnteringCheck() else { return };
-  Task { ... }`, where the bool return value is the actual
-  flip outcome.
-- **AU-14 (R2) — `locateAppBundle` filter requires
-  `isDirectory`.** A malicious zip can contain an entry
-  named `Cool tunnel.app` that is a regular file or symlink
-  rather than a bundle directory. Without this filter, the
-  next step (`verifyExtractedApp` reading
-  `Contents/Info.plist`) failed with a generic "couldn't
-  read Info.plist" message instead of a clean "structural
-  shape wrong" reject. The filter now demands both the
-  `.app` extension AND
-  `resourceValues(forKeys: [.isDirectoryKey]).isDirectory ==
-  true`.
-
-### server_mode.rs (3 findings) + pac.rs (1 finding)
-
-- **SM-4 (R2, R3) — `naive_pac` caps `direct_domains` at
-  1024 entries × 253 bytes each.** The 64 KiB router-wide
-  body limit is the outer ceiling, but inside that envelope
-  a single request could carry ~16k single-char domain
-  entries — each becoming a `to_lowercase()` allocation, a
-  `serde_json::to_string` pass, and a `format!` insertion,
-  pushing PAC generation past the R3 ≤10 ms target on a
-  busy worker. The 1024-entry cap is far above any
-  legitimate proxy-bypass list (Cool Tunnel ships ~16 by
-  default); 253 bytes matches the RFC 1035 hostname
-  maximum. Over-cap requests reject with
-  `ApiError::BadRequest` and a `tracing::warn!` for support.
-- **SM-6 (R3) — resolved by SM-4.** The audit had flagged
-  PAC generation as potentially blocking the tokio worker
-  but explicitly warned against `spawn_blocking`-without-cap
-  (which would just move the unbounded work elsewhere).
-  With SM-4 caps in place the synchronous cost is bounded
-  well under 10 ms; no `spawn_blocking` is needed. Documented
-  as a comment in the handler to lock in the reasoning.
-- **SM-7 (R4) — `encode_js_string_array` uses `expect`,
-  not `unwrap_or_default`.** `serde_json::to_string` over
-  `&[String]` is structurally infallible — `String` has no
-  `Serialize` failure modes. The defensive
-  `unwrap_or_default()` silently emitted `String::new()` on
-  the unreachable path: if a future refactor swapped
-  `&[String]` for a type that *can* fail, the PAC body
-  would become `var directDomains = ;` (invalid JS) with
-  zero diagnostic. `expect()` restores the failure signal
-  and names the invariant for whoever reads the trace.
-- **SM-10 (R3) — router gets
-  `tower::limit::ConcurrencyLimitLayer(64)`.** Caps total
-  in-flight requests across all routes. Far above any
-  legitimate Filament admin UI workload but bounds the
-  worst-case for a slow-loris client dripping bytes into a
-  64 KiB body — the connection still has to wait, but the
-  server can't be made to hold more than 64 simultaneously.
-  Combined with hyper's default keepalive timeout, the
-  resource exhaustion path is capped without needing the
-  `tower::timeout::TimeoutLayer` boilerplate (which
-  introduces a non-Infallible error type and requires
-  `HandleErrorLayer` plumbing). A proper body-read timeout
-  is deferred to a later cycle. New direct dep: `tower =
-  { version = "0.5", features = ["limit"] }` (already in
-  the tree transitively via axum; no new crates pulled in).
-
-### Tests
-
-- 104 lib tests + 18 chaos tests pass on this revision (no
-  test changes — all existing invariants preserved by the
-  fixes).
-- Swift app compiles clean under Swift 6 strict concurrency.
-
-### Audit cycle closed
-
-With this release the full Fifth audit cycle's findings list
-(25 across `server_mode.rs` and `AppUpdater.swift`) is closed:
-
-- v0.1.7.11 landed: AU-1, AU-2, AU-3, AU-4, AU-5, AU-7,
-  AU-12, AU-15, SM-1, SM-2, SM-3, SM-5, SM-9 (13 fixes).
-- v0.1.7.12 lands: AU-6, AU-8, AU-9, AU-10, AU-11, AU-13,
-  AU-14, SM-4, SM-6, SM-7, SM-10 (11 fixes). SM-8
-  (logging policy) was folded into v0.1.7.11's
-  `server_mode.rs` header doc.
-
-Net audit-driven change across the cycle: 24 fixes against
-4 source files (`server_mode.rs`, `AppUpdater.swift`,
-`config/naive_config.rs`, `config/pac.rs`) plus supporting
-files (`Cargo.toml`, `main.rs`, `SettingsView.swift`).
+Closes the Fifth audit cycle with 11 medium/low fixes
+(v0.1.7.11 was the 13 critical/high). AU-6: canonical bundle
+ID constant in `verifyExtractedApp` instead of
+`Bundle.main.bundleIdentifier` (the latter reads from the
+running process's plist — attacker-controllable if the running
+app was ever substituted, anchoring trust in attacker input).
+`canonicalBundleID = "space.coolwhite.naive"` matches
+`PRODUCT_BUNDLE_IDENTIFIER` in the Xcode project. AU-8:
+download error message scrubs asset filename — the stage
+(.zip vs .sha256) plus HTTP status told an
+observer-on-the-wire which artifact failed, helping calibrate
+a partial-block attack against the manifest (the SHA-pin
+root of trust). Stage detail goes to os_log. AU-9:
+`refuseReadOnlyInstall` now tests parent volume read-only +
+parent folder writable + bundle not immutable (`chflags
+uchg`). Pre-fix only the first was checked; the others
+slipped through pre-terminate leaving the user with no app
+and no UI. AU-10: relaunch helper uses `open PATH`, not `open
+-a NAME` — `open -a` performs name lookup and bash word-splits
+"/Applications/Cool tunnel.app" so `-a Cool` treated
+`tunnel.app` as a document, misfiring relaunch. AU-11:
+pre-swap trap preserves recovery materials — the bash
+helper's `preswap_trap` retains `$TEMP_ROOT` (verified-good
+extracted .app) and `$BACKUP` (mid-rollback) on any pre-swap
+error. Only after step 4 (BACKUP removed → swap fully
+succeeded) does the trap get replaced with destructive
+cleanup. Pre-fix a rollback failure during step 3 also
+deleted $TEMP_ROOT, leaving neither the new app nor a
+known-good copy. AU-13: `markEnteringCheck` /
+`markEnteringDownload` return Bool — Settings click handlers
+used to be three separate steps (guard !isInFlight; mark;
+spawn Task), allowing a redundant Task on fast double-click.
+Now the flip and the spawn are atomic via `guard
+appUpdater.markEnteringCheck() else { return }; Task { ... }`.
+AU-14: `locateAppBundle` filter requires `isDirectory` — a
+malicious zip can contain an entry named `Cool tunnel.app`
+that is a regular file or symlink rather than a bundle dir;
+pre-fix the next step failed with "couldn't read Info.plist"
+instead of "structural shape wrong". Filter now demands both
+`.app` extension AND `isDirectory == true`. SM-4:
+`naive_pac` caps `direct_domains` at 1024 entries × 253
+bytes each (RFC 1035 hostname max). Pre-fix a single request
+could carry ~16k single-char entries under the 64 KiB body
+limit, each becoming a `to_lowercase()` allocation +
+`serde_json::to_string` pass + `format!` insertion. Cool
+Tunnel ships ~16 entries by default; over-cap rejects with
+`ApiError::BadRequest`. SM-6: resolved by SM-4 — no
+`spawn_blocking` needed because the synchronous cost is now
+bounded under 10 ms. SM-7: `encode_js_string_array` uses
+`expect`, not `unwrap_or_default` — `serde_json::to_string`
+over `&[String]` is structurally infallible, but the
+defensive fallback silently emitted `String::new()` on the
+unreachable path (a future refactor swapping `&[String]` for
+a fallible type would produce invalid JS
+`var directDomains = ;` with zero diagnostic). SM-10:
+router gets `tower::limit::ConcurrencyLimitLayer(64)` — caps
+total in-flight requests across all routes; bounds the
+worst-case for a slow-loris client dripping bytes into a
+64 KiB body. Body-read timeout deferred. New direct dep:
+`tower = { version = "0.5", features = ["limit"] }` (already
+transitive via axum).
 
 ## [0.1.7.11] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 1)
 
-LTSC patch on the v0.1.7 line. Fifth audit cycle, with the
-findings rated against the **Rule Maker** rubric (R1 fail-secure,
-R2 boundary enforcement, R3 ≤10ms latency on the core path, R4
-no theatre — every fix addresses the root cause, not the
-symptom). 25 findings total across `core/src/server_mode.rs` and
-`COOL-TUNNEL/SystemIntegration/AppUpdater.swift`; this release
-lands the must-fix tier (8 critical/high) plus 5 medium/low
-where the fix was small and the call unambiguous. Remaining 12
-findings ship in v0.1.7.12.
-
-### Critical / high (8)
-
-- **AU-1 (R2, R4) — relaunch helper script no longer in `/tmp`.**
-  Previously `String.write(to:atomically:)` created the script
-  with default umask perms (typically 0644), then a separate
-  `setAttributes(0o700)` call tightened them — leaving a tiny
-  but real window where a same-UID attacker could swap the
-  script via symlink before `task.run()`. The script now lives
-  in the per-update `tempRoot` and is created via
-  `open(O_CREAT|O_EXCL|O_WRONLY, 0o700)` so it is born with the
-  right mode and never exists with any other. New helper
-  `writeRelaunchScript` owns the FD lifecycle, fsyncs before
-  close, and surfaces `errno` on failure for support.
-- **AU-2 (R2) — GitHub asset URLs validated before fetch.**
-  `validateInstallAssets` now requires both the `.zip` and
-  `.sha256` `browser_download_url`s to be HTTPS on a host that
-  ends in `github.com` or `githubusercontent.com`. A compromised
-  or attacker-shaped API response that pointed the manifest
-  fetch at an attacker host would defeat SHA pinning by
-  substituting the verification root-of-trust; this gate cuts
-  that path at the seam where operator intent ("releases come
-  from GitHub") is encoded.
-- **AU-3 (R2) — HTTP redirects constrained to GitHub-served
-  hosts.** All four updater fetches (releases API, .zip,
-  .sha256, plus future) now use a per-task `URLSessionTaskDelegate`
-  (`GitHubRedirectGuard`) that rejects any HTTP redirect whose
-  target isn't on the same trusted suffix list AU-2 enforces.
-  `URLSession.shared.download(from:)` was previously following
-  up to ~20 redirects with no host check — a CDN takeover or
-  misconfigured GitHub edge could substitute the manifest at
-  this layer, defeating SHA pinning end-to-end.
-- **AU-4 (R3) — SHA hashing + plist read off `@MainActor`.**
-  The pipeline helpers (`run`, `runPipeline`, `download`,
-  `verifyZipAgainstManifest`, `unzip`, `verifyExtractedApp`,
-  `refuseExtractionEscapingSymlinks`, `refuseReadOnlyInstall`,
-  `spawnRelaunchHelper`, plus all helpers and parsers) are now
-  `nonisolated`. `verifyZipAgainstManifest` streams the .zip
-  through `FileHandle.read(upToCount:)` 64 KiB at a time
-  instead of `Data(contentsOf: zipURL)` — a 12 MB allocation on
-  the main thread previously froze the Settings UI on slow
-  disks, especially Intel Macs with HDDs. Plist parsing now
-  runs in `Task.detached(priority: .userInitiated)` and returns
-  a `Sendable` carrier struct (`ExtractedAppInfo`) rather than
-  the non-Sendable `[String: Any]`.
-- **AU-5 (R2, R4) — `realpath(3)` + path-component ancestor
-  check in symlink-escape walk.** `refuseExtractionEscapingSymlinks`
-  no longer uses `String.hasPrefix(containerPath)`, which gave
-  two classes of false negatives: (1) sibling-path collision
-  (`/extracted-evil` passed against `/extracted` — no trailing
-  separator), and (2) symlink-target traversal
-  (`URL.resolvingSymlinksInPath()` resolves the link itself but
-  doesn't normalise `..` *through* the resolved target).
-  `realpath(3)` returns a fully-canonical absolute path; the
-  comparison is now `targetComponents.starts(with:
-  containerComponents)`. Broken symlinks now reject outright
-  rather than passing silently.
-- **SM-1 (R1, R2) — `JsonRejection` scrubbed at every handler
-  boundary.** Every `axum::Json<T>` handler now takes
-  `Result<Json<T>, JsonRejection>` and converts the rejection
-  via `ApiError::from_json_rejection` — which logs the verbatim
-  serde error server-side via `tracing::warn!` and returns
-  `{"error":"bad request"}` to the wire. Previously axum's
-  default 400 body included the verbatim serde error
-  (containing internal field names and the engine's domain
-  validation rules — e.g. `"server: contains forbidden ':/​/'"`),
-  which is a free probe of internal validation logic for an
-  unauthenticated caller.
-- **SM-2 (R1) — `ApiError` carries no payload.** Both
-  `ApiError::BadRequest` and `ApiError::Internal` are now
-  unit variants. The wire body is a stable opaque string per
-  HTTP status (`"bad request"` / `"internal error"`); the
-  cause-of-failure detail goes to `tracing::error!` only. The
-  previous `Internal(String)` field structurally invited callers
-  to interpolate `serde_json::Error` (which embeds line/column/
-  field info) — removing the field forces logging-only.
-- **SM-3 (R4, R2) — `naive_validate` honours its advertised
-  contract.** Previously the handler took `Json<Profile>` and
-  dropped the value with `_`; deserialize failures became 400s
-  from the axum extractor, so the `ok:false` branch of
-  `ValidationReport` was structurally unreachable. The handler
-  now accepts any JSON value, runs the `Profile` deserializer
-  itself, and returns `{ok:false, reason:"invalid profile"}`
-  on failure (with the detailed cause logged server-side) and
-  `{ok:true}` on success. Both wire-shape branches are now
-  reachable by well-behaved callers.
-
-### Medium / low (5)
-
-- **AU-7 (R1) — version-mismatch error scrubs attacker-
-  controlled plist value.** The error string in
-  `verifyExtractedApp` no longer interpolates the new bundle's
-  `CFBundleShortVersionString`. An attacker who got past SHA
-  pinning could plant a Unicode bidi-override or fake
-  "click here to bypass" text in that string and have it
-  rendered into the Settings panel; the actual value now goes
-  to `os_log` for support tickets.
-- **AU-12 (R1, R2) — `versionIsNewer` rejects non-numeric
-  segments + pre-release suffixes.** The previous `Int($0) ?? 0`
-  silently coerced `"0-rc1"` to 0, making `1.0.0-rc1` compare
-  *equal* to `1.0.0`. New helper `parseVersionSegments` returns
-  `nil` if the version contains `-` (pre-release marker) or
-  any segment fails to parse strictly; `versionIsNewer` then
-  short-circuits to `false` (no upgrade offered).
-  `/releases/latest` already excludes pre-releases, so the
-  legitimate path is unaffected.
-- **AU-15 (R2) — `public` removed from within-module symbols.**
-  `AppUpdater`, `State`, `AvailableRelease`, `UpdaterError`,
-  the public-state property, the lifecycle methods
-  (`init`, `checkForUpdates`, `downloadAndInstall`, `reset`,
-  `isInFlight`, `markEnteringCheck`, `markEnteringDownload`)
-  and their associated types all dropped to `internal`
-  (the default). Cool Tunnel ships as a single app target —
-  no cross-module consumer needs `public`. Shrinks the API
-  surface a future code path can accidentally reach.
-- **SM-5 (R2) — `NaiveConfig` fields are `pub(crate)`.** The
-  struct's invariants (`listen` is `socks://127.0.0.1:<port>`,
-  `proxy` embeds percent-encoded credentials) are guaranteed
-  by `from_profile` and lost the moment an external caller can
-  construct `NaiveConfig { listen: "...", proxy: "..." }`
-  directly. Locking the constructors closes that back-door
-  without affecting `Serialize` (derive sees private fields
-  fine) or any current call site (handlers only ever go
-  through `from_profile` + `to_pretty_json`).
-- **SM-9 (R2) — `--listen` non-loopback requires
-  `--allow-public`.** `server_mode::run` now refuses to bind a
-  non-loopback address unless the caller explicitly passed
-  `allow_public: true` (set by `--allow-public` on the CLI),
-  returning `io::ErrorKind::PermissionDenied` with a message
-  that tells the operator exactly what the flag is for. The
-  loopback-only deployment posture was previously documented
-  but not enforced; a `--listen 0.0.0.0:8787` typo silently
-  exposed an unauthenticated engine. With the gate, the
-  exposure is now a one-flag-acknowledgement decision instead
-  of a silent security hole.
-
-### Tests
-
-- 104 lib tests + 18 chaos tests pass on this revision (no
-  changes — the audit fixes preserve every test invariant).
-- Swift app compiles clean under Swift 6 strict concurrency
-  with `nonisolated` propagation through the entire pipeline.
-
-### Logging policy (new — `core/src/server_mode.rs` header)
-
-Codified as a doc comment at the top of `server_mode.rs`:
-handlers MUST NOT log the request body, the resolved `Profile`,
-or `ApiError::*` payloads. `Profile` carries `Password::expose_secret`,
-and a "let's log the failing body for debug" PR would silently
-leak credentials. When you need diagnostic detail, log the
-*cause* (a `serde_json::Error`'s `Display` is fine — it only
-references field paths, never values) but never the payload
-itself.
-
-### Deferred to v0.1.7.12 (12 findings)
-
-AU-6 (bundle-ID ASCII-only impersonation), AU-8 (download HTTP
-status leak), AU-9 (read-only check tests parent only),
-AU-10 (`open -a "$OLD_APP"` semantics with spaces),
-AU-11 (helper trap order), AU-13 (click race in
-`markEnteringCheck`), AU-14 (`locateAppBundle` accepts
-files/symlinks), SM-4 (`NaivePacRequest.direct_domains` cap value
-needs decision), SM-6 (`spawn_blocking` only matters if SM-4
-lands), SM-7 (`encode_js_string_array` `unwrap_or_default`),
-SM-8 (logging policy as a checked lint, not just a doc comment),
-SM-10 (router timeout/concurrency tower layers).
+Fifth audit cycle, Rule Maker rubric (R1 fail-secure / R2
+boundary enforcement / R3 ≤10 ms / R4 no theatre). 13 of 25
+land here. AU-1: relaunch helper script no longer in `/tmp` —
+`String.write(to:atomically:)` created the script with default
+umask perms (~0644), then a separate `setAttributes(0o700)`
+tightened them, leaving a tiny window where a same-UID attacker
+could swap via symlink before `task.run()`. New
+`writeRelaunchScript` opens in the per-update tempRoot via
+`open(O_CREAT|O_EXCL|O_WRONLY, 0o700)`, fsyncs before close,
+surfaces errno. AU-2: `validateInstallAssets` requires both
+`.zip` and `.sha256` `browser_download_url`s to be HTTPS on a
+host ending in `github.com` or `githubusercontent.com` (a
+compromised API response pointing the manifest fetch at an
+attacker host would defeat SHA pinning by substituting the
+verification root-of-trust). AU-3: per-task
+`URLSessionTaskDelegate` (`GitHubRedirectGuard`) rejects any
+HTTP redirect whose target isn't on the same trusted suffix
+list. `URLSession.shared.download(from:)` was following up to
+~20 redirects with no host check. AU-4: SHA hashing + plist
+read off `@MainActor` — pipeline helpers are now
+`nonisolated`; `verifyZipAgainstManifest` streams 64 KiB at a
+time instead of `Data(contentsOf: zipURL)` (a 12 MB main-thread
+allocation froze the Settings UI on slow disks). Plist parsing
+in `Task.detached(priority: .userInitiated)` returning a
+Sendable `ExtractedAppInfo`. AU-5: `realpath(3)` +
+path-component ancestor check in `refuseExtractionEscapingSymlinks`
+— pre-fix `String.hasPrefix(containerPath)` gave false
+negatives on sibling-path collision (`/extracted-evil` passed
+against `/extracted`) and symlink-target traversal
+(`URL.resolvingSymlinksInPath()` resolves the link but doesn't
+normalise `..` through the resolved target). Comparison is now
+`targetComponents.starts(with: containerComponents)`. Broken
+symlinks reject outright. SM-1: `JsonRejection` scrubbed at
+every handler boundary — every `axum::Json<T>` handler now
+takes `Result<Json<T>, JsonRejection>` and converts via
+`ApiError::from_json_rejection`, logging the verbatim serde
+error server-side and returning `{"error":"bad request"}` on
+the wire. Pre-fix axum's default 400 body included the verbatim
+serde error (internal field names + validation rules — e.g.
+`"server: contains forbidden ':/​/'"`), a free probe of internal
+logic for an unauthenticated caller. SM-2: `ApiError` carries
+no payload — both `BadRequest` and `Internal` are unit variants
+returning a stable opaque body per HTTP status; cause-of-failure
+goes to `tracing::error!` only. SM-3: `naive_validate` honours
+its advertised contract — handler now accepts any JSON value,
+runs `Profile` deserialise itself, returns
+`{ok:false, reason:"invalid profile"}` on failure (with detail
+logged server-side) and `{ok:true}` on success. Both branches
+now reachable. AU-7: version-mismatch error in
+`verifyExtractedApp` no longer interpolates
+`CFBundleShortVersionString` — attacker past SHA pinning could
+plant a Unicode bidi-override / "click here to bypass" text;
+value goes to os_log for support. AU-12: `versionIsNewer`
+rejects non-numeric segments + pre-release suffixes — pre-fix
+`Int($0) ?? 0` coerced `"0-rc1"` to 0 making `1.0.0-rc1`
+compare equal to `1.0.0`. New `parseVersionSegments` returns
+nil on `-` or non-numeric segments. AU-15: `public` removed
+from within-module symbols (single app target, no cross-module
+consumer). SM-5: `NaiveConfig` fields are `pub(crate)` — locks
+the construction invariants (`listen` is
+`socks://127.0.0.1:<port>`, `proxy` embeds percent-encoded
+credentials) to `from_profile`. SM-9: `server_mode::run`
+refuses to bind a non-loopback address unless
+`--allow-public` is passed, returning `PermissionDenied`. The
+loopback-only posture was previously documented but not
+enforced; a `--listen 0.0.0.0:8787` typo silently exposed an
+unauthenticated engine. New logging policy codified as a
+top-of-file doc on `server_mode.rs`: handlers MUST NOT log the
+request body, the resolved Profile, or `ApiError::*` payloads.
+`Profile` carries `Password::expose_secret`; a "log the failing
+body for debug" PR would silently leak credentials. 12 fixes
+deferred to v0.1.7.12.
 
 ## [0.1.7.10] — 2026-05-04 (LTSC patch — comprehensive audit + security)
 
-LTSC patch on the v0.1.7 line. Two parallel comprehensive audits
-(Swift + Rust) plus a tooling self-audit. Fixes one real
-regression I shipped in v0.1.7.9, several security-relevant
-hardenings on the in-app updater, and a wire-ordering race in
-the engine's stop path.
-
-### Regression fix (urgent)
-
-- **AppUpdater Check + Update buttons were broken in v0.1.7.9.**
-  The `markEnteringCheck()` / `markEnteringDownload()` sync
-  flag I added flipped `state` to the placeholder phase
-  *before* the async method's `guard !isInFlight` check, so the
-  guard returned early and the network call never fired. Click
-  the button → state stuck at `.checking` forever. Fixed:
-  relaxed the guards in `checkForUpdates` and
-  `downloadAndInstall` to refuse only when a *genuinely active*
-  later phase (downloading, verifying, extracting, relaunching)
-  is in flight, treating the placeholder `.checking` /
-  `.downloading(0.0)` as "we are the in-flight check".
-
-### Security — Swift in-app updater
-
-- **Sw-H1 — Bundle-identifier comparison hardened.** Both the
-  running app and the new app's bundle IDs are now
-  `precomposedStringWithCanonicalMapping`-normalised, and any
-  non-ASCII character causes outright rejection. Defence in
-  depth against Unicode-confusable bundle IDs if SHA pinning
-  were ever defeated.
-- **Sw-H2 — SHA mismatch error message no longer echoes the
-  hashes.** Echoing both expected and got values into the
-  user-facing error helps a MITM observe what hash they need
-  to forge. New message just says verification failed; tracing
-  retains both values for debugging via support tickets. Plus:
-  manifest entries are now hex-validated before SHA compare so
-  a corrupted-but-64-chars manifest line gives a clean
-  "manifest may be corrupted" message instead of a misleading
-  "SHA-256 mismatch".
-- **Sw-H3 — Download size cap.** `URLSession.shared.download`
-  will happily fetch a multi-GB file. New caps: .zip ≤ 100 MB,
-  .sha256 ≤ 1 MB. A confused-deputy URL or compromised release
-  can no longer fill the user's disk. Real streaming-cancel
-  needs `URLSessionDownloadDelegate`, deferred to v0.2.
-- **Sw-H4 — Symlink-escape walk after extraction.** `ditto -x
-  -k` (PKZip mode) preserves symlinks INSIDE the archive,
-  including ones pointing OUTSIDE the extraction directory. A
-  malicious zip whose only deviation from a known-SHA copy was
-  an attacker-controlled symlink (e.g. `Resources/foo →
-  ~/.ssh/config`) would have planted a side-channel pointer.
-  New post-extraction walk rejects any symlink whose realpath
-  escapes the extraction dir.
-- **C1 — `AppUpdater.unzip` pipe-buffer deadlock fixed.**
-  `Process` with shared stdout/stderr pipe → `waitUntilExit`
-  blocks if `ditto` writes >64 KB to stderr (the kernel pipe
-  buffer fills, ditto blocks on next write, deadlock). Routed
-  through `Subprocess.run` which drains both pipes
-  concurrently with timeout escalation. (Same bug class
-  `Subprocess.swift` was created to fix in v0.1.7.3 — AppUpdater
-  shipped in v0.1.7.6 and inherited the older buggy pattern.)
-- **C2 — Relaunch helper script now does atomic .new staging
-  with rollback.** Previous `rm -rf "$OLD_APP" && ditto …`
-  was destructive with no recovery. If `ditto` failed
-  mid-copy (ENOSPC, signal), the user was left with NO Cool
-  Tunnel installed. New flow: ditto into `$OLD_APP.new` →
-  `mv $OLD_APP $OLD_APP.old-update` → `mv $OLD_APP.new
-  $OLD_APP` → `rm -rf $OLD_APP.old-update`. Restores from
-  backup on any failure. Plus `set -eu` and `trap cleanup
-  EXIT` so the temp tree is removed on every exit path.
-- **C4 — `RestrictedFile.write` fsync check + double-close
-  fix.** The `fsync(fd)` return value was discarded, so a
-  silent disk EIO meant the atomic rename pointed at unflushed
-  bytes — a crash right after rename would yield an empty/partial
-  credentials.json. Plus a real double-close in the catch path
-  (could corrupt an unrelated fd that macOS reused). Both
-  fixed; a `didClose` flag tracks state across paths.
-- **H5 — `AppUpdater.run` tempRoot leak fixed.** Every failed
-  validation path used to leak the temp tree forever. Wrapped
-  in a do/catch that cleans up on any throw. Plus
-  `Bundle.main.bundleURL.resolvingSymlinksInPath()` so
-  symlinked install paths (rare, sometimes seen on managed
-  Macs) are evaluated by their real destination for the
-  read-only check.
-
-### Wire-protocol correctness — Rust engine
-
-- **Ru-A1 — Single-emitter discipline for `state_changed:false`.**
-  The v0.1.7.5 message-pump refactor moved user-stop event
-  emission to the dispatcher, but `monitor_lifecycle` retained
-  the natural-death emit. Two paths could fire for the same
-  transition if naive crashed concurrently with a user-stop.
-  Fixed: `monitor_lifecycle` no longer emits state-changed at
-  all; `client_mode::monitor_loop`'s natural-death detection
-  (PID polling) now owns natural-death emission, gated by an
-  at-most-once flag (`emitted_stopped`) in `EngineState` so it
-  yields to the dispatcher's user-stop emission. Validated by
-  new `siege_natural_death_then_user_stop_emits_once` chaos
-  scenario.
-- **Ru-A2 — `Proxy-Authorization` header now redacted.** The
-  log-line redaction regex required the literal `Authorization:`
-  prefix; `naive`/curl emit `Proxy-Authorization: Basic
-  <b64-of-user:pass>` on upstream-proxy failure and the prior
-  regex let it through verbatim, undoing the rest of the
-  credential-hygiene effort. New regex: `(?:Proxy-)?Authorization:`.
-  Two new unit tests in `redaction.rs` lock in the fix.
-- **Ru-A3 — Stop-side TOCTOU race fixed.** The dispatcher
-  released the engine lock between `take()` and
-  `supervisor.stop().await`. During the (potentially 2-second)
-  window, `EngineState.supervisor` was `None`, so a concurrent
-  `start_proxy` would spawn a *second* `naive` while the first
-  was still draining. Symmetric to the start-side fix from
-  Ru#C2 (v0.1.7.3). Now: dispatcher sets `stopping = true`
-  under the lock; `start_proxy` checks both `supervisor.is_some`
-  AND `stopping` to refuse. Validated by new
-  `siege_concurrent_stop_proxy_race` chaos scenario.
-- **Ru-A4 — `stdout_writer` fallback on serialize failure.**
-  `serde_json::to_vec` is essentially infallible for our
-  current `Outbound` shape, but if a future field ever fails
-  (NaN float, non-UTF-8), the writer logged and continued —
-  silently dropping the response, leaving the Swift waiter
-  pending forever. New fallback writes a hand-built error
-  frame with the original `id` so the waiter resolves with a
-  real error.
-- **Ru-B6 — `ProxySupervisor::Drop` aborts the monitor task.**
-  Previously only signalled kill via `kill_tx`; the JoinHandle
-  was leaked on the runtime if the supervisor was dropped
-  without `stop()` being called.
-
-### Chaos suite extended
-
-- 18 → 18 + 2 new scenarios:
-  - `siege_concurrent_stop_proxy_race` — verifies Ru-A1+A3
-    (exactly one `Stopped` response, one `not_running` error,
-    one `state_changed:false` event for one transition).
-  - `siege_natural_death_then_user_stop_emits_once` — verifies
-    Ru-A1 single-emitter discipline holds when both paths
-    could fire.
-- Two new redaction unit tests cover Ru-A2.
-- **20 chaos + 104 unit + 6 integration + 2 doctest = 132
-  tests total**, all green.
-
-### Tooling
-
-- `cargo deny check` now runs in CI. The `deny.toml` policy
-  (advisory-as-error, license allow-list, crates.io-only
-  source) was previously policy-without-enforcement.
-- `multiple-versions = deny` (was `warn`) in deny.toml. Cargo.lock
-  has zero duplicates today; new ones must be allow-listed
-  via `skip` going forward.
-- swift-format CI step hard-fails if the tool isn't on PATH
-  (was soft-fail → silent no-op).
-
-### Items deliberately not delivered
-
-- **Ru-B1 (oneshot for pid_alive):** the `/bin/kill -0`
-  polling adds ~17k spawns/day under sustained operation.
-  Replacing with a oneshot from `monitor_lifecycle` is the
-  right design but requires plumbing a new channel. Defer.
-- **Ru-B5 (Password/Username `Drop::clear`):** parity item.
-  Defer with the rest of the encryption-at-rest work.
-- **Sw-H6 (KeychainStore `WhenUnlockedThisDeviceOnly`):** the
-  legacy migration backend; touch surface is small but
-  changing the accessibility flag affects credential
-  syncability for users mid-migration. Defer.
-- **Sw-H8 (Subprocess race on terminationHandler):** the race
-  window is theoretical (Foundation's documented behaviour).
-  Defer with the broader Subprocess refactor.
-- **Sw-H9 (CoreClient.stdin write blocking):** sits with the
-  deferred Sw#5/6 broken-pipe + race-y shutdown work.
-- **T2 (security_check.sh in CI):** would require building
-  the full .app on CI (currently CI builds only
-  cool-tunnel-core). Significant scope expansion. Document
-  the manual-pre-tag run as the contract.
-
-### Files
-
-- `core/src/client_mode.rs` — EngineState gets `stopping` +
-  `emitted_stopped` flags; StopProxy holds lock + pre-claims
-  emission gate; start_proxy refuses if stopping; monitor_loop
-  natural-death path claims the gate; stdout_writer fallback.
-- `core/src/supervisor/mod.rs` — `monitor_lifecycle` no longer
-  emits StateChanged; ProxySupervisor::Drop aborts monitor;
-  unit test updated.
-- `core/src/redaction.rs` — `(?:Proxy-)?Authorization` regex;
-  two new unit tests.
-- `core/tests/chaos.rs` — two new siege scenarios.
-- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` — relaxed
-  re-entry guards (M1 regression fix); unzip via Subprocess
-  (C1); helper script atomic swap with rollback (C2);
-  tempRoot cleanup on validation failure (H5); bundle-id
-  precomposed normalize + ASCII-only (Sw-H1); SHA hex
-  validate + scrub error message (Sw-H2); download size cap
-  (Sw-H3); symlink-escape walk after extraction (Sw-H4).
-- `COOL-TUNNEL/SystemIntegration/AppSupportPaths.swift` —
-  fsync check + double-close fix (C4).
-- `.github/workflows/ci.yml` — cargo-deny step; swift-format
-  hard-fail.
-- `core/deny.toml` — multiple-versions: warn → deny.
+Parallel Swift + Rust audits plus a tooling self-audit.
+Regression fix: AppUpdater Check + Update buttons were broken
+in v0.1.7.9 — the `markEnteringCheck()` / `markEnteringDownload()`
+sync flag flipped state to the placeholder phase BEFORE the
+async `guard !isInFlight` check, so the guard returned early
+and the network call never fired. Relaxed the guards to refuse
+only when a genuinely active later phase
+(downloading/verifying/extracting/relaunching) is in flight.
+Swift in-app updater security: Sw-H1 — bundle-identifier
+comparison `precomposedStringWithCanonicalMapping`-normalised
+on both sides, non-ASCII rejected outright (defence against
+Unicode-confusable IDs if SHA pinning were defeated). Sw-H2 —
+SHA mismatch error no longer echoes the hashes (helps a MITM
+observe what to forge); manifest entries hex-validated before
+compare so a corrupted-but-64-chars line gives "manifest may
+be corrupted" instead of misleading "SHA-256 mismatch". Sw-H3
+— download size cap: .zip ≤ 100 MB, .sha256 ≤ 1 MB. Sw-H4 —
+post-extraction symlink-escape walk rejects any symlink whose
+`realpath` escapes the extraction dir (`ditto -x -k` PKZip
+mode preserves symlinks inside archives; a malicious zip
+otherwise identical to a known-SHA copy could plant
+`Resources/foo → ~/.ssh/config`). C1 — `AppUpdater.unzip`
+pipe-buffer deadlock fixed: Process with shared stdout/stderr
+pipe blocked on `waitUntilExit` if ditto wrote >64 KB to
+stderr (kernel pipe buffer fills, ditto blocks on next write,
+deadlock). Routed through `Subprocess.run` for concurrent
+drain. C2 — relaunch helper does atomic .new staging with
+rollback: ditto into `$OLD_APP.new` → `mv $OLD_APP
+$OLD_APP.old-update` → `mv $OLD_APP.new $OLD_APP` →
+`rm -rf $OLD_APP.old-update`. Plus `set -eu` + `trap cleanup
+EXIT`. Pre-fix `rm -rf "$OLD_APP" && ditto` was destructive
+with no recovery. C4 — `RestrictedFile.write` fsync check +
+double-close fix: `fsync(fd)` return was discarded so a
+silent disk EIO meant the atomic rename pointed at unflushed
+bytes; plus a real double-close in the catch path could
+corrupt an unrelated FD macOS reused. New `didClose` flag.
+H5 — `AppUpdater.run` tempRoot leak fixed via do/catch that
+cleans up on any throw; plus `Bundle.main.bundleURL.resolvingSymlinksInPath()`
+so symlinked install paths are evaluated by their real
+destination. **Rust engine wire-protocol correctness:**
+Ru-A1 single-emitter discipline for `state_changed:false`
+— v0.1.7.5 message-pump refactor moved user-stop emission to
+the dispatcher but `monitor_lifecycle` retained natural-death
+emission, so concurrent crash + user-stop could fire twice.
+`monitor_lifecycle` no longer emits state-changed at all;
+`client_mode::monitor_loop`'s natural-death detection owns
+the natural-death emission via at-most-once `emitted_stopped`
+flag yielding to dispatcher's user-stop emission. Ru-A2 —
+`Proxy-Authorization` header now redacted via
+`(?:Proxy-)?Authorization:` regex (pre-fix the literal
+`Authorization:` prefix-only regex let `Proxy-Authorization:
+Basic <b64>` through verbatim, undoing the rest of the
+credential-hygiene effort). Ru-A3 — stop-side TOCTOU race:
+the dispatcher released the engine lock between `take()` and
+`supervisor.stop().await`, so during that ~2 s window a
+concurrent `start_proxy` could spawn a second naive while the
+first was still draining. Now dispatcher sets `stopping =
+true` under the lock; start_proxy checks both
+`supervisor.is_some` AND `stopping`. Ru-A4 — `stdout_writer`
+fallback on serialize failure writes a hand-built error frame
+with the original id (pre-fix the writer logged and continued,
+silently dropping the response and leaving the Swift waiter
+pending forever). Ru-B6 — `ProxySupervisor::Drop` aborts the
+monitor task (pre-fix the JoinHandle was leaked on the
+runtime). Chaos suite +2 scenarios
+(`siege_concurrent_stop_proxy_race` verifies Ru-A1+A3,
+`siege_natural_death_then_user_stop_emits_once` verifies the
+single-emitter discipline). 20 chaos + 104 unit + 6
+integration + 2 doctest = 132 tests. Tooling: `cargo deny
+check` now in CI (was policy-without-enforcement);
+`multiple-versions = deny` (was warn); swift-format CI step
+hard-fails on missing tool (was soft-fail silent no-op).
 
 ## [0.1.7.9] — 2026-05-03 (LTSC patch — UI/UX stress audit)
 
-LTSC patch. Fourth UI audit on the v0.1.7.x line, this time
-focused on the surfaces added since the last visual audit
-(in-app updater UI, dark-mode dynamic palette, updater state
-machine). Audit returned 38 findings; this patch closes the
-high-confidence visible bugs + dark-mode contrast issues.
-
-### Honest progress text (was: "Downloading 0%…" forever)
-
-The in-app updater showed `"Downloading \(Int(p * 100))%…"`
-with `p` always 0.0 because `URLSession.shared.download(from:)`
-doesn't report byte-level progress. Users on slow connections
-would stare at "Downloading 0%…" for minutes and reasonably
-conclude the app had hung.
-
-**Fixed:** subtitle now reads `"Downloading… (typically a few
-seconds on broadband)"` — honest about the indeterminate
-nature of the operation.
-
-### Sync re-entry guard on the Check + Update buttons
-
-The naive/rust updater buttons in this same file flip a
-synchronous `isInspecting = true` flag in the click handler
-*before* spawning the Task — so a fast double-tap can't
-queue two operations. The new AppUpdater Check/Update
-buttons didn't follow this pattern; rapid clicks queued
-multiple Tasks that each fired their own re-entry guard
-*after* the first completed.
-
-**Fixed:** added `markEnteringCheck()` / `markEnteringDownload()`
-methods on `AppUpdater` that flip `state` synchronously; the
-Settings handlers call them before `Task { ... }`. Mirrors
-the proven naive/rust pattern.
-
-### Dark-mode card edges restored (`PupCardModifier`)
-
-Three problems on dark stacked together:
-
-- `.shadow(color: Color.black.opacity(0.06))` — invisible on
-  near-black window backgrounds; cards floated with no edge.
-- `borderInk.opacity(0.45)` border — barely visible because
-  the dark `borderInk` variant is itself muted (RGB 0.55).
-- `paper.opacity(0.4)` overlay — defeated the
-  `.regularMaterial` vibrancy in dark mode, making cards
-  read as opaque rectangles.
-
-**Fixed:** `PupCardModifier` now reads `@Environment(\.colorScheme)`
-and picks mode-aware values:
-- Shadow: `Color.black.opacity(0.55)` in dark, 0.06 in light.
-- Border opacity: 0.65 in dark, 0.45 in light.
-- Paper overlay: 0.18 in dark, 0.40 in light (lets the
-  vibrancy material show through).
-
-### Status pill backgrounds — mode-aware opacity
-
-Six sites used `.opacity(0.10)` for the green/red OK/NG
-verdict pills, the macBlue release-notes pill, and the red
-failed pill. On dark backgrounds 10% opacity vanishes; pills
-stop being a visual cue. New `CTSurface.statusPillAlpha(scheme)`
-helper returns 0.22 in dark, 0.10 in light. All six sites
-migrated.
-
-### LogConsole inner surface inverted in dark
-
-The log scrollview's `paper.opacity(0.55)` background made
-the surface read *lighter* than the surrounding pupCard in
-dark mode (mental model: "logs should be recessed/darker, not
-highlighted"). Now uses `Color.black.opacity(0.35)` in dark
-to recess the surface like the user expects.
-
-### Updater UX polish
-
-- **`.relaunching` delay bumped 500 ms → 1.2 s.** The 500 ms
-  was below SwiftUI's render budget on Intel Macs — users
-  often never saw the "Relaunching…" state before AppKit
-  began terminating.
-- **`appUpdaterSection` wrapped in single VStack** so the
-  title row + status row read as one Form-section row, not
-  two with intra-row padding between them.
-- **Wording fix:** `"(was 0.1.7.8)"` → `"— you're on
-  0.1.7.8"`. "was" implied past tense; the user is currently
-  on the older version, not historically.
-- **Update button gets `.layoutPriority(1)`** so it can't
-  get clipped at min window width (780pt) when the subtitle
-  is long.
-- **Release-notes Link**: combined into single self-describing
-  link (`"View release notes for v0.1.7.9"`) instead of two
-  disconnected elements; added trailing `arrow.up.right`
-  glyph; underlined. VoiceOver hears one unambiguous link.
-- **Failed-state row**: switched to `HStack(alignment: .top)`,
-  added `fixedSize(vertical:)` + `frame(maxWidth: .infinity)`
-  so multi-line errors render cleanly with the icon and
-  Dismiss button anchored at the top. "Reset" → "Dismiss"
-  (more accurate semantically).
-- **`appUpdater.reset()` added to `onDisappear`** so a
-  `.failed` or `.upToDate` state doesn't survive the
-  Settings dismiss/re-open cycle. (True orphan-download
-  cancellation deferred to v0.2.)
-
-### Connection form first-run hint — dark-mode contrast
-
-`macBlueSoft.opacity(0.18)` was nearly invisible on dark
-backgrounds. New mode-aware `firstRunHintFill` keeps the
-existing light look and uses `macBlue.opacity(0.22)` in dark.
-
-### Add Domain field accepts Return
-
-Previously, pressing Return inside the "Add direct domain"
-TextField fell through to the Done button's
-`.keyboardShortcut(.defaultAction)` and dismissed Settings
-without adding the typed value. New `.onSubmit { addDomain() }`
-on the TextField does the obvious thing.
-
-### Accessibility improvements
-
-- **Appearance picker** now exposes the current selection via
-  `.accessibilityValue(draft.appearanceMode.displayName)` —
-  VoiceOver hears "App appearance, Dark, picker" instead of
-  just "App appearance, picker".
-- **Updater progress spinner** carries
-  `.accessibilityLabel(...)` describing the current phase
-  ("Downloading update", "Verifying download integrity",
-  etc.) instead of the generic "progress indicator".
-- **Release notes link** has explicit `accessibilityLabel`
-  noting it opens in browser.
-
-### Files
-
-- `COOL-TUNNEL/Views/MalteseTheme.swift` — `PupCardModifier`
-  reads colorScheme; new `CTSurface.statusPillAlpha`.
-- `COOL-TUNNEL/Views/SettingsView.swift` — VStack wrap, sync
-  guards, Dismiss button, status-row redesign, onDisappear
-  reset, picker accessibilityValue, Add Domain onSubmit, all
-  pillAlpha conversions.
-- `COOL-TUNNEL/Views/LogConsoleView.swift` — dynamic surface
-  fill.
-- `COOL-TUNNEL/Views/ConnectionFormView.swift` — dynamic
-  firstRunHint fill.
-- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` —
-  `markEnteringCheck/Download` methods, `isInFlight` made
-  `public`, relaunching delay bumped.
-
-### Engine + chaos suite
-
-Unchanged. UI-only patch. All 126 tests still pass.
-
-### Deferred to v0.2.0
-
-- Real cancel button + URLSessionDownloadDelegate
-  (orphan-download lifecycle)
-- Promote AppUpdater out of SettingsView's @State so download
-  state survives Settings dismiss/re-open
-- Real download progress bar (would replace
-  `URLSession.shared.download` with a delegate-driven flow)
+4th UI audit returned 38 findings; high-confidence visible
+bugs and dark-mode contrast issues close here. In-app updater
+showed `"Downloading \(Int(p * 100))%…"` with p always 0.0
+because `URLSession.shared.download(from:)` doesn't report
+byte-level progress — users stared at "Downloading 0%…" for
+minutes. Now reads "Downloading… (typically a few seconds on
+broadband)". Added `markEnteringCheck()` / `markEnteringDownload()`
+sync flip methods on AppUpdater so rapid clicks can't queue
+multiple Tasks (mirrors the proven naive/rust pattern).
+`PupCardModifier` dark-mode card edges restored — shadow,
+border opacity, and paper overlay now read
+`@Environment(\.colorScheme)` and pick mode-aware values
+(shadow `Color.black.opacity(0.55)` dark vs 0.06 light;
+border 0.65 vs 0.45; paper overlay 0.18 vs 0.40 so vibrancy
+material shows through in dark). Six sites with
+`.opacity(0.10)` status-pill backgrounds (OK/NG verdicts,
+release-notes pill, failed pill) migrated to new
+`CTSurface.statusPillAlpha(scheme)` returning 0.22 dark / 0.10
+light. LogConsole inner surface uses `Color.black.opacity(0.35)`
+in dark to recess properly. `.relaunching` delay bumped 500 ms
+→ 1.2 s (below SwiftUI render budget on Intel Macs). Connection
+form first-run hint dark-mode `macBlue.opacity(0.22)`. Add
+Domain field's TextField gains `.onSubmit { addDomain() }`
+(pre-fix Return fell through to the Done button's defaultAction
+and dismissed Settings without adding). Accessibility:
+Appearance picker exposes selection via `.accessibilityValue`;
+updater progress spinner has per-phase `accessibilityLabel`;
+Release notes Link has explicit accessibilityLabel. Real
+cancel button via `URLSessionDownloadDelegate` and orphan-download
+lifecycle deferred to v0.2.
 
 ## [0.1.7.8] — 2026-05-03 (LTSC patch — updater bugfix)
 
-LTSC patch. Two real bugs surfaced when the v0.1.7.7
-in-app updater was first used in production:
-
-### Bug 1 (release process) — `.sha256` manifest missing from GitHub releases
-
-`scripts/package_release.sh` has been generating a
-`Cool-tunnel-vX.Y.Z.sha256` integrity manifest for every
-release since v0.1.4, but my `gh release create` commands
-never included that file. So the manifest existed in
-`dist/` locally but never made it onto the GitHub release
-page. The v0.1.7.6 in-app updater (which depends on the
-manifest for SHA-256 pinning) had no way to verify any
-release, including the same one it was running on.
-
-**Fixed:**
-- Backfilled the missing `.sha256` manifests onto v0.1.7.5,
-  v0.1.7.6, v0.1.7.7 release pages.
-- `scripts/package_release.sh` now prints the canonical
-  `gh release create` command at the end of every package
-  run, with all five required assets pre-filled, so future
-  publishes copy-paste the right thing instead of typing
-  it from memory.
-
-### Bug 2 (updater UX) — "up to date" reported as failure
-
-The in-app updater fetched the latest release and validated
-that both `.zip` and `.sha256` assets existed BEFORE
-comparing the latest version to the running version. So a
-release missing the manifest threw "Update failed: missing
-manifest" even when the user was already on the latest
-version (no install would happen anyway). The right
-behaviour is to compare versions first and only require
-the manifest when there's actually something to install.
-
-**Fixed:** `AppUpdater.fetchLatestRelease` split into
-`fetchLatestReleaseMetadata` (cheap, returns the bare
-release info) + `validateInstallAssets` (returns the
-fully-validated `AvailableRelease`). The `checkForUpdates`
-flow now calls metadata first, compares versions, and only
-calls `validateInstallAssets` when an upgrade is actually
-on offer. Same-version-as-running shows "You're on the
-latest version" cleanly.
-
-### Files
-
-- `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` —
-  metadata/validation split; `checkForUpdates` reordered.
-- `scripts/package_release.sh` — emits the canonical
-  publish command at the end.
-
-### Engine + chaos suite
-
-Unchanged. UI + release-process patch only. All 126 tests
-still pass.
+Two production bugs from the v0.1.7.7 in-app updater. (1)
+`.sha256` manifest missing from GitHub releases:
+`package_release.sh` generated `Cool-tunnel-vX.Y.Z.sha256`
+since v0.1.4 but `gh release create` commands never included
+it, so the v0.1.7.6 in-app updater had no way to verify any
+release. Backfilled `.sha256` onto v0.1.7.5 / v0.1.7.6 /
+v0.1.7.7 release pages. `package_release.sh` now prints the
+canonical `gh release create` command at the end of every
+package run with all five required assets pre-filled. (2)
+"Up to date" reported as failure: pre-fix
+`AppUpdater.fetchLatestRelease` validated `.zip` + `.sha256`
+existence BEFORE comparing versions, so a release missing the
+manifest threw "Update failed: missing manifest" even when
+the user was already on the latest. Split into
+`fetchLatestReleaseMetadata` (cheap) + `validateInstallAssets`
+(only called when an upgrade is on offer).
 
 ## [0.1.7.7] — 2026-05-03 (LTSC patch — light/dark mode)
 
-LTSC additive feature. Closes the **Sw#24 deferred audit item**
-(dark-mode dynamic palette) and adds a user-controlled appearance
-preference. Three options in Settings → Appearance:
-
-- **Match System** (default) — follows the macOS appearance.
-- **Light** — locks to the System 7 / Platinum-era palette.
-- **Dark** — locks to a tuned dark palette regardless of macOS.
-
-### What changed
-
-**`CTPalette` is now fully dynamic.** Every token (`paper`,
-`platinum`, `borderInk`, `bodyInk`, `macBlue`, `macBlueSoft`,
-`cherryRose`, `bunnyPink`, `lilac`, `mint`) resolves to a
-light or dark variant via `NSColor(name:dynamicProvider:)`. The
-view layer is unchanged — same names, same call sites — so
-every existing pane, chip, badge, and card adapts
-automatically. Light variants are byte-identical to what
-shipped through v0.1.7.6 (no visual change for existing users
-on light mode); dark variants are tuned for the same System 7
-mood with inverted luminance and slightly brighter accents to
-compensate for the dark surround.
-
-**`AppearanceMode` enum** added to `AppSettings`:
-`.system` / `.light` / `.dark`. Persisted as a string in
-UserDefaults under the new `appearanceMode` key. Unknown
-stored values fall back to `.system` so a forward-incompatible
-write from a future build downgraded back to v0.1.7.7 doesn't
-crash.
-
-**`ContentView`** applies `.preferredColorScheme(orchestrator.settings.appearanceMode.colorScheme)`
-on the root. `.system` returns nil → SwiftUI follows the
-macOS appearance; `.light`/`.dark` lock the app regardless.
-The dynamic palette resolves itself the moment the appearance
-changes — no view-tree invalidation needed.
-
-**Settings → Appearance section** — new segmented picker
-(Match System / Light / Dark) with a one-line subtitle
-explaining the chosen option. Bound to `draft.appearanceMode`
-with an `.onChange` that pushes the change through the
-orchestrator + `persistSettings()` immediately, so the live
-preview happens *before* the user clicks Done.
-
-### Existing v0.1.7.6 users on dark mode
-
-If you've been running on macOS dark mode, the app has been
-rendering with the light palette (near-white surfaces). After
-updating to v0.1.7.7 with the default `.system` setting, the
-app picks up your dark mode automatically. If you preferred
-the old behaviour (always light regardless of system), set
-Settings → Appearance → Light.
-
-### Files
-
-- **Modified:** `COOL-TUNNEL/Persistence/SettingsStore.swift`
-  — new `AppearanceMode` enum, new field on `AppSettings`,
-  load/save in UserDefaults.
-- **Modified:** `COOL-TUNNEL/Views/MalteseTheme.swift` — every
-  `CTPalette` static is now a dynamic `NSColor`. Added a
-  private `dynamic(light:dark:)` helper.
-- **Modified:** `COOL-TUNNEL/Views/ContentView.swift` —
-  `.preferredColorScheme` modifier on the root.
-- **Modified:** `COOL-TUNNEL/Views/SettingsView.swift` — new
-  Appearance Section with the segmented picker.
-
-### Engine + chaos suite
-
-Unchanged. This is a UI-only patch. All 126 tests still pass.
+Closes Sw#24 (dark-mode dynamic palette) plus user-controlled
+appearance preference (Match System / Light / Dark). Every
+`CTPalette` token (paper, platinum, borderInk, bodyInk, macBlue,
+macBlueSoft, cherryRose, bunnyPink, lilac, mint) resolves to a
+light or dark variant via `NSColor(name:dynamicProvider:)`. View
+layer unchanged. Light variants byte-identical to v0.1.7.6;
+dark variants tuned for the same System 7 mood with inverted
+luminance and slightly brighter accents. New `AppearanceMode`
+enum on `AppSettings` (`.system / .light / .dark`) persisted in
+UserDefaults; unknown values fall back to `.system`. ContentView
+applies `.preferredColorScheme(orchestrator.settings.appearanceMode.colorScheme)`
+on the root (.system returns nil → SwiftUI follows macOS).
+Settings → Appearance segmented picker. Existing v0.1.7.6 users
+on dark mode were rendering with the light palette; default
+`.system` will pick up dark automatically on upgrade.
 
 ## [0.1.7.6] — 2026-05-03 (LTSC patch — in-app self-updater)
 
-LTSC additive feature. New "Cool Tunnel" Settings section with
-**Check for Updates** + **Update to vX.Y.Z** buttons. Mirrors
-the existing Naive Binary / Rust Core sections; clicks the
-release flow for the user — no manual drag-to-Applications, no
-terminal, no `sudo`.
-
-### What it does
-
-1. **Check** — `GET /releases/latest` from the GitHub API.
-   Compares the tag to the running app's
-   `CFBundleShortVersionString`. Renders one of:
-   *up-to-date*, *update available with release-notes link*,
-   or *failed with error message + Reset button*.
-2. **Update** — when a newer release exists:
-   - Downloads the `Cool-tunnel-vX.Y.Z.zip` asset.
-   - Downloads the matching `Cool-tunnel-vX.Y.Z.sha256`
-     manifest.
-   - Computes SHA-256 of the .zip via CryptoKit; refuses to
-     install on any mismatch.
-   - Extracts via `ditto -x -k` (preserves macOS metadata
-     including the bundle's code signature).
-   - Verifies the new app: bundle identifier matches,
-     `CFBundleShortVersionString` matches the release tag,
-     `CodeSignVerifier` accepts.
-   - Refuses to install if the running app is on a read-only
-     volume (DMG mount or quarantine staging).
-   - Writes a tiny bash relaunch helper to `/tmp` and spawns
-     it detached. The helper waits for the parent PID to
-     exit, ditto-replaces the bundle, runs `open -a` on the
-     new copy, then cleans up.
-   - The app quits.
-
-### Security posture — **closes Sw#C4 for this surface**
-
-The Sw#C4 audit finding called out that the existing
-NaiveUpdater + RustCoreUpdater download a binary, ad-hoc sign
-it, and then accept it on next launch — defeating the
-`CodeSignVerifier` check against a MITM on the GitHub asset
-URL. The audit said the real fix is "a release-SHA-256
-manifest the updaters can pin against" but flagged it as
-deferred because it required a release-process change.
-
-`scripts/package_release.sh` already publishes that manifest
-for every release — it just wasn't being consumed. The new
-AppUpdater consumes it. The MITM hole is closed for the .app
-itself; retrofitting NaiveUpdater + RustCoreUpdater stays
-queued for v0.2.0.
-
-### What it deliberately does NOT do
-
-- **Does not request admin escalation.** `/Applications` is
-  admin-group writable on default macOS installs; no `sudo` or
-  auth dialog ever fires. If the user is non-admin and the
-  app is in a non-writable location, the update fails with a
-  clear message rather than prompting.
-- **Does not auto-check on launch.** The "Check" button is
-  user-initiated only. Cool Tunnel still makes zero network
-  calls at launch unless the user clicks something.
-- **Does not auto-update.** Every step is explicit click.
-
-### Files
-
-- New: `COOL-TUNNEL/SystemIntegration/AppUpdater.swift` (~410
-  lines) — pipeline, SHA verification, helper-script writer.
-- Modified: `COOL-TUNNEL/Views/SettingsView.swift` — new
-  "Cool Tunnel" section with the Check/Update affordance.
-- Engine and chaos suite unchanged.
+New Settings section with Check for Updates + Update to
+vX.Y.Z buttons. Check does `GET /releases/latest` from GitHub
+API, compares to `CFBundleShortVersionString`, renders
+up-to-date / update available / failed. Update downloads the
+`.zip` + `.sha256` manifest, computes SHA-256 via CryptoKit
+and refuses to install on any mismatch, extracts via
+`ditto -x -k` (preserves macOS metadata + code signature),
+verifies the new app's bundle identifier + version + code
+signature, refuses if on a read-only volume, writes a bash
+relaunch helper to `/tmp` and spawns detached (helper waits
+for parent PID to exit, ditto-replaces the bundle, runs
+`open -a` on the new copy, cleans up), then quits. Closes
+Sw#C4 for the .app self-updater surface: pre-fix, NaiveUpdater
++ RustCoreUpdater downloaded binaries, ad-hoc signed them,
+and accepted on next launch — defeating CodeSignVerifier
+against a MITM on the GitHub asset URL. The real fix is the
+release-SHA-256 manifest the updaters can pin against, which
+`package_release.sh` already publishes for every release but
+wasn't being consumed; the new AppUpdater consumes it.
+NaiveUpdater + RustCoreUpdater retrofit deferred to v0.2.0.
+Deliberately does NOT request admin escalation
+(`/Applications` is admin-group writable on default installs),
+does NOT auto-check on launch (Check is user-initiated only),
+does NOT auto-update.
 
 ## [0.1.7.5] — 2026-05-03 (LTSC patch — chaos siege)
 
-LTSC siege patch. The chaos engineering work returned three real
-fixes plus four new siege-grade tests that hold the engine to a
-stricter wire-ordering contract under burst.
-
-### Engine fix — Ru#C4 wire ordering (no longer deferred)
-
-The engine previously emitted `Event::StateChanged { running: true }`
-from inside `ProxySupervisor::spawn`, *before* `start_proxy`
-returned the `Started { pid }` response. The two flowed through
-different channels (event_tx + event_bridge vs outbound_tx) and
-the event could overtake the response on the wire. Same shape
-on the stop side: `monitor_lifecycle` emitted
-`StateChanged { running: false }` regardless of who triggered
-the kill.
-
-Fixed by moving the user-initiated transition events into
-`handle_request`, emitted on the same outbound channel as the
-response, AFTER the response writes. FIFO ordering on the
-channel now guarantees `response → state_changed event`.
-`monitor_lifecycle` retains the natural-death event (naive
-crashes on its own — there's no associated response to order
-against). Wire shapes unchanged; only the ordering contract
-tightens.
-
-Verified by new siege test `siege_wire_ordering_holds_under_burst`
-which fires 10 start/stop cycles back-to-back and asserts the
-ordering invariant on every transition.
-
-### Credential storage fixes — focused audit
-
-- **MigratingCredentialStore.password promotion bug.** The
-  legacy-to-primary promotion path used two independent
-  `try?` calls, so a failed primary write followed by a
-  successful legacy delete would lose the password entirely.
-  Now uses do/catch: legacy delete only runs if the primary
-  write succeeded. Worst case is now an extra Keychain prompt
-  on the next read, not data loss.
-- **FileCredentialStore NSLock reentrancy footgun.** The
-  empty-password branch in `setPassword` used to call
-  `deletePassword`, which takes the lock again. NSLock isn't
-  reentrant — the only reason this didn't deadlock today was
-  the empty-check ran *before* taking the lock. Refactored to
-  inline the delete logic under the held lock so a future
-  maintainer reordering the empty-check below `lock.lock()`
-  cannot produce a deadlock by mistake.
-
-### Chaos test suite extended (12 → 16 scenarios)
-
-Four new siege scenarios added to `core/tests/chaos.rs`:
-
-| # | Scenario | Guards against |
-|---|---|---|
-| 13 | Concurrent request burst with random 1–100 ms inter-recv delays | Slow-consumer back-pressure regressions |
-| 14 | 100 start/stop cycles with random 1–30 ms jitter | FD/resource leaks across spawn cycles |
-| 15 | Random-delay race start→stop (30 cycles, 1–50 ms span) | Lock-across-spawn (Ru#C2) regression under randomized timing |
-| 16 | Wire ordering under burst (10 start/stop cycles) | Ru#C4 regression — events outrunning responses |
-
-Inline xorshift64 PRNG (no `rand` dep added). Total chaos suite
-runtime: ~3 s on a modern Mac.
-
-### Items deliberately not delivered
-
-- **Memory-pressure simulation.** Requires OS-level controls
-  (jetsam, memory_pressure framework) outside LTSC scope.
-  Engine memory is bounded structurally: `MAX_FRAME_BYTES`,
-  `EVENT_BUFFER`, `OUTBOUND_BUFFER`, log-buffer trim, debouncer
-  prune. No leak path identified.
-- **AES-256-GCM crypto audit.** No such code exists in the
-  project — credential format is base64-of-plaintext + 0600
-  POSIX mode + Keychain fallback. Encryption-at-rest stays on
-  the v0.2.0 deferred list (would be on-disk format change,
-  contract-locked under LTSC).
+Ru#C4 wire ordering (was deferred): engine emitted
+`Event::StateChanged { running: true }` from inside
+`ProxySupervisor::spawn` BEFORE `start_proxy` returned
+`Started { pid }`; the two flowed through different channels
+(event_tx + event_bridge vs outbound_tx) and the event could
+overtake the response. Same shape on the stop side via
+`monitor_lifecycle`. Moved user-initiated transition events
+into `handle_request`, emitted on the same outbound channel
+AFTER the response writes; FIFO ordering guarantees
+`response → state_changed event`. `monitor_lifecycle` retains
+the natural-death event (no associated response to order
+against). Wire shapes unchanged. Credential storage:
+`MigratingCredentialStore.password` legacy-to-primary
+promotion was two independent `try?` calls so a failed primary
+write followed by successful legacy delete would lose the
+password entirely. Now do/catch — legacy delete only runs if
+primary write succeeded. `FileCredentialStore` NSLock
+reentrancy footgun: empty-password branch in `setPassword`
+called `deletePassword` which takes the lock again (NSLock
+isn't reentrant; only worked because empty-check ran BEFORE
+locking). Refactored to inline delete logic under the held
+lock. Chaos suite extended 12 → 16: concurrent request burst
+with random inter-recv delays; 100 start/stop cycles with
+jitter; random-delay race start→stop (30 cycles); wire
+ordering under burst (10 cycles). Inline xorshift64 PRNG, no
+new dep. Runtime ~3s.
 
 ## Unreleased — chaos test infra (no binary change)
 
-LTSC test-infrastructure addition. `core/tests/chaos.rs` —
-12 deliberate-misbehavior scenarios that exercise the engine
-under the failure modes the v0.1.7.x audits identified or
-fixed. Asserts each invariant the audits are supposed to
-guarantee, so a future regression that breaks one fails CI
-loudly instead of shipping silently.
-
-Scenarios:
-
-1. Oversized frame survival — engine returns
-   `frame_too_large` and continues processing.
-2. No-newline flood — discard cap (`16 × MAX_FRAME_BYTES`)
-   triggers; engine fails fast instead of looping forever
-   (verifies Ru#H4 fix).
-3. Malformed-frame burst (1000 invalid lines) — engine
-   stays responsive; sentinel valid request still answered.
-4. Concurrent `start_proxy` race — exactly one
-   `started` reply + one `already_running` error, no
-   double-spawn (verifies Ru#C2 TOCTOU fix).
-5. Stdin EOF mid-frame — engine exits cleanly.
-6. Empty + whitespace lines — silently skipped, no
-   error frames.
-7. Invalid UTF-8 — `malformed_request` error, engine
-   alive.
-8. ID correlation under interleaved valid/invalid — every
-   reply carries its associated id (verifies the two-phase
-   parse contract).
-9. `stop_proxy` when idle — `not_running` error.
-10. `stop_proxy` spam (20× back-to-back) — stable error
-    replies, no crash.
-11. 100k pure-newline flood — empty-line short-circuit
-    holds; zero error frames emitted.
-12. `shutdown` during in-flight requests — engine exits
-    cleanly with status 0.
-
-No engine changes. The artifact bytes for v0.1.7.4 are
-unaffected; this commit only adds test infrastructure that CI
-runs on every push.
-
-Surfaced one known design quirk (audit Ru#C4): the engine
-emits `state_changed: true` event *before* the `started`
-response. Documented; deferred to v0.2.0 where the wire
-contract opens.
+`core/tests/chaos.rs` — 12 deliberate-misbehaviour scenarios
+asserting the invariants the v0.1.7.x audits identified or
+fixed: oversized frame survival (`frame_too_large`); no-newline
+flood (discard cap `16 × MAX_FRAME_BYTES` per Ru#H4); 1000
+malformed-frame burst (sentinel valid request still answered);
+concurrent `start_proxy` race (one `started` + one
+`already_running`, no double-spawn per Ru#C2); stdin EOF
+mid-frame; empty/whitespace lines silently skipped; invalid
+UTF-8 → `malformed_request`; id correlation under interleaved
+valid/invalid; `stop_proxy` when idle → `not_running`;
+`stop_proxy` spam (20×); 100k pure-newline flood; `shutdown`
+during in-flight requests (clean exit). Surfaced one known
+design quirk (Ru#C4: engine emits `state_changed: true` BEFORE
+`started` response) — deferred to where the wire contract
+opens; fixed in v0.1.7.5.
 
 ## [0.1.7.4] — 2026-05-03 (LTSC patch)
 
-LTSC in-line patch — debounce-design audit. Single-line tuning
-change with two-doc-comment touch-up: anomaly debouncer window
-tightened from 100 ms to **50 ms**.
-
-The audit inventoried every coalescing/throttle/debounce site
-across both crates. Only one site is semantically a "debouncer"
-in the user's sense (anomaly suppression in the security
-monitor); the other timing sites are animations, signal-grace
-windows, request deadlines, or UI-typing coalescers — each
-correctly scaled to its own concern and left unchanged:
-
-| Site | Window | Role | Decision |
-| --- | --- | --- | --- |
-| Anomaly `Debouncer::default()` | **100ms → 50ms** | per-key suppression | tightened |
-| `persistSettings` task sleep | 250ms | UserDefaults coalesce | unchanged (typing) |
-| LogConsole scroll `withAnimation` | 100ms | render duration | unchanged (animation) |
-| AppDelegate terminate watchdog | 5s | shutdown ceiling | unchanged (safety) |
-| Subprocess kill-escalation grace | 250ms | TERM→INT→KILL spacing | unchanged (signal) |
-| `CoreClient.send` per-request deadline | 120s | engine timeout | unchanged |
-
-The 50 ms anomaly window halves the worst-case latency between
-naive emitting a real anomaly (e.g. starting to listen outside
-loopback) and the orchestrator's auto-stop reaction. The
-suppression goal is unchanged — collapse a flapping-naive
-anomaly storm into one event per key per window — but the
-window is now tight enough to feel near-instant. Burst-flooding
-the UI is bounded by the per-key map: distinct reasons admit
-independently; the same reason emits at most once per 50 ms.
-
-The existing `Debouncer` test suite (single-key suppression,
-distinct-key independence, 100k-event stress, prune semantics,
-default-window assertion) all continue to pass; only the
-default-window assertion was retargeted from 100 ms to 50 ms.
+Anomaly debouncer window tightened 100 ms → 50 ms. Halves
+worst-case latency between naive emitting a real anomaly (e.g.
+listening outside loopback) and the orchestrator's auto-stop
+reaction; suppression goal unchanged (collapse flapping-naive
+storm into one event per key per window). Audit inventoried
+every coalescing/throttle/debounce site — only this one was
+semantically a debouncer; the other timing sites
+(`persistSettings` 250ms typing coalesce, LogConsole 100ms
+animation, AppDelegate 5s terminate watchdog, Subprocess 250ms
+TERM→INT→KILL spacing, CoreClient 120s request deadline) are
+correctly scaled to their own concerns. Default-window
+assertion in the Debouncer test suite retargeted.
 
 ## [0.1.7.3] — 2026-05-03 (LTSC patch)
 
-LTSC in-line patch — robustness audit pass. Two parallel audits
-(Swift + Rust) returned 103 findings; this patch closes the
-high-confidence correctness/security fixes plus quick-win
-hygiene. The bigger items (release-SHA-manifest infra to close
-the updater codesign gap, channel-split for control-plane vs
-log-line traffic, EngineSession enum-state) are deferred to
-v0.2.0 because they touch shared infrastructure or change the
-release-publishing process.
-
-**Correctness — Swift:**
-
-- AppDelegate `applicationShouldTerminate` now races shutdown
-  against a 5-second watchdog; whichever finishes first calls
-  `reply(toApplicationShouldTerminate:)`. Without the watchdog
-  any future shutdown-step hang (signal-blocked syscall, wedged
-  `networksetup`) parked the app in "terminating…" forever with
-  the engine + system proxy still alive.
-- `CoreClient.send` enforces a 120-second per-request deadline.
-  Every continuation in `pending` has a sibling timeout Task
-  that resumes it with `requestTimeout` if the engine fails to
-  reply. Previously a hung engine froze the UI indefinitely
-  with no recovery short of Force Quit.
-- `bootstrapIfNeeded` retains its didBootstrap-on-success
-  semantic from v0.1.7.2 (no regression).
-- `TunnelOrchestrator.stop()` early-returns when already stopped
-  — spam-clicking Stop no longer iterates `networksetup` twice
-  per active service or surfaces "stop failed: not_running" to
-  the UI.
-- `clearLogs()` now also clears `lastError`. The error pill
-  no longer survives a "Clear logs" tap.
-- `listeningOutsideLoopback` auto-stop is single-flighted —
-  burst-of-anomalies no longer queues duplicate `stop()` Tasks
-  racing on `activeMode`.
-- `ProfileStore.loadProfiles` deduplicates by id, drops
-  empty-id entries, trims whitespace from server/username/port
-  fields. A corrupted UserDefaults blob (TimeMachine restore
-  race, manual `defaults import` mistake) no longer produces
-  duplicate profiles where `removeSelectedProfile` deletes
-  every match in one keystroke.
-- New `Subprocess.run` helper drains stdout/stderr concurrently
-  while the child runs, with hard timeout escalation
-  (terminate → interrupt → SIGKILL). Replaces three boot-path
-  callers (FirewallProbe, NaiveBinaryResolver,
-  RustCoreResolver) that each suffered from the classic
-  pipe-fills-then-deadlocks bug if the subprocess wrote >64 KB
-  to stderr.
-
-**Security — Swift:**
-
-- `RestrictedFile.write` no longer chmods *after* rename. The
-  v0.1.5.5 promise of 0600 on `credentials.json` had a real
-  race window: `Data.write(.atomic)` writes a temp file with
-  default umask (0644) then renames; if the process crashed or
-  hit ENOSPC between rename and chmod, the credential file
-  persisted at 0644. New flow opens the temp file with
-  `O_CREAT|O_EXCL|0600`, writes, fsyncs, renames atomically.
-  No window where the file is on disk world-readable.
-- `NaiveUpdater` validates the upstream tag against
-  `^v?\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?$` before interpolating
-  it into the GitHub asset URL. A future upstream tag
-  containing `..`, spaces, `?`, `#`, or `/` would have
-  produced a URL pointing outside the intended release
-  directory.
-
-**Correctness — Rust:**
-
-- `ProxySupervisor::stop()` now passes `&mut handle` to
-  `tokio::time::timeout` so on the 2-second drain expiry the
-  handle can still be `abort()`ed and awaited. The previous
-  implementation moved the handle into `timeout`, leaking the
-  task indefinitely (still awaiting `child.wait()`); the inner
-  `Child` was never dropped, so `kill_on_drop(true)` never
-  fired, so a subsequent `start_proxy` could spawn a *second*
-  `naive` against the still-alive previous PID.
-- `monitor_loop` exits as soon as the supervised PID is gone
-  (checked each tick via `/bin/kill -0`). Previously the loop
-  kept probing the stale PID forever; on macOS PIDs roll over
-  (max 99,998), so a long session could see another process
-  take the same PID and the engine would emit anomalies
-  derived from someone else's lsof output — a confused-deputy
-  hazard for a security monitor.
-- `monitor::run` (lsof probe) wrapped with a 4-second Tokio
-  timeout. A wedged `lsof` can no longer freeze the monitor
-  loop.
-- `lsof` exit=1 with empty stderr is now treated as "no
-  matching open files" (a perfectly normal state for a `naive`
-  that hasn't accepted a connection yet) instead of
-  `MonitorError::NonZeroExit`. Stops the spurious
-  `tracing::warn!` line on every probe of an idle proxy.
-- `run_probe` (curl) wrapped with `kill_on_drop(true)` and an
-  outer Tokio timeout (`max_time + 5s`). Cancelled diagnostic
-  Tasks no longer leak curl processes; a curl wedged in
-  libc's getaddrinfo is reaped.
-- `read_capped_line` enforces a hard cap on bytes discarded in
-  oversized-frame resync mode (`16 × MAX_FRAME_BYTES`). A
-  multi-GB blob with no newline can no longer burn CPU forever
-  in the consume loop; protocol-level desync now fail-fast as
-  `InvalidData`.
-- `client_mode::run` now breaks out of the read loop when an
-  error-frame send fails (writer is gone → engine is shutting
-  down → stop reading). Previously the engine kept consuming
-  inputs forever, masking real shutdown.
-- `ProxySupervisor::read_lines` now logs the IO error before
-  returning instead of swallowing with `Err(_)`. Mid-session
-  log silence is the most likely cause of "where did my logs
-  go?" — operators get a real signal to debug from.
-
-**Hygiene — Rust:**
-
-- `init_tracing` uses `try_init` instead of `init` so a future
-  test that drives both client and server modes doesn't panic
-  on the second call.
-- Dead intra-doc reference to the deleted `ANOMALY_DEBOUNCE`
-  constant cleaned up; `Debouncer::default()` is the canonical
-  source of the 100 ms window.
-- `MAX_INFLIGHT_REQUESTS` doc-vs-code mismatch fixed: doc
-  previously claimed "drop on burst" but the code uses
-  `acquire_owned().await` (queue). Doc rewritten to match
-  reality; the actual drop behaviour is left as a
-  defer-to-next-minor since it's a behaviour change.
-- `axum::serve` body limit lowered from the 2 MiB default to
-  64 KiB via `DefaultBodyLimit::max`. A profile is a few
-  hundred bytes; tightening the ceiling shrinks the
-  oversized-body attack surface.
-
-**Deferred to v0.2.0:**
-
-- Sw#C4: Updaters defeat the codesign gate (download → ad-hoc
-  sign → next-launch verify passes the just-signed binary).
-  Real fix needs a release-SHA-256 manifest the updaters can
-  pin against; that's a release-process change beyond LTSC
-  scope. **Until then, the existing CodeSignVerifier check
-  catches arbitrary unsigned binaries but does not catch a
-  MITM on the GitHub asset URL.**
-- Sw#H2/H3: 3 of 6 subprocess callers migrated to
-  `Subprocess.run`; the updater-side helpers retain bespoke
-  flows. Migrate in v0.2.
-- Sw#H11: bootstrap-failure visibility through subsequent
-  user-initiated Start.
-- Ru#C2: `start_proxy` cancellation-safety + anomaly-debouncer
-  reset race.
-- Ru#C4: EngineSession enum-state to make the three lifecycle
-  fields (supervisor / monitor_handle / active_port) refactor-
-  proof.
-- Ru#H6: zombie-handler cleanup on writer death.
-- Ru#H7: split control-plane vs log channels (anomalies and
-  state-changes today share a 256-buffer mpsc with high-volume
-  log lines).
-- Ru#H8: tower-based concurrency limit + per-request timeout
-  (would add `tower` dep).
-- All wire-format / on-disk-format changes per
-  [SUPPORT.md](./SUPPORT.md).
+Robustness audit pass: 103 findings, high-confidence
+correctness/security fixes land. Swift correctness:
+AppDelegate `applicationShouldTerminate` races shutdown
+against a 5-second watchdog (pre-fix any signal-blocked
+syscall or wedged `networksetup` parked the app in
+"terminating…" forever with engine + system proxy alive).
+`CoreClient.send` enforces a 120-second per-request deadline
+via sibling timeout Task that resumes with `requestTimeout`.
+`TunnelOrchestrator.stop()` early-returns when already stopped
+(spam-clicking no longer iterates networksetup twice per
+service). `clearLogs()` also clears `lastError`.
+`listeningOutsideLoopback` auto-stop is single-flighted.
+`ProfileStore.loadProfiles` deduplicates by id, drops empty-id
+entries, trims whitespace (corrupted UserDefaults blob no
+longer produces duplicate profiles where
+`removeSelectedProfile` deletes every match in one keystroke).
+New `Subprocess.run` helper drains stdout/stderr concurrently
+with hard timeout escalation (terminate → interrupt → SIGKILL),
+replacing three boot-path callers (FirewallProbe,
+NaiveBinaryResolver, RustCoreResolver) that each suffered from
+the classic pipe-fills-then-deadlocks bug if the subprocess
+wrote >64 KB to stderr. Swift security: `RestrictedFile.write`
+no longer chmods AFTER rename — the v0.1.5.5 promise of 0600
+on `credentials.json` had a real race window
+(`Data.write(.atomic)` writes a temp file with default umask
+0644 then renames; if the process crashed or hit ENOSPC
+between rename and chmod the file persisted at 0644). New flow
+opens with `O_CREAT|O_EXCL|0600`, writes, fsyncs, renames
+atomically. `NaiveUpdater` validates upstream tag against
+`^v?\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?$` before URL
+interpolation. Rust correctness: `ProxySupervisor::stop()`
+passes `&mut handle` to `tokio::time::timeout` so on 2-second
+drain expiry the handle can still be aborted (pre-fix moved
+the handle into timeout, leaking the task indefinitely;
+`Child` was never dropped so `kill_on_drop(true)` never fired
+and a subsequent `start_proxy` could spawn a second naive).
+`monitor_loop` exits when the supervised PID is gone via
+`/bin/kill -0` each tick (pre-fix kept probing the stale PID
+forever; on macOS PIDs roll over at 99,998 so a long session
+could emit anomalies from someone else's lsof output — a
+confused-deputy hazard). `monitor::run` (lsof probe) wrapped
+in a 4-second Tokio timeout. `lsof` exit=1 with empty stderr
+treated as "no matching open files" instead of
+`MonitorError::NonZeroExit` (stops the spurious
+`tracing::warn!` on every idle-proxy probe). `run_probe` (curl)
+wrapped with `kill_on_drop(true)` + outer Tokio timeout
+(`max_time + 5s`). `read_capped_line` enforces hard cap on
+bytes discarded in oversized-frame resync mode
+(`16 × MAX_FRAME_BYTES`). `client_mode::run` breaks out of
+the read loop when an error-frame send fails.
+`ProxySupervisor::read_lines` logs the IO error before
+returning (was `Err(_)` swallow). Rust hygiene: `init_tracing`
+uses `try_init`; dead `ANOMALY_DEBOUNCE` doc reference
+cleaned; `MAX_INFLIGHT_REQUESTS` doc-vs-code mismatch fixed
+(doc claimed "drop on burst" but code uses `acquire_owned().await`
+queue); `axum::serve` body limit lowered from 2 MiB to 64 KiB
+via `DefaultBodyLimit::max`. Deferred to v0.2.0: Sw#C4
+release-SHA-manifest infra (until then existing CodeSignVerifier
+catches arbitrary unsigned binaries but does NOT catch a MITM
+on the GitHub asset URL); Sw#H2/H3 remaining subprocess callers;
+Ru#H7 channel split for control-plane vs log traffic;
+EngineSession enum-state; tower concurrency limit.
 
 ## [0.1.7.2] — 2026-05-03 (LTSC patch)
 
-LTSC in-line patch — module-design audit pass. 113 audit
-findings across Swift (58) and Rust (55); this patch closes the
-high-confidence correctness fixes + quick wins. Bigger
-architectural items (TunnelOrchestrator god-object split,
-Resolver/Updater 80% deduplication, async CredentialStore,
-moving client_mode/server_mode into the lib) are deferred to
-the next minor bump because they touch shared infrastructure
-or risk regression on the LTSC tag.
-
-**Swift correctness:**
-
-- `TunnelOrchestrator.bootstrap()` no longer `fatalError`s when
-  Application Support cannot be created — falls back to a tmp
-  path and surfaces the failure as `lastError`. App boots into a
-  diagnosable state instead of crashing pre-UI.
-- `bootstrapIfNeeded()` flag is now set on engine-start success
-  rather than entry, so a future Retry button can recover from
-  transient launch failures.
-- `refreshNaiveDescriptor()` busy-wait
-  (`while isRefreshing { await Task.yield() }`) replaced with a
-  shared `Task` continuation. Late callers `await` instead of
-  pinning a CPU under contention.
-- `AppDelegate.applicationWillTerminate` `DispatchSemaphore`
-  main-thread block (which deadlocked because MainActor IS the
-  main thread) replaced with the correct
-  `applicationShouldTerminate → .terminateLater →
-  reply(toApplicationShouldTerminate:)` AppKit dance. The
-  engine actually gets a clean stop on Cmd+Q now.
-- `NaiveUpdater.assetURL` `fatalError` on URL-construction
-  failure → typed `UpdaterError.message` (consistent with the
-  sibling `resolveLatestStableTag` that already used the safer
-  pattern).
-- `ContentView` `#Preview` `bootstrap()` call wrapped in
-  `#if DEBUG` so it doesn't ship a second engine subprocess
-  alongside the one `CoolTunnelApp` already owns.
-
-**Swift hygiene:**
-
-- `persistSettings` now debounces (250 ms) so per-keystroke
-  edits collapse into one UserDefaults write; `flushSettings`
-  exposed for explicit commit points + called from `shutdown`
-  so a late edit isn't silently dropped on Cmd+Q.
-- Removed `TunnelOrchestrator.hostArchitecture` re-export —
-  `HostArchitecture.current` is already a static cached value;
-  the re-export was dead public surface.
-- Removed dead `Keys.migrated` UserDefaults key + writes
-  (set but never read).
-- `KeychainStore: CredentialStore` conformance moved from
-  `CredentialStore.swift` to `KeychainStore.swift` (Swift
-  convention: conformance lives with the type).
-- Free-function `writeRestrictedFile(_:to:)` namespaced as
-  `RestrictedFile.write(_:to:)` to keep module global scope
-  clean.
-- `NaiveUpdater.download` doc-comment now honestly describes
-  the indeterminate progress (the previous claim of "every ~64
-  KB" was untrue; `URLSession.shared.download(from:)` doesn't
-  surface byte-level progress).
-
-**Rust correctness:**
-
-- `client_mode::start_proxy` TOCTOU race fixed — engine mutex
-  now held across the `ProxySupervisor::spawn` call. Previously
-  two concurrent start requests could both pass the "already
-  running?" check and both spawn `naive` (two real PIDs!) —
-  the loser's events still leaked to Swift before being
-  cancelled.
-- `ProxySupervisor::stop()` now bounds the monitor-drain wait
-  at 2 s. The previous unbounded `handle.await` could in theory
-  block indefinitely; `kill_on_drop(true)` on the underlying
-  `Child` still reaps the process.
-- `ApiError` (`server_mode`) is now a `BadRequest` /
-  `Internal` enum with `Debug` derived; previously every
-  failure was forced through 500 with no `Debug` for
-  `tracing::error!(?err)`.
-
-**Rust hygiene:**
-
-- `redaction.rs` regex statics switched from
-  `OnceLock<Option<Regex>>` (which silently passthrough'd on
-  compile failure → credentials would have leaked) to
-  `LazyLock<Regex>` with `.expect(...)`. New
-  `redaction_regexes_compile` test ensures `cargo test`
-  catches any bad regex edit before it can ship.
-- `lib.rs` re-exports `error::CoreError` at the crate root so
-  consumers can write `cool_tunnel_core::CoreError`.
-- `EngineState` is now `#[derive(Default)]` (manual impl was
-  delegating to component defaults anyway).
-- `ANOMALY_DEBOUNCE` constant deleted; `Debouncer::default()`
-  is the single source of truth for the 100 ms window.
-- `GLOBAL_TARGETS` and `SMART_TARGETS` consolidated to one
-  underlying `LATENCY_TARGETS` constant (the two were
-  byte-identical; future-divergence footgun).
-- `LOOPBACK_HOST` moved to `config/mod.rs` so `naive_config`
-  and `pac` reference one constant instead of literal
-  `"127.0.0.1"` strings in a JS template.
-- `MAX_FRAME_BYTES` is now `pub` so the integration test can
-  reference it instead of duplicating the magic number.
-- `MAX_INFLIGHT_REQUESTS` doc-commented with rationale (was
-  bare `= 32` with no explanation).
-- `EncodedCredentials` fields made private with accessors;
-  `Debug` redacts the password; `Drop` clears the strings
-  eagerly. Heap-byte zeroing requires the `zeroize` crate
-  (project forbids `unsafe`); deferred to v0.2.
-- `pac.rs::encode_js_string_array` `unwrap_or_else` fallback
-  collapsed to `unwrap_or_default` with a comment explaining
-  it's structurally unreachable (`serde_json::to_string` on
-  `&[String]` is infallible).
-- `client_mode::dispatch` wildcard arm rewritten with a typed
-  payload that names the unmapped `RequestKind` variant.
-
-**Build / lint:**
-
-- `core/build.rs` doc comment promoted to module-level `//!`
-  so `clippy::missing-docs` is happy.
-- `EngineState::default()` derived; capture's `argv` parameter
-  renamed to `command_line` to avoid `clippy::similar_names`.
-
-The deferred items (Sw#10 god-object, Sw#8/9 resolver+updater
-dedup, Sw#5/6 CoreClient broken-pipe + race-y shutdown, Ru#C1
-stdin drain, Ru#H3/H4 client_mode/server_mode into lib, plus
-all wire-format and on-disk-format changes) are tracked for
-the next minor bump.
+Module-design audit (113 findings, 58 Swift + 55 Rust); high-
+confidence correctness fixes + quick wins land. Swift:
+`TunnelOrchestrator.bootstrap()` no longer `fatalError`s when
+Application Support cannot be created — falls back to a tmp
+path and surfaces failure as `lastError` (boots into a
+diagnosable state instead of crashing pre-UI).
+`bootstrapIfNeeded()` flag is now set on engine-start SUCCESS
+rather than entry, so a future Retry button can recover from
+transient launch failures. `refreshNaiveDescriptor()` busy-wait
+replaced with a shared Task continuation.
+`AppDelegate.applicationWillTerminate`'s `DispatchSemaphore`
+main-thread block (which deadlocked because MainActor IS the
+main thread) replaced with the correct AppKit dance
+(`applicationShouldTerminate → .terminateLater →
+reply(toApplicationShouldTerminate:)`) — the engine now gets
+a clean stop on Cmd+Q. `NaiveUpdater.assetURL` fatalError → typed
+`UpdaterError.message`. ContentView `#Preview` `bootstrap()`
+wrapped in `#if DEBUG` so it doesn't ship a second engine.
+`persistSettings` now debounces 250 ms; `flushSettings` called
+from shutdown. Rust correctness: `client_mode::start_proxy`
+TOCTOU race fixed — engine mutex held across
+`ProxySupervisor::spawn` (pre-fix two concurrent start requests
+could both pass the "already running?" check and both spawn
+naive, two real PIDs). `ProxySupervisor::stop()` bounds the
+monitor-drain wait at 2 s. `ApiError` is now a
+`BadRequest`/`Internal` enum with Debug derived (pre-fix
+everything was 500 with no Debug for tracing). Rust hygiene:
+`redaction.rs` regex statics switched from
+`OnceLock<Option<Regex>>` (silently passthrough'd on compile
+failure — credentials would have leaked) to `LazyLock<Regex>`
+with `.expect(...)`. New `redaction_regexes_compile` test.
+`EncodedCredentials` fields private with accessors; Debug
+redacts the password; Drop clears strings eagerly (heap-byte
+zeroing via `zeroize` deferred — project forbids unsafe).
+`ANOMALY_DEBOUNCE` constant deleted (Debouncer::default is
+canonical); `GLOBAL_TARGETS` and `SMART_TARGETS` consolidated
+to one `LATENCY_TARGETS`; `LOOPBACK_HOST` moved to
+`config/mod.rs`. `MAX_FRAME_BYTES` is now `pub`.
+`client_mode::dispatch` wildcard arm rewritten with a typed
+payload naming the unmapped `RequestKind` variant. Deferred:
+Sw#10 god-object split, Sw#8/9 resolver+updater dedup, CoreClient
+broken-pipe handling, Ru#C1 stdin drain, client_mode/server_mode
+move to lib, wire/on-disk format changes.
 
 ## [0.1.7.1] — 2026-05-03 (LTSC patch)
 
-LTSC in-line patch — UI/UX audit pass. Public surface
-unchanged. Engine binary version stays `0.1.7` (cargo doesn't
-accept four-segment versions); the .app `MARKETING_VERSION` is
-`0.1.7.1`. Naive bundled version unchanged.
-
-A 45-finding multi-pass audit identified visible drift between
-the v0.1.7 ship and the v0.1.5.7 platinum-theme intent. This
-patch closes the user-visible items:
-
-**Critical:**
-
-- Inline Settings panel `.background` no longer combines a
-  rounded rect with `.ignoresSafeArea` — switched to a flat
-  `Rectangle()`, which fixes a visible square corner that
-  appeared during the slide-in animation.
-- `CoolTunnelApp` window resize: `.contentSize` paired with
-  `maxWidth: .infinity` let users drag the window to absurd
-  dimensions; switched to `.automatic`, and made
-  `defaultSize` (820×820) match `idealHeight` so first launch
-  doesn't snap.
-- Connection-form labels are now `.lineLimit(1) +
-  .frame(minWidth: 130) + .fixedSize` so localized labels
-  ("Lokaler Anschluss") don't truncate without warning.
-- Settings → Direct Domains list now scrolls inside a
-  `.frame(maxHeight: 220)` so a hundred-domain smart-mode list
-  doesn't push the Naive Binary / Rust Core sections off
-  screen.
-- Firewall badge background changed from `bunnyPink` (Maltese
-  palette holdover) to `cherryRose.opacity(0.12)` so it reads
-  as one alert colour.
-
-**High:**
-
-- Header card `cornerRadius` 10 → 8 (matches the rest of the
-  design system).
-- Settings naive-section inner-card radii unified at 6pt
-  (matches the rust-section convention; was 8pt drift).
-- Latency menu border swapped from `lilac` to `borderInk`,
-  padding aligned with `SoftButtonStyle` (12/7), label gets
-  the `.lineLimit(1) + .fixedSize` guard. Disabled "Local
-  route" entry added with explanatory tooltip so users don't
-  think the menu is incomplete.
-- Profile picker frame widened to `minWidth 160 / maxWidth
-  320` + `.help(displayName)` so long server names stay
-  identifiable.
-- About footer text: `Apache 2.0 · Maltese theme · macOS 12+`
-  → `Apache 2.0 · Classic Mac theme · macOS 14+` (was
-  shipping a stale macOS-floor claim and the pre-platinum
-  theme name).
-- Updater message + path summary rows get `.help(message)` +
-  `.textSelection(.enabled)` so support tickets can quote the
-  full string instead of the truncated one.
-- Header subtitle gets `.lineLimit(1)`; title gradient second
-  stop changed from hardcoded `bodyInk` to `.primary` so it
-  remains legible in dark mode.
-- Control-panel `Divider` swapped for an explicit borderInk
-  hairline so opacity matches the rest of the design system.
-
-**Medium:**
-
-- `LogConsoleView` empty-state pulse and the auto-scroll
-  animation are now both gated by `PerformanceProfile` so
-  older Intel hardware doesn't burn GPU on continuous effects.
-- `SettingsView` chip-detection icon and About pawprint use
-  `CTPalette.macBlue` instead of system `.tint` (which was
-  rendering as Apple aqua and clashing with the System 7
-  palette).
-- Direct-domain remove button gets a 22×22 hit target,
-  `.help`, and `.accessibilityLabel` for VoiceOver.
-
-The full audit report is in the v0.1.7.1 commit message; the
-remaining 30+ MEDIUM/LOW findings (dark-mode dynamic palette
-colours, full design-token system, naive/rust section
-deduplication) defer to the next minor bump.
+UI/UX audit closes visible drift between v0.1.7 ship and the
+v0.1.5.7 platinum-theme intent. Engine binary stays `0.1.7`
+(cargo doesn't accept four-segment versions); .app
+MARKETING_VERSION is `0.1.7.1`. Settings panel `.background`
+flat Rectangle fixes a visible square corner during slide-in
+animation. `CoolTunnelApp` window resize uses `.automatic`
+(was `.contentSize` + `maxWidth: .infinity` letting users drag
+to absurd dimensions). Connection-form labels
+`.lineLimit(1) + .frame(minWidth: 130) + .fixedSize` so
+localised labels ("Lokaler Anschluss") don't truncate. Settings
+→ Direct Domains list scrolls in `.frame(maxHeight: 220)` so a
+hundred-domain list doesn't push the binary sections offscreen.
+Firewall badge `cherryRose.opacity(0.12)` (was Maltese-holdover
+bunnyPink). Header card cornerRadius 10 → 8. Settings inner-card
+radii unified at 6pt. Latency menu border swapped from `lilac`
+to `borderInk` with `SoftButtonStyle` padding (12/7), disabled
+"Local route" entry with tooltip. Profile picker
+`minWidth 160 / maxWidth 320` + `.help(displayName)`. About
+footer "Classic Mac theme · macOS 14+" (was stale macOS 12+ +
+"Maltese theme"). Updater message rows gain `.help` +
+`.textSelection(.enabled)`. Header title gradient second stop
+`.primary` so it stays legible in dark. Control-panel Divider
+swapped for explicit borderInk hairline. LogConsoleView
+empty-state pulse + auto-scroll animation gated by
+`PerformanceProfile`. SettingsView chip-detection icon and
+About pawprint use `CTPalette.macBlue` instead of system
+`.tint`. Direct-domain remove button: 22×22 hit target,
+`.help`, accessibilityLabel.
 
 ## [0.1.7] — 2026-05-03 (**LTSC**)
 
-First release on the **Long-Term Servicing Channel**. The LTSC
-posture is documented in [SUPPORT.md](./SUPPORT.md): public
-surface (UI flows, CLI flags, engine protocol, on-disk paths) is
-locked for the lifetime of the v0.1.7 line; only patch + minor
-security fixes and upstream NaiveProxy updates land in-line.
-Major changes wait for the next LTSC line.
-
-LTSC infrastructure introduced in v0.1.7:
-
-- `rust-toolchain.toml` pins the build to Rust 1.80.0 — bumps
-  happen at LTSC boundaries, never silently across machines.
-- `SUPPORT.md` documents the support window (≥ 18 months from
-  release), supported macOS / Rust / hardware matrix, what counts
-  as a breaking change, and the issue-reporting flow.
-- `.github/workflows/ci.yml` runs cargo fmt + clippy + tests +
-  swift-format + shellcheck on every push and PR.
-- `.github/dependabot.yml` opens weekly dependency-update PRs and
-  ignores major bumps inside an LTSC line.
-- `core/deny.toml` configures cargo-deny with allow-list
-  licences, advisory-as-error, and crates.io as the only trusted
-  source.
-- `cool-tunnel-core --version` now embeds the build SHA + date
-  for support tickets — first line stays
-  `cool-tunnel-core <semver>` so the Swift resolver still parses
-  it.
-- `scripts/security_check.sh` gains a section 9 LTSC-posture
-  audit (lockfile present, Cargo.toml ↔ Cargo.lock version-field
-  cross-check, toolchain pin, SUPPORT.md).
-
-Plus the v0.1.6 hotfix round-3 fix that didn't ship in-line:
-
-- `SoftButtonStyle` (Stop / Diag / Latency / Settings) now
-  carries the same `.lineLimit(1) + .fixedSize(horizontal: true)`
-  guard as `ModeChipStyle`. "Settings" no longer wraps to
-  "Set- / tings" on narrower window widths.
+First Long-Term Servicing Channel release. Public surface (UI
+flows, CLI flags, engine protocol, on-disk paths) locked for
+the lifetime of the v0.1.7 line per SUPPORT.md; only patch +
+minor security fixes and upstream NaiveProxy updates land
+in-line. New LTSC infrastructure: `rust-toolchain.toml` pins to
+Rust 1.80.0; SUPPORT.md documents ≥18-month support window +
+supported macOS/Rust/hardware matrix + breaking-change
+definition; ci.yml runs cargo fmt + clippy + tests +
+swift-format + shellcheck on every push/PR; dependabot opens
+weekly PRs ignoring major bumps inside the LTSC line;
+`core/deny.toml` configures cargo-deny with allow-list
+licences, advisory-as-error, crates.io as the only trusted
+source; `cool-tunnel-core --version` embeds build SHA + date
+(first line stays `cool-tunnel-core <semver>` so the Swift
+resolver still parses); security_check.sh gains a section 9
+LTSC-posture audit. Plus a v0.1.6 hotfix round-3 fix:
+SoftButtonStyle (Stop / Diag / Latency / Settings) gains
+`.lineLimit(1) + .fixedSize(horizontal: true)` (matches
+ModeChipStyle; "Settings" no longer wrapped to "Set-/tings").
 
 ## [0.1.6] — 2026-05-03 (stable)
 
-First stable release. Hotfix re-released twice in-line on the
-v0.1.6 tag with: log-console / connection-form border alignment
-to the v0.1.5.7 platinum theme, mode-chip text wrap fix
-(`.lineLimit(1) + .fixedSize`), direct mode switching with one
-"switched from X to Y" log line, mode-aware card tints across
-all four panes, and bundled NaiveProxy bumped to
-v148.0.7778.96-2. Everything from the v0.1.5.x line, plus:
-
-- Engine subprocess crash now surfaces a clear error in the live
-  log instead of a silent stop.
-- Friendlier error messages on the Naive and Rust Core update
-  buttons (network failures explain themselves now).
-- First-run hint banner on the Connection Form when the profile
-  is still the bundled placeholder.
-- VoiceOver accessibility labels on the mode chips, Stop, Diag,
-  Latency, and Settings buttons.
-- New `CHANGELOG.md`, `SECURITY.md`, and `CONTRIBUTING.md` at the
-  repo root.
-- README rewritten for beginners and non-native English readers —
-  short sentences, jargon defined when first used, install steps
-  numbered.
+First stable release. Includes everything from v0.1.5.x plus
+in-line hotfixes: log-console / connection-form border alignment
+to the v0.1.5.7 platinum theme; mode-chip text-wrap fix
+(`.lineLimit(1) + .fixedSize`); direct mode switching with one
+"switched from X to Y" log line; mode-aware card tints across
+all four panes; bundled NaiveProxy bumped to v148.0.7778.96-2.
+Engine subprocess crash now surfaces a clear error in the live
+log; friendlier Naive/Rust Core update errors; first-run hint
+banner on Connection Form when the profile is still the bundled
+placeholder; VoiceOver labels on mode chips + Stop/Diag/Latency/Settings.
+New CHANGELOG.md, SECURITY.md, CONTRIBUTING.md at the repo
+root. README rewritten for beginners.
 
 ## [0.1.5.9] — 2026-05-03 (pre-release)
 
-Swift API Design Guidelines + Rust API Guidelines polish pass.
-
-- Removed two production force-unwrapped URLs in updaters.
-- Replaced a `#if DEBUG print()` in `CoreClient` with `os.Logger`
-  so malformed-frame diagnostics survive Release builds.
-- Justified every `@unchecked Sendable` shim with an explicit
-  safety invariant.
-- Doc summaries on every public View type.
-- Cargo.toml C-METADATA fields (`repository`, `homepage`,
-  `documentation`, `keywords`, `categories`).
+Swift + Rust API guidelines polish. Removed two production
+force-unwrapped URLs in updaters. Replaced `#if DEBUG print()`
+in `CoreClient` with `os.Logger`. Justified every
+`@unchecked Sendable` with an explicit safety invariant. Doc
+summaries on every public View. Cargo.toml C-METADATA fields.
 
 ## [0.1.5.8] — 2026-05-03 (pre-release)
 
-Window-management fix + cross-platform server mode.
-
-- Multi-window-on-reopen bug fixed by switching `WindowGroup` to
-  `Window(_:id:)` and moving engine shutdown out of
-  `.onDisappear`.
-- Cmd+W returns to the main view from Settings (binding
-  shortcut), and to a hidden window from main (orderOut).
-- `cool-tunnel-core` now supports `--mode server [--listen ADDR]`
-  with HTTP endpoints `/health`, `/version`, `/naive/validate`,
-  `/naive/config`, `/naive/pac`. Same Mach-O serves both client
-  (default, JSON-over-stdio) and server tiers.
-- `scripts/package_release.sh` now emits a fourth release asset:
-  `cool-tunnel-core-vX.Y.Z-universal` for the in-app Update flow
-  and standalone server-tier deployment.
-- Deep audit fixes: engine-state mutex no longer held across
-  `ProxySupervisor::spawn`; anomaly debouncer survives proxy
-  restarts; every Test/Update/Choose/Reset button has a
-  synchronous re-entry guard.
+Multi-window-on-reopen bug fixed by switching `WindowGroup`
+to `Window(_:id:)` and moving engine shutdown out of
+`.onDisappear`. Cmd+W returns to main from Settings; orderOut
+on main. `cool-tunnel-core` gains `--mode server [--listen
+ADDR]` with HTTP endpoints `/health`, `/version`,
+`/naive/validate`, `/naive/config`, `/naive/pac`. Same Mach-O
+serves both client (stdio) and server tiers.
+`scripts/package_release.sh` emits a fourth asset
+`cool-tunnel-core-vX.Y.Z-universal`. Audit fixes: engine-state
+mutex no longer held across `ProxySupervisor::spawn`; anomaly
+debouncer survives proxy restarts; every
+Test/Update/Choose/Reset button has a synchronous re-entry
+guard.
 
 ## [0.1.5.7] — 2026-05-03 (pre-release)
 
-Classic-Mac visual refresh + macOS 14 floor + performance pass.
-
-- Theme retuned to System 7 / Platinum era with Monaco for every
-  monospaced surface.
-- `MACOSX_DEPLOYMENT_TARGET` lowered from 26.4 to 14.0 — every
-  Mac shipped 2018+ can now install.
-- Rust release profile (LTO fat, panic=abort, strip=symbols)
-  shrank `cool-tunnel-core` from ~6 MB to 2 MB single-arch.
-- New `PerformanceProfile` auto-tunes animation density on older
-  Intel hardware (skips repeating pulse + window-background fade
-  + caps log buffer at 300 entries on the `.light` tier).
+Theme retuned to System 7 / Platinum with Monaco for monospaced
+surfaces. `MACOSX_DEPLOYMENT_TARGET` lowered 26.4 → 14.0. Rust
+release profile (LTO fat, panic=abort, strip=symbols) shrank
+`cool-tunnel-core` from ~6 MB to 2 MB single-arch. New
+`PerformanceProfile` auto-tunes animation on older Intel
+hardware (skips repeating pulse + window-background fade +
+caps log buffer at 300 entries on `.light` tier).
 
 ## [0.1.5.6] — 2026-05-03 (pre-release)
 
-Rich machine detail + OK/NG verdict + Naive auto-update.
-
-- Settings → "This Mac" panel now shows CPU brand string,
-  P + E core counts, memory, and model identifier (via
-  `HostMachine` / `sysctlbyname`).
-- Naive Binary `Test` produces a single OK / NG verdict line
-  above the per-row breakdown.
-- New `Update` button next to Test downloads the latest upstream
-  NaiveProxy build, lipo-merges arm64 + x86_64, ad-hoc signs,
-  and adopts as the custom binary path.
-- About footer with the running app version + build number.
+Settings → "This Mac" panel shows CPU brand, P+E core counts,
+memory, model identifier via `HostMachine` / `sysctlbyname`.
+Naive Binary `Test` produces a single OK/NG verdict line. New
+`Update` button downloads upstream NaiveProxy, lipo-merges
+arm64 + x86_64, ad-hoc signs, adopts as custom binary path.
 
 ## [0.1.5.5] — 2026-05-03 (pre-release)
 
-Ready to use out of the box.
-
-- Profile passwords moved off the macOS Keychain by default —
-  no system password prompt fires before the UI appears.
-- New `FileCredentialStore` (file-backed, mode 0600) is the
-  primary; the Keychain stays as the legacy leg of a
-  `MigratingCredentialStore` so v0.1.5.4 upgraders don't lose
-  saved passwords.
-- `security_check.sh` secret scan now covers the whole project
-  folder.
+Profile passwords moved off the macOS Keychain by default —
+no system password prompt before the UI appears. New
+`FileCredentialStore` (mode 0600) is primary; Keychain stays
+as the legacy leg of a `MigratingCredentialStore` so v0.1.5.4
+upgraders don't lose saved passwords. `security_check.sh`
+secret scan now covers the whole project folder.
 
 ## [0.1.5.4] — 2026-05-02 (pre-release)
 
-Maltese-themed visual refresh + single-button mode switching.
-
-- Tapping a Smart / Global / Local chip while running hot-swaps
-  modes via `TunnelOrchestrator.switchMode(to:)`. No more "Stop
-  first, then Start in the new mode" dance.
-- Pastel palette + Liquid Glass surfaces (macOS 26+) with
-  regular-material fallback.
-- `.symbolEffect(.bounce/.pulse)` and `.sensoryFeedback` on the
-  right interactions.
-- Chip identity renamed from NewJeans-style to Maltese-pup
-  (palette and structure unchanged).
+Tapping a Smart / Global / Local chip while running hot-swaps
+modes via `TunnelOrchestrator.switchMode(to:)` (no more
+"Stop first, then Start in the new mode" dance). Pastel palette
++ Liquid Glass surfaces (macOS 26+) with regular-material
+fallback. `.symbolEffect(.bounce/.pulse)` + `.sensoryFeedback`
+on key interactions. Chip identity renamed from NewJeans-style
+to Maltese-pup.
 
 ## [0.1.5.3] — 2026-05-02 (pre-release)
 
-Repo tidying + Debouncer optimisation + leaked-password guard.
-
-- Removed four loose dev scripts that contained a hardcoded
-  development-server password; cleaned the same value out of
-  `NaiveProxy_Server_Setup.md` and the Rust test fixtures.
-  See [SECURITY.md](./SECURITY.md) for the rotation note.
-- `Debouncer` got lazy pruning, an explicit `prune_stale(now)`
-  helper, a `Default` impl, and a `window()` accessor.
-- New pinned check in `security_check.sh` rejects any future
-  commit that tries to reintroduce the literal.
+Repo tidying. Removed four loose dev scripts containing a
+hardcoded development-server password; cleaned the same value
+from `NaiveProxy_Server_Setup.md` and Rust test fixtures
+(rotation note in SECURITY.md). `Debouncer` gains lazy
+pruning, `prune_stale(now)`, `Default` impl, `window()`
+accessor. New pinned check in `security_check.sh` rejects any
+future commit reintroducing the literal.
 
 ## [0.1.5.2] — 2026-05-02 (pre-release)
 
-Desensitization audit — credential leak gaps closed.
-
-- `Username::Debug` and `Display` now redact (matching `Password`).
-- Redaction regex extended to SOCKS, FTP, and `naive+https://`
-  URLs and to `Authorization` / `Cookie` headers.
-- curl stderr is now redacted before crossing the wire.
-- `naive --version` output validated against the canonical
-  `naive <semver>` pattern; arbitrary subprocess output can no
-  longer reach the Settings UI.
+Desensitisation audit closes credential leak gaps.
+`Username::Debug` and `Display` redact (matching `Password`).
+Redaction regex extended to SOCKS, FTP, `naive+https://` URLs
+and `Authorization` / `Cookie` headers. curl stderr is now
+redacted before crossing the wire. `naive --version` output
+validated against the canonical `naive <semver>` pattern;
+arbitrary subprocess output can no longer reach the Settings
+UI.
 
 ## [0.1.5.1] — 2026-05-02 (pre-release)
 
-Apache 2.0 relicense + expanded README.
-
-- LICENSE replaced with the canonical Apache 2.0 text.
-- New `NOTICE` file with copyright + bundled-component
-  attribution.
-- README expanded with architecture diagram, build-from-source
-  steps, repository layout, and trade-offs.
-- Audit fixes: diagnostic-event ordering race, monotonic clock
-  for elapsed timing, defensive `formatMs` against NaN, naive
-  refresh re-entrancy guard.
+LICENSE replaced with canonical Apache 2.0 text. New NOTICE
+with copyright + bundled-component attribution. README
+expanded with architecture diagram + build-from-source steps
++ repository layout. Audit fixes: diagnostic-event ordering
+race, monotonic clock for elapsed timing, defensive
+`formatMs` against NaN, naive refresh re-entrancy guard.
 
 ## [0.1.5] — 2026-05-02 (pre-release)
 
-Live ms timing for diagnostics + latency tests.
-
-- Per-probe `DiagnosticProgress` events with wall-clock
-  `elapsed_ms`.
-- Per-sample latency breakdown lines (`total= dns= connect=
-  tls= ttfb=`).
-- Latency probes labelled `baseline (direct, no proxy) <url>`
-  vs `via proxy <url>`.
+Live ms timing for diagnostics + latency tests. Per-probe
+`DiagnosticProgress` events with wall-clock `elapsed_ms`;
+per-sample latency breakdown lines
+(`total= dns= connect= tls= ttfb=`); latency probes labelled
+`baseline (direct, no proxy)` vs `via proxy`.
 
 ## [0.1.4.1] — 2026-05-02
 
-Single auth before UI.
-
-- Bootstrap now performs exactly one code-signature check
-  (`cool-tunnel-core`); naive verification is deferred to
-  Settings or proxy start.
+Bootstrap now performs exactly one code-signature check
+(`cool-tunnel-core`); naive verification deferred to Settings
+or proxy start.
 
 ## [0.1.4] — 2026-05-02
 
-Universal binary fix.
-
-- Bundled `naive` and `cool-tunnel-core` are now genuine
-  universal Mach-Os (arm64 + x86_64). v0.1.3 silently shipped
-  arm64-only builds despite the universal claim.
-- New `NaiveBinaryResolver` with chip detection and a Settings
-  panel that surfaces arch slices, version, and code signature.
-- `scripts/fetch_naive.sh`, `scripts/build_rust_core.sh`,
-  `scripts/security_check.sh`, `scripts/package_release.sh`.
-- 100 ms `Debouncer` for monitor anomalies, with a 100k-event
-  stress test.
-- AGPL-3.0 license + Disclaimer (later relicensed to Apache 2.0
-  in v0.1.5.1).
+Bundled `naive` + `cool-tunnel-core` are now genuine universal
+Mach-Os (arm64 + x86_64) — v0.1.3 silently shipped arm64-only
+builds despite the universal claim. New `NaiveBinaryResolver`
+with chip detection + Settings panel surfacing arch slices,
+version, code signature. New `scripts/fetch_naive.sh`,
+`build_rust_core.sh`, `security_check.sh`, `package_release.sh`.
+100 ms `Debouncer` for monitor anomalies with 100k-event
+stress test. AGPL-3.0 license + Disclaimer (later relicensed
+to Apache 2.0 in v0.1.5.1).
 
 ## [0.1.3] — 2026-05-02
 
-First public release. Rebrand from `naive` to `COOL TUNNEL`,
-modular Swift split (`App/Core/Persistence/SystemIntegration/Views`),
-new Rust core crate.
+First public release. Rebrand from `naive` to `COOL TUNNEL`;
+modular Swift split
+(`App/Core/Persistence/SystemIntegration/Views`); new Rust
+core crate.
