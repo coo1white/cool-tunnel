@@ -348,52 +348,26 @@ green at `688eb8f`.
 
 ## [2.0.38] — 2026-05-11 — Robustness Review Pass (H1 + H2 + H3 + M2 — M8 + L1 + L2)
 
-Five-PR robustness sweep. **H1 supply-chain (#53):** `fetch_naive.sh`
-no longer auto-pins; `naive.upstream.json` is the authoritative
-pin with three modes — default (verify, no network, < 100 ms,
-called by `cut_release.sh` so pin drift blocks the release),
-`--check-only` (re-downloads at the pinned tag, wired into a
-daily `naive-pin-audit.yml`), and `--repin [TAG]` (operator-explicit,
-requires `CT_REPIN_CONFIRM=1`, prints OLD → NEW SHA diff). New
-`naive-pin` CI job runs the default verify on every PR. **H2/H3
-credential storage (#54):** `ProfileStore.loadProfiles` and
-`save` no longer silently destroy legacy passwords on
-credential-store write failure (failed-migration ids tracked;
-UserDefaults rewrite preserves the legacy entry until the
-backend is reachable again). `password(forProfileID:)` throws
-backend failures instead of collapsing every error to `""`. New
-`OrchestratorError.credentialReadFailed(reason:)` distinguishes
-"keychain locked" from "no password set" at three call sites
-(Start, Debug Handshake, VPS Health) and the start-intent gate.
-**M2-M8 I/O hygiene (#55):** M2 — engine stderr decode switched
-from `String(data:encoding: .utf8)` (silently drops chunks on
-multi-byte glyphs split across 4 KiB read boundaries) to
-`String(decoding:as: UTF8.self)` (lossy never nil); M3 —
-`SubscriptionClient` body read pre-allocates `maxBytes` capacity
-and uses `bytes.prefix(maxBytes + 1)` + post-loop check; M4 —
-`AppUpdater` ditto-failed UI string no longer interpolates raw
-subprocess stderr (logged privately, generic message); M5 —
-size cap is now fail-closed when `attributesOfItem` throws or
-`.size` is missing; M8 — `SubscriptionClient.parseURL` rejects
-hostless URLs at parse time. **M7 self-heal classifier (#56):**
-new `isPermanentStartFailure(_:)` aborts the Start retry loop
-for bad profile shape / missing naive / wire-protocol drift with
-"permanent failure — not retrying"; transient failures still
-retry. **M6/L1/L2 redaction (#57):** M6 splits credential
-redaction into two passes — strict-JSON quoted-value matcher
-runs first and consumes any non-quote char or escaped pair
-until the closing quote, so a password with embedded spaces
-(`Tr0ub4dor 3 cat-pic`) inside a naive JSON dump is now fully
-redacted instead of leaking past the first space; existing
-bare-token matcher runs second for `k=v` / `k: v` plain text.
-L2 — userinfo regex changed from `[^@\s/]+@` to `[^/\s]+@` so
-`user:p@ssword@host` is redacted in full instead of stopping at
-the first `@`. L1 — curl probe inserts `--` before the URL so
-a probe target beginning with `-` can't be interpreted as a
-flag. 7 new tests in `redaction.rs`. M1 (53 unlogged `try?`
-sites) deferred to a dedicated sweep with ratchet (lands v2.0.39).
-142 Rust tests, 4/4 CI at `8c5231a`. Wire- and disk-compatible
-with v2.0.37 in both directions.
+Five-PR sweep. H1 supply-chain (#53): `naive.upstream.json` is
+authoritative pin; `fetch_naive.sh` modes default-verify (<100ms,
+called by `cut_release.sh`), `--check-only` (daily
+`naive-pin-audit.yml`), `--repin [TAG]` (`CT_REPIN_CONFIRM=1`).
+H2/H3 credential storage (#54): `ProfileStore.loadProfiles`/`save`
+no longer destroy legacy passwords on credential-store failure;
+`password(forProfileID:)` throws backend failures; new
+`OrchestratorError.credentialReadFailed(reason:)`. M2-M8 I/O (#55):
+M2 stderr decode `String(decoding:as: UTF8.self)` (was dropping
+chunks at multi-byte 4 KiB boundaries); M3 `SubscriptionClient`
+body uses `bytes.prefix(maxBytes + 1)`; M4 ditto-failed UI no
+longer interpolates raw stderr; M5 `attributesOfItem` fail-closed;
+M8 `parseURL` rejects hostless. M7 self-heal classifier (#56):
+`isPermanentStartFailure(_:)` aborts retry on bad profile / missing
+naive / protocol drift. M6/L1/L2 redaction (#57): M6 strict-JSON
+quoted-value matcher first then bare-token (passwords with spaces
+no longer leak past first space); L2 userinfo `[^@\s/]+@` →
+`[^/\s]+@`; L1 curl probe inserts `--` before URL. 7 new
+`redaction.rs` tests. M1 deferred to v2.0.39 ratchet. 142 Rust
+tests, 4/4 CI at `8c5231a`. Wire- + disk-compatible with v2.0.37.
 
 ## [2.0.37] — 2026-05-11 — README Refresh + Bundled NaiveProxy Bump
 
@@ -702,85 +676,35 @@ user-owned bundles unchanged.
 
 ## [2.0.22] — 2026-05-07 (v2.0.21 review-fallout: 4 rounds of code review, ~30 fixes)
 
-Four review rounds against the v2.0.21 cycle (correctness,
-security, concurrency, perf, UX, supply-chain, docs) landed
-~30 distinct fixes, no features, no wire-protocol change.
-Biggest single-finding payoff: every client-side error type
-except one defined `var localizedDescription` as a plain
-stored property without conforming to `LocalizedError`, so the
-`(error as? LocalizedError)?.errorDescription` cast at user-facing
-catch sites silently fell through and users saw Swift's default
-`"…CoolTunnel.CoreClientError error N."` instead of the
-carefully-written enum strings. Round 3 fixed every type
-(`CoreClientError`, `OrchestratorError`, `NaiveResolverError`,
-`RustCoreResolverError`, `CodeSignError`, `KeychainError`,
-`FileCredentialError`, `SubscriptionClientError`,
-`SubscriptionValidationError`) with `var errorDescription: String?`.
-
-Security: `SubscriptionClient` body-size cap (1 MB) now enforced
-during the read via streaming `bytes(for:)` accumulation — the
-mid-cycle `data(for:)` cap was reverted in round 4 because on
-a fast network a hostile panel could land ~1.25 GB before the
-post-hoc check fired. New `NoRedirectGuard` delegate refuses
-every redirect (default `URLSession` follows up to ~16 to any
-host). `Content-Type` sniff before JSON decode rejects cover-site
-HTML; multi-value `Content-Type` (RFC violation, observed in
-the wild) is parsed by splitting on `,` first then `;`.
-`Subscription.validate(now:)` now enforces 9 rules (was 4):
-`version == 1`, non-empty `profiles[]`, `profiles.count ≤ 16`,
-SSRF gate on host (loopback / private / link-local / `localhost`
-/ `*.local`), `capabilities.http3 == false`, `issued_at != 0`,
-`issued_at <= now + 60 s` skew, `expires_at >= issued_at`,
-`expires_at - issued_at <= 1 year`, `expires_at > now`,
-`now - issued_at <= 7 days`. `AntiTrackingFeature` decode is
-forward-compatible (manual Codable with `unknown(String)` sink
-— pre-fix unknown variants threw `tokenInvalid` and bricked the
-client). CI actions pinned to commit SHAs (tag-takeover defense).
-`security_check.sh` now runs from `cut_release.sh` step 8b
-(was opt-in); `cargo deny check` runs from `audit.sh` step 3b.
-`isExcludedFromBackupKey` set on Application Support directory
-(config.json carries cleartext proxy URL, credentials.json
-carries base64 passwords; both 0600 on disk but Time Machine
-snapshots are accessible to admin restoring user home).
-**IPv6 host parsing:** `ServerAddress::parse` previously used
-`rfind(':')` and silently mis-parsed bare `2001:db8::1` as
-host=`2001:db8:` port=`1`. Now accepts bracketed
-`[2001:db8::1]:443`, rejects bare multi-colon as
-`AmbiguousIPv6` with bracket-fix pointer. `RawProfile` redacted
-`Debug` pre-empts a future `tracing::warn!(?raw)` from leaking
-cleartext credentials. `engineStderrLogger` flipped to
-`privacy: .private`. `url.lastPathComponent` instead of `url.path`
-in resolver error strings (`url.path` leaks `/Users/<name>/`).
-`Text(verbatim:)` on panel-supplied `displayName` in
-ConnectionFormView (string-literal interpolation on
-`Text(_: LocalizedStringKey)` auto-renders markdown — a
-hostile `host: "**evil**.com"` would render bolded).
-
-Correctness: `CoreClient` stderr-drain Task is now cancelled
-on `terminate()` (previously `Task.detached` was never stored,
-so rapid start/stop churn parked one worker per attempt on
-synchronous `availableData` until kernel EOF; switched read
-primitive to `read(upToCount:)` so close-then-cancel works).
-`CoreClient.start()` TOCTOU closed via new `starting: Bool`
-set before the first `await`. `StopProxy` Err-path now emits
-`StateChanged{false}` — pre-fix when `supervisor.stop()`
-returned `Err(stop_failed)` the user-emit was gated on
-`response_succeeded == true` and never fired; combined with
-`monitor_loop`'s pre-claim of `emitted_stopped = true`, the
-orchestrator never learned the engine was stopped and UI stuck
-on "running" indefinitely. Saturating arithmetic in
-`Subscription.validate(now:)` — `nowSecs &+ UInt64(maxForwardSkew)`
-wrapped at the `UInt64.max - 60` edge producing
-`skewCeiling ≈ 0` so every legitimate `issuedAt` flagged.
-Swapped to `addingReportingOverflow` saturating to UInt64.max.
-New tests: Hello/HelloReply + ProbeServer/ProbeReport wire
-round-trip (none of the new variants had pinning);
-`monitor_interval_secs` clamp helper + 4 unit tests for
-None/in-range/Some(0)/above-ceiling; 7 ServerAddress IPv6
-parse tests. Removed orphans: `ProxyMode::title()` /
-`ProxyTestMode::title()` (Swift mirror at `Core/Protocol.swift`
-carries its own strings; no Rust caller read them). Bundled
-NaiveProxy v148.0.7778.96-2 unchanged.
+Four review rounds (correctness/security/concurrency/perf/UX/
+supply-chain/docs), ~30 fixes, no features, no wire change.
+Headline: every client error type except one had stored
+`localizedDescription` without `LocalizedError` conformance, so
+the `(error as? LocalizedError)?.errorDescription` cast fell
+through to `"…CoreClientError error N."`; fixed across 9 types
+with `var errorDescription: String?`. Security: 1 MB body cap
+enforced via streaming `bytes(for:)`; new `NoRedirectGuard`
+refuses all redirects; Content-Type sniff before decode (multi-
+value parsed `,` then `;`); `Subscription.validate(now:)`
+enforces 9 rules (was 4) including SSRF gate, issued_at/skew/
+expires_at window; `AntiTrackingFeature` forward-compat
+`unknown(String)` sink; CI actions pinned to commit SHAs;
+`security_check.sh` runs from `cut_release.sh` step 8b; cargo
+deny from `audit.sh` step 3b; `isExcludedFromBackupKey` on App
+Support. IPv6: `ServerAddress::parse` was `rfind(':')` and
+mis-parsed bare `2001:db8::1`; now accepts bracketed
+`[…]:port`, rejects bare multi-colon as `AmbiguousIPv6`.
+Correctness: `CoreClient` stderr-drain Task stored + cancelled
+on `terminate()` (`read(upToCount:)` so close-then-cancel
+works); `CoreClient.start()` TOCTOU closed via `starting: Bool`;
+`StopProxy` Err-path now emits `StateChanged{false}`
+(monitor_loop's pre-claim of `emitted_stopped=true` left UI
+stuck on "running"); `validate(now:)` saturating arithmetic
+(`addingReportingOverflow`) — `&+` wrapped at `UInt64.max - 60`.
+New tests: wire round-trip pinning for Hello/HelloReply +
+ProbeServer/ProbeReport; 4 `monitor_interval_secs` clamp;
+7 ServerAddress IPv6. Removed orphan `ProxyMode::title()` /
+`ProxyTestMode::title()`. NaiveProxy v148.0.7778.96-2 unchanged.
 
 ## [2.0.21] — 2026-05-06 (Connection robustness: handshake, pre-flight probe, subscription validation)
 
@@ -1256,73 +1180,29 @@ U#3 / U#4 / U#7 deferred.
 
 ## [2.0.0] — 2026-05-05 (full identity rebuild — first-class macOS app)
 
-Major version. The v0.1.x line was a custom-painted experiment;
-v2.0 is what the same app looks like when every surface is
-built from platform primitives. 27 files changed, +1479 / −1199;
-the entire `MalteseTheme.swift` palette module (412 lines) is
-removed. Driven by a third-party UX audit applying Apple's
-editorial bar and a forensic engine/lifecycle audit; every P0
-and P1 finding is closed. Engine + lifecycle: `startCore` is
-now wrapped in do/catch that publishes thrown failures to
-`lastError` via `recordError(...)` before re-raising (pre-2.0
-view callers had empty catch blocks expecting lastError to
-carry the surface, but no path inside startCore ever set it
-on failure — port collisions produced silent UI). New
-`userStopInFlight` flag set during `stop()` / `stopQuiet()`
-suppresses the recovery branch in `handle(event:).stateChanged(false)`
-during intentional shutdowns (kills the phantom "naive stopped
-unexpectedly" banner). Menu-bar Stop routes through
-`switchMode(.stopped)` so the existing `transitionInFlight`
-guard catches concurrent lifecycle transitions.
-`recoverFromCrashIfNeeded` now does `pgrep -x naive` + filters
-PIDs whose parent is launchd → SIGTERM → 500ms → SIGKILL, so
-if a previous run died with naive holding port 1080 the next
-launch is deterministic. Every formerly-empty catch in
-ControlPanelView / MenuBarStatusContent / LogConsoleView /
-HeaderView now traces through `Logger.cooltunnel("UI.X")`
-under one `subsystem == "space.coolwhite.cooltunnel"` umbrella.
-Brand normalisation: `PRODUCT_NAME` flipped to `Cool Tunnel`;
-bundle on disk renames `Cool tunnel.app` → `Cool Tunnel.app`,
-binary inside `Contents/MacOS/` renames likewise, CFBundleName
-/ CFBundleDisplayName / App-menu / About panel all read
-`Cool Tunnel`. Bundle identifier `space.coolwhite.naive`
-unchanged so `refuseIfMultipleInstalls` still works. Settings
-contract: removed the `draft: AppSettings` indirection — every
-field binds directly to `orchestrator.settings.X` via
-`@Bindable`, single form-level `.onChange(of: bindable.settings)`
-fires debounced `persistSettings()`. `dismiss()` now calls
-`flushSettings()` so Cmd+W + Cmd+Q can't drop the last
-keystroke. `⌘,` / "Settings…" wired through a new
-`CommandGroup(replacing: .appSettings)`. Menu bar: first-class
-`MenuBarExtra` status item with state-driven glyphs; flat mode
-rows (Smart / Global / Local) replaced the redundant
-Start-button-plus-Mode-submenu pair. ⌘0 opens window, ⌘, opens
-Settings, ⌘Q quits. Visual identity: mode-aware pastel-gradient
-background gone — system `.windowBackground` material everywhere;
-HeaderView rewritten as a quiet status row; ControlPanelView
-uses real `Picker(.segmented)` + `.borderedProminent` Start/Stop;
-ConnectionFormView is now `Form { Section { … } }.formStyle(.grouped)`;
-LogConsoleView uses `.regularMaterial` + `.separatorColor`
-hairline. New procedural icon stack via
-`scripts/generate_app_icon.swift` (squircle backdrop, three
-concentric tunnel rings, one-point perspective). Firewall
-deep-link: orange "Firewall on" capsule is now a Button
-opening `x-apple.systempreferences:com.apple.preference.security?Firewall`
-via `NSWorkspace.shared.open` with two-tier fallback. New
-`LoginItemRow` backed by `SMAppService.mainApp` with
-approval-pending deep-link. Log export pipeline: inline filter
-(case-insensitive substring); `⋯` actions menu with Copy All
-(⌘⇧C), Save to File… (.fileExporter), Share… (ShareLink),
-Clear; scroll-icon drag-out via `.draggable(logAsText)` with
-custom preview; per-row context menu (Copy Line / Copy with
-Timestamp). New `AcknowledgementsView` with three-entry
-attribution (NaiveProxy BSD-3, Rust crate graph
-MIT/Apache-2.0, SF Symbols Apple). Accessibility: Reduce
-Motion respected (gates empty-state pulse + auto-scroll
-animation); drag-handle has explicit label/hint;
-"Waiting for the first log line…" placeholder uses
-`accessibilityElement(children: .combine)` so VoiceOver reads
-one logical statement.
+Major. v0.1.x was custom-painted; v2.0 rebuilds every surface
+from platform primitives. 27 files changed, +1479 / −1199;
+`MalteseTheme.swift` (412 lines) removed. Third-party UX audit
+(Apple editorial bar) + forensic engine/lifecycle audit; every
+P0/P1 closed. Engine + lifecycle: `startCore` do/catch publishes
+to `lastError` via `recordError(...)` (port-collisions were
+silent UI); new `userStopInFlight` suppresses phantom "naive
+stopped unexpectedly" banner; menu-bar Stop routes through
+`switchMode(.stopped)`; `recoverFromCrashIfNeeded` does
+`pgrep -x naive` + launchd-parent filter → SIGTERM → 500ms →
+SIGKILL; formerly-empty catches trace through
+`Logger.cooltunnel("UI.X")`. Brand: `PRODUCT_NAME` →
+`Cool Tunnel`, bundle + binary renamed, bundle-id
+`space.coolwhite.naive` unchanged. Settings: removed
+`draft: AppSettings` indirection, fields bind via `@Bindable` +
+debounced `persistSettings()`, `dismiss()` calls
+`flushSettings()`. First-class `MenuBarExtra`; visual identity
+on `.windowBackground` material, `Picker(.segmented)` + grouped
+`Form`. New procedural icon stack
+(`scripts/generate_app_icon.swift`). Firewall deep-link, new
+`LoginItemRow` via `SMAppService.mainApp`. Log export pipeline
+(filter / ⋯-menu / drag-out). New `AcknowledgementsView`.
+Accessibility: Reduce Motion, VoiceOver placeholder combine.
 
 ## [0.1.7.21] — 2026-05-04 (LTSC patch — clarity sweep, deletions only)
 
@@ -1440,102 +1320,42 @@ infrastructure outside this window).
 
 ## [0.1.7.17] — 2026-05-04 (LTSC patch — 100+ findings, 8 land)
 
-8 specialised review agents returned 120 findings across
-persistence, lifecycle, supervisor/monitor, diagnostics,
-domain types, UX, build determinism, and subprocess hardening.
-8 land here. UX-F#1: `lastError` surfaced in HeaderView —
-`recordError()` was setting lastError on every failure but no
-view read it; errors appeared only as one `[error]` line in
-the log console. Header now shows a dismissible cherry-rose
-error banner directly under the status pill. New
-`dismissLastError()` keeps the public setter `private(set)`.
-Sup-F#6: lsof endpoint-aware loopback exclusion — v0.1.7.16
-fixed IPv6 `[::1]` exclusion but used substring-match against
-the entire line, so `127.0.0.1:54321 -> 1.2.3.4:443` was
-misclassified as "not remote" and masked a genuine outbound
-flow. Now split on `->`, check both endpoints separately,
-exclude only when BOTH are loopback. Domain-F#2: `Username::parse`
-rejects control chars + `@` + `:` (pre-fix `"a@b:c\n/d"`
-parsed and produced ambiguous percent-encoding that downstream
-HTTP-header writers could split on) via new
-`InvalidCredentials::IllegalUsernameChar(char)`. Diag-F#1:
-JSON / k=v credential redaction — new `JSON_KV_CRED_REGEX`
-covers `password`, `passwd`, `secret`, `token`, `api_key`,
-`apikey`, `access_token`, `refresh_token` case-insensitive
-(pre-fix only URL userinfo + Authorization + Cookie were
-redacted; naive's config-load errors dump `"password":"…"`,
-curl -v emits `password: hunter2`, both reached the UI
-verbatim). Build-F#6: `rust-toolchain.toml` pinned to 1.95.0
-(was `channel = "stable"` which floated across CI runs);
-added explicit `targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]`.
-Subproc-F#6: hardened runtime enabled in pbxproj —
-`ENABLE_HARDENED_RUNTIME = YES` + `OTHER_CODE_SIGN_FLAGS =
-"--options runtime"` on both Debug and Release. Pre-fix
-ad-hoc-signed builds ran without library-validation gating
-so a `DYLD_INSERT_LIBRARIES` attacker could inject.
-Pers-F#10: ProfileStore corrupt-JSON recovery — pre-fix
-`try? JSONDecoder().decode(...)` swallowed decode errors and
-returned `[.default]`, and the next `save(profiles:)`
-overwrote the corrupted-but-recoverable blob with the
-default, silently destroying the user's profile list. Now on
-decode failure: copy the blob to a `profiles.broken.<ISO>`
-backup key and os_log an error before falling back. Build-F#1
-(`zmij` typo-squat claim) was investigated and confirmed
-false-positive — `zmij` is a real published crate that newer
-serde_json uses in place of `ryu`. 112 deferred including
-SystemProxyController revert-on-crash (→ v0.1.7.18), Password
-Secret newtype + zeroize, Swift test target, NaiveProxy SHA
-pinning, and ~25 "don't-do-it" findings.
+8 specialised review agents returned 120 findings; 8 land. UX-F#1
+— `lastError` surfaced in HeaderView as dismissible banner (was
+log-console only). Sup-F#6 — lsof endpoint-aware loopback
+exclusion (v0.1.7.16's substring-match misclassified
+`127.0.0.1->1.2.3.4`); now splits on `->` and excludes only when
+BOTH loopback. Domain-F#2 — `Username::parse` rejects control
+chars + `@` + `:` via `InvalidCredentials::IllegalUsernameChar`.
+Diag-F#1 — `JSON_KV_CRED_REGEX` covers `password`/`passwd`/
+`secret`/`token`/`api_key`/`apikey`/`access_token`/`refresh_token`
+case-insensitive. Build-F#6 — `rust-toolchain.toml` pinned 1.95.0
++ explicit targets. Subproc-F#6 — `ENABLE_HARDENED_RUNTIME=YES`
++ `--options runtime` (closes `DYLD_INSERT_LIBRARIES` gap on
+ad-hoc builds). Pers-F#10 — ProfileStore corrupt-JSON saves
+backup to `profiles.broken.<ISO>` key + os_log before fallback
+(was overwriting). Build-F#1 `zmij` typo-squat — false-positive
+confirmed. 112 deferred.
 
 ## [0.1.7.16] — 2026-05-04 (LTSC patch — broad-surface deep audit)
 
-7 review agents returned 100 findings across Rust core, Swift
-views, shell/tooling, test coverage, docs, and updater edge
-cases; 13 land here. Rust-F#1: `validate_profile` contract
-honesty — dispatcher arm took already-deserialised Profile so
-`ok:false` of ValidationReport was structurally unreachable
-(same pattern as SM-3 in server_mode); variant now carries
-RawProfile and the dispatcher runs `Profile::try_from(raw)`.
-Rust-F#2: `monitor::lsof::parse` IPv6 loopback exclusion —
-only `127.0.0.1` was excluded from "remote" classification;
-macOS uses `[::1]:port->[::1]:port` for IPv6 ESTABLISHED, so
-an IPv6-first system's loopback fanout synthesised
-`TooManyRemote` anomalies. Now also excludes `[::1]`. Rust-F#4:
-`unimplemented_method` wildcard arm in `dispatch()` previously
-embedded `format!("…{kind:?}")` in the wire payload — a
-forward-compat exfil channel. Wire body is now stable
-payload-free; unknown variant goes to `tracing::warn!` only.
-Cross-F#1: NaiveUpdater + RustCoreUpdater API surface
-narrowed to `internal` (matches AU-15 v0.1.7.12 demotion of
-AppUpdater). Cross-F#2: `Logger.cooltunnel("NaiveUpdater")`
-+ `…("RustCoreUpdater")` added — security-relevant rejects
-(untrusted host, oversize, network failure) now have os_log
-breadcrumbs. Edge-F#1: disk-space pre-flight on tempRoot —
-runPipeline calls `requireFreeSpace(at:atLeast:)` requiring
-300 MB before .zip download (prevents ENOSPC mid-swap after
-parent termination). Edge-F#11: multi-install detection via
-`mdfind` — refuse update if `/Applications` + `~/Applications`
-both have copies (LaunchServices would launch the
-not-updated one). Shell-F#5: `cargo build --locked`
-everywhere (`build_rust_core.sh` + ci.yml clippy/test/build
-— missing/stale Cargo.lock was silently regenerated against
-newer transitive deps, defeating LTSC reproducibility).
-Shell-F#6: least-privilege CI permissions
-`{ contents: read }` at workflow level + `actions/checkout`
-`with: persist-credentials: false` (pre-fix inherited org
-defaults could be write or worse, GITHUB_TOKEN left in
-.git/config could be exfiltrated). Doc fixes: Disclaimer
-"no data collection" paragraph corrected (credentials live
-in `credentials.json` 0600, not Keychain); README disk size
-23 MB → ~45 MB (drift since v0.1.7); README documents the
-in-app self-updater explicitly; SECURITY.md threat-model
-acknowledges the SHA-pin gap for Naive + RustCore CDN
-tampering, tracked for v0.1.8. 87 deferred (NaiveProxy +
-RustCore SHA pinning, test coverage, SwiftUI render
-efficiency, localisation, accessibility, architectural
-debt, bash hardening, doc polish, performance, style, plus
-~15 "don't-do-it" findings flagged so future reviewers
-don't re-propose).
+7 review agents returned 100 findings; 13 land. Rust-F#1 —
+`validate_profile` dispatcher arm took already-deserialised
+Profile (ok:false unreachable, same shape as SM-3); variant now
+carries RawProfile + dispatcher runs `Profile::try_from(raw)`.
+Rust-F#2 — `monitor::lsof::parse` IPv6 loopback exclusion adds
+`[::1]` (macOS uses `[::1]:port->[::1]:port`, was synthesising
+`TooManyRemote`). Rust-F#4 — `unimplemented_method` wildcard
+arm wire body now payload-free (was a forward-compat exfil
+channel). Cross-F#1 — NaiveUpdater + RustCoreUpdater demoted to
+`internal`. Cross-F#2 — `Logger.cooltunnel("NaiveUpdater")` /
+`("RustCoreUpdater")`. Edge-F#1 — `requireFreeSpace(at:atLeast:)`
+300 MB pre-flight. Edge-F#11 — multi-install `mdfind` refuses
+update. Shell-F#5 — `cargo build --locked` everywhere.
+Shell-F#6 — CI `{ contents: read }` + `persist-credentials:
+false`. Doc fixes: Disclaimer credentials-store correction,
+README disk-size 23 MB → ~45 MB, SECURITY.md acknowledges
+NaiveProxy + RustCore SHA-pin gap. 87 deferred.
 
 ## [0.1.7.15] — 2026-05-04 (LTSC patch — deep audit, MainActor freeze fix)
 
@@ -1613,266 +1433,84 @@ realpath wrapper. Q-F#7: trimmed stale AU-1 doc on
 
 ## [0.1.7.13] — 2026-05-04 (LTSC patch — post-cycle simplify pass)
 
-12 of 31 simplify findings land. Cross-cutting theme:
-v0.1.7.11/.12 hardened AppUpdater extensively but left
-NaiveUpdater + RustCoreUpdater exposed to the same redirect /
-host-substitution attacks. R-F#4: new
-`SystemIntegration/GitHubTrust.swift` extracts
-`isTrustedGitHubURL(_:)` and `GitHubRedirectGuard` from
-AppUpdater (was `fileprivate`) into a shared module;
-`GitHubRedirectGuard.shared` is a stateless singleton.
-NaiveUpdater + RustCoreUpdater now use
-`URLSession.shared.data/download(for:delegate:
-GitHubRedirectGuard.shared)` and validate every URL via
-`isTrustedGitHubURL` before download. SHA pinning for the
-two still deferred per Sw#C4, but a CDN takeover or upstream
-redirect misconfiguration alone is no longer sufficient.
-Q-F#1: `@discardableResult` removed from `markEnteringCheck`
-/ `markEnteringDownload` so the v0.1.7.12 AU-13 invariant is
-compile-time-enforced. Q-F#2: bash relaunch helper now
-`exec 2>>"$LOG"` to `~/Library/Logs/cool-tunnel/relaunch.log`
-so AU-11's `preswap_trap` recovery hints actually reach a
-file (pre-fix the Swift spawn set `task.standardError = nil`
-sending stderr to `/dev/null`). New Swift
-`makeRelaunchLogPath()` helper creates the dir. R-F#1:
-`writeRelaunchScript` delegates to a generalised
-`RestrictedFile.write(_:to:mode:)` (~50 lines of bespoke
-`O_CREAT|O_EXCL` + write + fsync + close FD-lifecycle
-collapses to one call). R-F#2: `os.Logger` migration —
-replaced legacy `OSLog(subsystem:category:)` + `os_log`
-with `Logger(subsystem:category:)`, fixed the orphan
-subsystem string `"com.cool-tunnel.app"` to project-wide
-`"space.coolwhite.cooltunnel"` so support's `log show`
-queries surface every component under one umbrella. Calls
-use typed interpolation with explicit `, privacy: .public`.
-R-F#7: `canonicalPathComponents` helper centralises
-`realpath(3)` + `String(cString:)` + `free` + `pathComponents`
-extraction the symlink-escape walker was doing twice. E-F#1:
-parallel .zip + .sha256 download via `async let` (manifest
-fetch completes during .zip TLS handshake, ~2× speedup on
-cold path). E-F#6: drop TOCTOU `fileExists` + `removeItem`
-before `moveItem` (`tempRoot` is freshly mkdtemp'd per
-pipeline run; destination collision impossible). E-F#8:
-entry-count cap on extraction symlink walk — bails after
-1024 symlinks (was unbounded; an attacker-shaped zip could
-plant 10k+ for a `realpath(3)` work-multiplier inside the
-Sw-H3 100 MB cap). R-F#3: `MAX_PAC_DOMAIN_BYTES` promoted
-to `ServerAddress::MAX_LEN pub const` (v0.1.7.12 had two
-copies of the RFC 1035 limit; drift risk closed).
+12 of 31 simplify findings land. Theme: v0.1.7.11/.12 hardened
+AppUpdater extensively but left NaiveUpdater + RustCoreUpdater
+exposed to the same redirect / host-substitution attacks. R-F#4
+— new `SystemIntegration/GitHubTrust.swift` extracts
+`isTrustedGitHubURL` + `GitHubRedirectGuard` to shared module
+(`.shared` stateless singleton), both sibling updaters now
+validate before download. Q-F#1 — `@discardableResult` removed
+from AU-13 markEntering methods. Q-F#2 — bash relaunch helper
+`exec 2>>"$LOG"` (was sending preswap_trap hints to /dev/null);
+new `makeRelaunchLogPath()`. R-F#1 — `writeRelaunchScript` →
+generalised `RestrictedFile.write(_:to:mode:)`. R-F#2 —
+`os.Logger` migration, fixed orphan subsystem
+`"com.cool-tunnel.app"` → `"space.coolwhite.cooltunnel"`. R-F#7
+— `canonicalPathComponents` helper. E-F#1 — parallel .zip +
+.sha256 via `async let`. E-F#6 — TOCTOU fileExists+removeItem
+dropped. E-F#8 — symlink-walk cap 1024. R-F#3 —
+`MAX_PAC_DOMAIN_BYTES` promoted to `ServerAddress::MAX_LEN`.
 
 ## [0.1.7.12] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 2)
 
-Closes the Fifth audit cycle with 11 medium/low fixes
-(v0.1.7.11 was the 13 critical/high). AU-6: canonical bundle
-ID constant in `verifyExtractedApp` instead of
-`Bundle.main.bundleIdentifier` (the latter reads from the
-running process's plist — attacker-controllable if the running
-app was ever substituted, anchoring trust in attacker input).
-`canonicalBundleID = "space.coolwhite.naive"` matches
-`PRODUCT_BUNDLE_IDENTIFIER` in the Xcode project. AU-8:
-download error message scrubs asset filename — the stage
-(.zip vs .sha256) plus HTTP status told an
-observer-on-the-wire which artifact failed, helping calibrate
-a partial-block attack against the manifest (the SHA-pin
-root of trust). Stage detail goes to os_log. AU-9:
-`refuseReadOnlyInstall` now tests parent volume read-only +
-parent folder writable + bundle not immutable (`chflags
-uchg`). Pre-fix only the first was checked; the others
-slipped through pre-terminate leaving the user with no app
-and no UI. AU-10: relaunch helper uses `open PATH`, not `open
--a NAME` — `open -a` performs name lookup and bash word-splits
-"/Applications/Cool tunnel.app" so `-a Cool` treated
-`tunnel.app` as a document, misfiring relaunch. AU-11:
-pre-swap trap preserves recovery materials — the bash
-helper's `preswap_trap` retains `$TEMP_ROOT` (verified-good
-extracted .app) and `$BACKUP` (mid-rollback) on any pre-swap
-error. Only after step 4 (BACKUP removed → swap fully
-succeeded) does the trap get replaced with destructive
-cleanup. Pre-fix a rollback failure during step 3 also
-deleted $TEMP_ROOT, leaving neither the new app nor a
-known-good copy. AU-13: `markEnteringCheck` /
-`markEnteringDownload` return Bool — Settings click handlers
-used to be three separate steps (guard !isInFlight; mark;
-spawn Task), allowing a redundant Task on fast double-click.
-Now the flip and the spawn are atomic via `guard
-appUpdater.markEnteringCheck() else { return }; Task { ... }`.
-AU-14: `locateAppBundle` filter requires `isDirectory` — a
-malicious zip can contain an entry named `Cool tunnel.app`
-that is a regular file or symlink rather than a bundle dir;
-pre-fix the next step failed with "couldn't read Info.plist"
-instead of "structural shape wrong". Filter now demands both
-`.app` extension AND `isDirectory == true`. SM-4:
-`naive_pac` caps `direct_domains` at 1024 entries × 253
-bytes each (RFC 1035 hostname max). Pre-fix a single request
-could carry ~16k single-char entries under the 64 KiB body
-limit, each becoming a `to_lowercase()` allocation +
-`serde_json::to_string` pass + `format!` insertion. Cool
-Tunnel ships ~16 entries by default; over-cap rejects with
-`ApiError::BadRequest`. SM-6: resolved by SM-4 — no
-`spawn_blocking` needed because the synchronous cost is now
-bounded under 10 ms. SM-7: `encode_js_string_array` uses
-`expect`, not `unwrap_or_default` — `serde_json::to_string`
-over `&[String]` is structurally infallible, but the
-defensive fallback silently emitted `String::new()` on the
-unreachable path (a future refactor swapping `&[String]` for
-a fallible type would produce invalid JS
-`var directDomains = ;` with zero diagnostic). SM-10:
-router gets `tower::limit::ConcurrencyLimitLayer(64)` — caps
-total in-flight requests across all routes; bounds the
-worst-case for a slow-loris client dripping bytes into a
-64 KiB body. Body-read timeout deferred. New direct dep:
-`tower = { version = "0.5", features = ["limit"] }` (already
-transitive via axum).
+Closes Fifth audit cycle with 11 medium/low. AU-6 — canonical
+bundle-ID constant in `verifyExtractedApp` (not
+`Bundle.main.bundleIdentifier`, which is attacker-controllable);
+AU-8 — download error scrubs asset filename + HTTP status to
+os_log; AU-9 — `refuseReadOnlyInstall` adds parent-writable +
+not-uchg checks; AU-10 — relaunch uses `open PATH` not `open -a
+NAME` (bash word-split on spaces); AU-11 — bash `preswap_trap`
+retains `$TEMP_ROOT` + `$BACKUP` until step-4 swap completes;
+AU-13 — `markEnteringCheck`/`markEnteringDownload` return Bool
+for atomic flip+spawn; AU-14 — `locateAppBundle` filter requires
+`isDirectory==true`. SM-4 — `naive_pac` caps `direct_domains` at
+1024 × 253 bytes (RFC 1035); SM-6 — obviated by SM-4; SM-7 —
+`encode_js_string_array` uses `expect` not `unwrap_or_default`;
+SM-10 — `tower::ConcurrencyLimitLayer(64)` on router. New dep:
+`tower = { version = "0.5", features = ["limit"] }`.
 
 ## [0.1.7.11] — 2026-05-04 (LTSC patch — Fifth audit cycle, batch 1)
 
-Fifth audit cycle, Rule Maker rubric (R1 fail-secure / R2
-boundary enforcement / R3 ≤10 ms / R4 no theatre). 13 of 25
-land here. AU-1: relaunch helper script no longer in `/tmp` —
-`String.write(to:atomically:)` created the script with default
-umask perms (~0644), then a separate `setAttributes(0o700)`
-tightened them, leaving a tiny window where a same-UID attacker
-could swap via symlink before `task.run()`. New
-`writeRelaunchScript` opens in the per-update tempRoot via
-`open(O_CREAT|O_EXCL|O_WRONLY, 0o700)`, fsyncs before close,
-surfaces errno. AU-2: `validateInstallAssets` requires both
-`.zip` and `.sha256` `browser_download_url`s to be HTTPS on a
-host ending in `github.com` or `githubusercontent.com` (a
-compromised API response pointing the manifest fetch at an
-attacker host would defeat SHA pinning by substituting the
-verification root-of-trust). AU-3: per-task
-`URLSessionTaskDelegate` (`GitHubRedirectGuard`) rejects any
-HTTP redirect whose target isn't on the same trusted suffix
-list. `URLSession.shared.download(from:)` was following up to
-~20 redirects with no host check. AU-4: SHA hashing + plist
-read off `@MainActor` — pipeline helpers are now
-`nonisolated`; `verifyZipAgainstManifest` streams 64 KiB at a
-time instead of `Data(contentsOf: zipURL)` (a 12 MB main-thread
-allocation froze the Settings UI on slow disks). Plist parsing
-in `Task.detached(priority: .userInitiated)` returning a
-Sendable `ExtractedAppInfo`. AU-5: `realpath(3)` +
-path-component ancestor check in `refuseExtractionEscapingSymlinks`
-— pre-fix `String.hasPrefix(containerPath)` gave false
-negatives on sibling-path collision (`/extracted-evil` passed
-against `/extracted`) and symlink-target traversal
-(`URL.resolvingSymlinksInPath()` resolves the link but doesn't
-normalise `..` through the resolved target). Comparison is now
-`targetComponents.starts(with: containerComponents)`. Broken
-symlinks reject outright. SM-1: `JsonRejection` scrubbed at
-every handler boundary — every `axum::Json<T>` handler now
-takes `Result<Json<T>, JsonRejection>` and converts via
-`ApiError::from_json_rejection`, logging the verbatim serde
-error server-side and returning `{"error":"bad request"}` on
-the wire. Pre-fix axum's default 400 body included the verbatim
-serde error (internal field names + validation rules — e.g.
-`"server: contains forbidden ':/​/'"`), a free probe of internal
-logic for an unauthenticated caller. SM-2: `ApiError` carries
-no payload — both `BadRequest` and `Internal` are unit variants
-returning a stable opaque body per HTTP status; cause-of-failure
-goes to `tracing::error!` only. SM-3: `naive_validate` honours
-its advertised contract — handler now accepts any JSON value,
-runs `Profile` deserialise itself, returns
-`{ok:false, reason:"invalid profile"}` on failure (with detail
-logged server-side) and `{ok:true}` on success. Both branches
-now reachable. AU-7: version-mismatch error in
-`verifyExtractedApp` no longer interpolates
-`CFBundleShortVersionString` — attacker past SHA pinning could
-plant a Unicode bidi-override / "click here to bypass" text;
-value goes to os_log for support. AU-12: `versionIsNewer`
-rejects non-numeric segments + pre-release suffixes — pre-fix
-`Int($0) ?? 0` coerced `"0-rc1"` to 0 making `1.0.0-rc1`
-compare equal to `1.0.0`. New `parseVersionSegments` returns
-nil on `-` or non-numeric segments. AU-15: `public` removed
-from within-module symbols (single app target, no cross-module
-consumer). SM-5: `NaiveConfig` fields are `pub(crate)` — locks
-the construction invariants (`listen` is
-`socks://127.0.0.1:<port>`, `proxy` embeds percent-encoded
-credentials) to `from_profile`. SM-9: `server_mode::run`
-refuses to bind a non-loopback address unless
-`--allow-public` is passed, returning `PermissionDenied`. The
-loopback-only posture was previously documented but not
-enforced; a `--listen 0.0.0.0:8787` typo silently exposed an
-unauthenticated engine. New logging policy codified as a
-top-of-file doc on `server_mode.rs`: handlers MUST NOT log the
-request body, the resolved Profile, or `ApiError::*` payloads.
-`Profile` carries `Password::expose_secret`; a "log the failing
-body for debug" PR would silently leak credentials. 12 fixes
-deferred to v0.1.7.12.
+Fifth audit cycle, Rule Maker rubric (R1-R4). 13 of 25 land. AU-1
+— relaunch helper out of `/tmp`, opens in per-update tempRoot via
+`open(O_CREAT|O_EXCL|O_WRONLY, 0o700)` + fsync; AU-2 —
+`validateInstallAssets` requires HTTPS + trusted-host suffix on
+`.zip` and `.sha256`; AU-3 — `GitHubRedirectGuard` rejects
+off-host redirects; AU-4 — SHA hashing + plist read off
+`@MainActor`, 64 KiB streaming; AU-5 — `realpath(3)` +
+path-component ancestor check (fixes `/extracted-evil` sibling
+false-negative); AU-7 — version-mismatch no longer interpolates
+plist (bidi-override attack); AU-12 — `versionIsNewer` rejects
+non-numeric + pre-release segments; AU-15 — `public` demoted to
+`internal`. SM-1 — `JsonRejection` scrubbed (axum default body
+leaked serde field names); SM-2 — `ApiError` unit variants only;
+SM-3 — `naive_validate` runs deserialise itself, both ok/!ok now
+reachable; SM-5 — `NaiveConfig` fields `pub(crate)`; SM-9 —
+`server_mode::run` refuses non-loopback bind without
+`--allow-public`. `server_mode.rs` codified no-log policy
+(request body, resolved Profile, ApiError payloads). 12 deferred
+to v0.1.7.12.
 
 ## [0.1.7.10] — 2026-05-04 (LTSC patch — comprehensive audit + security)
 
-Parallel Swift + Rust audits plus a tooling self-audit.
-Regression fix: AppUpdater Check + Update buttons were broken
-in v0.1.7.9 — the `markEnteringCheck()` / `markEnteringDownload()`
-sync flag flipped state to the placeholder phase BEFORE the
-async `guard !isInFlight` check, so the guard returned early
-and the network call never fired. Relaxed the guards to refuse
-only when a genuinely active later phase
-(downloading/verifying/extracting/relaunching) is in flight.
-Swift in-app updater security: Sw-H1 — bundle-identifier
-comparison `precomposedStringWithCanonicalMapping`-normalised
-on both sides, non-ASCII rejected outright (defence against
-Unicode-confusable IDs if SHA pinning were defeated). Sw-H2 —
-SHA mismatch error no longer echoes the hashes (helps a MITM
-observe what to forge); manifest entries hex-validated before
-compare so a corrupted-but-64-chars line gives "manifest may
-be corrupted" instead of misleading "SHA-256 mismatch". Sw-H3
-— download size cap: .zip ≤ 100 MB, .sha256 ≤ 1 MB. Sw-H4 —
-post-extraction symlink-escape walk rejects any symlink whose
-`realpath` escapes the extraction dir (`ditto -x -k` PKZip
-mode preserves symlinks inside archives; a malicious zip
-otherwise identical to a known-SHA copy could plant
-`Resources/foo → ~/.ssh/config`). C1 — `AppUpdater.unzip`
-pipe-buffer deadlock fixed: Process with shared stdout/stderr
-pipe blocked on `waitUntilExit` if ditto wrote >64 KB to
-stderr (kernel pipe buffer fills, ditto blocks on next write,
-deadlock). Routed through `Subprocess.run` for concurrent
-drain. C2 — relaunch helper does atomic .new staging with
-rollback: ditto into `$OLD_APP.new` → `mv $OLD_APP
-$OLD_APP.old-update` → `mv $OLD_APP.new $OLD_APP` →
-`rm -rf $OLD_APP.old-update`. Plus `set -eu` + `trap cleanup
-EXIT`. Pre-fix `rm -rf "$OLD_APP" && ditto` was destructive
-with no recovery. C4 — `RestrictedFile.write` fsync check +
-double-close fix: `fsync(fd)` return was discarded so a
-silent disk EIO meant the atomic rename pointed at unflushed
-bytes; plus a real double-close in the catch path could
-corrupt an unrelated FD macOS reused. New `didClose` flag.
-H5 — `AppUpdater.run` tempRoot leak fixed via do/catch that
-cleans up on any throw; plus `Bundle.main.bundleURL.resolvingSymlinksInPath()`
-so symlinked install paths are evaluated by their real
-destination. **Rust engine wire-protocol correctness:**
-Ru-A1 single-emitter discipline for `state_changed:false`
-— v0.1.7.5 message-pump refactor moved user-stop emission to
-the dispatcher but `monitor_lifecycle` retained natural-death
-emission, so concurrent crash + user-stop could fire twice.
-`monitor_lifecycle` no longer emits state-changed at all;
-`client_mode::monitor_loop`'s natural-death detection owns
-the natural-death emission via at-most-once `emitted_stopped`
-flag yielding to dispatcher's user-stop emission. Ru-A2 —
-`Proxy-Authorization` header now redacted via
-`(?:Proxy-)?Authorization:` regex (pre-fix the literal
-`Authorization:` prefix-only regex let `Proxy-Authorization:
-Basic <b64>` through verbatim, undoing the rest of the
-credential-hygiene effort). Ru-A3 — stop-side TOCTOU race:
-the dispatcher released the engine lock between `take()` and
-`supervisor.stop().await`, so during that ~2 s window a
-concurrent `start_proxy` could spawn a second naive while the
-first was still draining. Now dispatcher sets `stopping =
-true` under the lock; start_proxy checks both
-`supervisor.is_some` AND `stopping`. Ru-A4 — `stdout_writer`
-fallback on serialize failure writes a hand-built error frame
-with the original id (pre-fix the writer logged and continued,
-silently dropping the response and leaving the Swift waiter
-pending forever). Ru-B6 — `ProxySupervisor::Drop` aborts the
-monitor task (pre-fix the JoinHandle was leaked on the
-runtime). Chaos suite +2 scenarios
-(`siege_concurrent_stop_proxy_race` verifies Ru-A1+A3,
-`siege_natural_death_then_user_stop_emits_once` verifies the
-single-emitter discipline). 20 chaos + 104 unit + 6
-integration + 2 doctest = 132 tests. Tooling: `cargo deny
-check` now in CI (was policy-without-enforcement);
-`multiple-versions = deny` (was warn); swift-format CI step
-hard-fails on missing tool (was soft-fail silent no-op).
+Parallel Swift + Rust audits plus tooling self-audit. v0.1.7.9
+AppUpdater Check/Update regression fixed (markEntering flag flipped
+before the async `!isInFlight` guard ran). Sw-H1 — bundle-id NFC
+normalised + non-ASCII rejected; Sw-H2 — SHA mismatch no longer
+echoes hashes, manifest hex-validated; Sw-H3 — .zip ≤100 MB,
+.sha256 ≤1 MB; Sw-H4 — post-extract symlink-escape walk; C1 —
+`AppUpdater.unzip` pipe-buffer deadlock (ditto >64 KB stderr)
+routed through `Subprocess.run`; C2 — relaunch helper atomic .new
+staging + rollback; C4 — `RestrictedFile.write` fsync check +
+double-close fix; H5 — tempRoot leak + `resolvingSymlinksInPath()`.
+Rust: Ru-A1 single-emitter discipline for state-changed:false
+(monitor_lifecycle no longer emits; `monitor_loop` owns it via
+`emitted_stopped`); Ru-A2 — `(?:Proxy-)?Authorization:` regex;
+Ru-A3 — stop-side TOCTOU closed via `stopping=true` under lock;
+Ru-A4 — stdout_writer fallback error-frame; Ru-B6 —
+`ProxySupervisor::Drop` aborts monitor task. 20 chaos + 104 unit +
+6 integration + 2 doctest = 132 tests. `cargo deny check` in CI;
+`multiple-versions = deny`; swift-format hard-fails on missing tool.
 
 ## [0.1.7.9] — 2026-05-03 (LTSC patch — UI/UX stress audit)
 
@@ -2035,68 +1673,21 @@ assertion in the Debouncer test suite retargeted.
 
 ## [0.1.7.3] — 2026-05-03 (LTSC patch)
 
-Robustness audit pass: 103 findings, high-confidence
-correctness/security fixes land. Swift correctness:
-AppDelegate `applicationShouldTerminate` races shutdown
-against a 5-second watchdog (pre-fix any signal-blocked
-syscall or wedged `networksetup` parked the app in
-"terminating…" forever with engine + system proxy alive).
-`CoreClient.send` enforces a 120-second per-request deadline
-via sibling timeout Task that resumes with `requestTimeout`.
-`TunnelOrchestrator.stop()` early-returns when already stopped
-(spam-clicking no longer iterates networksetup twice per
-service). `clearLogs()` also clears `lastError`.
-`listeningOutsideLoopback` auto-stop is single-flighted.
-`ProfileStore.loadProfiles` deduplicates by id, drops empty-id
-entries, trims whitespace (corrupted UserDefaults blob no
-longer produces duplicate profiles where
-`removeSelectedProfile` deletes every match in one keystroke).
-New `Subprocess.run` helper drains stdout/stderr concurrently
-with hard timeout escalation (terminate → interrupt → SIGKILL),
-replacing three boot-path callers (FirewallProbe,
-NaiveBinaryResolver, RustCoreResolver) that each suffered from
-the classic pipe-fills-then-deadlocks bug if the subprocess
-wrote >64 KB to stderr. Swift security: `RestrictedFile.write`
-no longer chmods AFTER rename — the v0.1.5.5 promise of 0600
-on `credentials.json` had a real race window
-(`Data.write(.atomic)` writes a temp file with default umask
-0644 then renames; if the process crashed or hit ENOSPC
-between rename and chmod the file persisted at 0644). New flow
-opens with `O_CREAT|O_EXCL|0600`, writes, fsyncs, renames
-atomically. `NaiveUpdater` validates upstream tag against
-`^v?\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?$` before URL
-interpolation. Rust correctness: `ProxySupervisor::stop()`
-passes `&mut handle` to `tokio::time::timeout` so on 2-second
-drain expiry the handle can still be aborted (pre-fix moved
-the handle into timeout, leaking the task indefinitely;
-`Child` was never dropped so `kill_on_drop(true)` never fired
-and a subsequent `start_proxy` could spawn a second naive).
-`monitor_loop` exits when the supervised PID is gone via
-`/bin/kill -0` each tick (pre-fix kept probing the stale PID
-forever; on macOS PIDs roll over at 99,998 so a long session
-could emit anomalies from someone else's lsof output — a
-confused-deputy hazard). `monitor::run` (lsof probe) wrapped
-in a 4-second Tokio timeout. `lsof` exit=1 with empty stderr
-treated as "no matching open files" instead of
-`MonitorError::NonZeroExit` (stops the spurious
-`tracing::warn!` on every idle-proxy probe). `run_probe` (curl)
-wrapped with `kill_on_drop(true)` + outer Tokio timeout
-(`max_time + 5s`). `read_capped_line` enforces hard cap on
-bytes discarded in oversized-frame resync mode
-(`16 × MAX_FRAME_BYTES`). `client_mode::run` breaks out of
-the read loop when an error-frame send fails.
-`ProxySupervisor::read_lines` logs the IO error before
-returning (was `Err(_)` swallow). Rust hygiene: `init_tracing`
-uses `try_init`; dead `ANOMALY_DEBOUNCE` doc reference
-cleaned; `MAX_INFLIGHT_REQUESTS` doc-vs-code mismatch fixed
-(doc claimed "drop on burst" but code uses `acquire_owned().await`
-queue); `axum::serve` body limit lowered from 2 MiB to 64 KiB
-via `DefaultBodyLimit::max`. Deferred to v0.2.0: Sw#C4
-release-SHA-manifest infra (until then existing CodeSignVerifier
-catches arbitrary unsigned binaries but does NOT catch a MITM
-on the GitHub asset URL); Sw#H2/H3 remaining subprocess callers;
-Ru#H7 channel split for control-plane vs log traffic;
-EngineSession enum-state; tower concurrency limit.
+Robustness audit (103 findings); high-confidence correctness +
+security fixes land. Swift: `applicationShouldTerminate` 5s
+watchdog; `CoreClient.send` 120s deadline; `stop()` early-return
+on already-stopped; `ProfileStore.loadProfiles` dedup by id; new
+`Subprocess.run` (concurrent drain + escalation) replaces three
+pipe-deadlock-prone callers; `RestrictedFile.write` switched to
+`O_CREAT|O_EXCL|0600` + fsync + atomic rename (closes 0644 race
+between rename and chmod); `NaiveUpdater` tag regex-validated.
+Rust: `ProxySupervisor::stop()` passes `&mut handle` so abort
+fires on drain-expiry (was leaking the task + `Child`);
+`monitor_loop` exits on `/bin/kill -0` miss (PID rollover
+confused-deputy hazard); `monitor::run` + `run_probe` wrapped in
+Tokio timeouts; `lsof` exit=1+empty stderr treated as no-match;
+`read_capped_line` hard cap; `axum::serve` body limit 2 MiB →
+64 KiB. Sw#C4 (release SHA manifest) deferred to v0.2.0.
 
 ## [0.1.7.2] — 2026-05-03 (LTSC patch)
 
