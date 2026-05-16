@@ -261,22 +261,28 @@ jobs:
       # caps the count at a committed baseline and fails if it
       # drifts in either direction; the standalone form keeps the
       # CI step lightweight (no Swift toolchain, no Rust toolchain).
+      # The .sh is a thin shim over scripts/try_question_ratchet.ts;
+      # Bun is the runtime.
+      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+        with:
+          bun-version: latest
       - name: Enforce try? cap
         run: bash scripts/try_question_ratchet.sh
 
   bun-tests:
-    name: Bun tests (cut_release + fetch_naive)
+    name: Bun tests (cut_release + fetch_naive + try_question_ratchet)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
-      # **post-v2.0.52:** the two complex maintenance scripts
-      # (cut_release, fetch_naive) live as TypeScript+Bun under
-      # scripts/*.ts. The pure-logic surfaces (argument parsers
-      # in particular) are unit-tested via `bun test`; this job
-      # runs them on every push and PR so a regression in the
-      # parser shape is caught here, not at release-cut time.
+      # **post-v2.0.52:** maintenance scripts live as TypeScript+Bun
+      # under scripts/*.ts (cut_release, fetch_naive, and the
+      # try? ratchet as of v2.0.58). The pure-logic surfaces
+      # (argument parsers, regex matchers) are unit-tested via
+      # `bun test`; this job runs them on every push and PR so a
+      # regression in the parser shape is caught here, not at
+      # release-cut time.
       #
       # Action SHA-pinned to the v2 release as of 2026-05-14, same
       # supply-chain discipline as the rest of the workflow's
