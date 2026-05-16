@@ -3,40 +3,22 @@
 // See LICENSE for full terms.
 //! Wire protocol shared between the engine and the Swift app.
 //!
-//! The protocol is **newline-delimited JSON**: each frame is one JSON object
-//! terminated by `\n`. Frames flow:
+//! Newline-delimited JSON: each frame is one JSON object
+//! terminated by `\n`.
 //!
 //! - **Swift → engine** on stdin as [`Request`] envelopes.
-//! - **Engine → Swift** on stdout as [`Outbound`] envelopes (responses,
-//!   errors, and events interleaved on a single stream).
+//! - **Engine → Swift** on stdout as [`Outbound`] envelopes
+//!   (responses, errors, events interleaved on one stream).
 //!
-//! The Swift side mirrors these types in `Core/Protocol.swift`. A
-//! `protocol_roundtrip` integration test verifies that the wire format stays
-//! in lock-step.
+//! Mirrored Swift-side in `Core/Protocol.swift`; a
+//! `protocol_roundtrip` integration test pins the wire format.
 //!
 //! # Frame examples
 //!
-//! Request:
-//!
 //! ```json
 //! {"id":1,"method":"validate_profile","params":{"profile":{...}}}
-//! ```
-//!
-//! Successful response:
-//!
-//! ```json
 //! {"kind":"response","id":1,"result":{"type":"ack"}}
-//! ```
-//!
-//! Error response:
-//!
-//! ```json
 //! {"kind":"error","id":1,"error":{"code":"invalid_profile","message":"..."}}
-//! ```
-//!
-//! Event (no `id` because events are unsolicited):
-//!
-//! ```json
 //! {"kind":"event","event":"log_line","data":{"source":"stdout","line":"..."}}
 //! ```
 
@@ -46,24 +28,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{Port, Profile, ProxyTestMode, RawProfile};
 
-/// Wire-format protocol version negotiated by [`RequestKind::Hello`] /
-/// [`ResponsePayload::HelloReply`].
+/// Wire-format protocol version negotiated by [`RequestKind::Hello`].
 ///
-/// Bump on any breaking change to the JSON-over-stdio frame shapes
-/// (renamed/removed variants, changed field types, semantic
-/// reinterpretations). Additive changes — new request variants, new
-/// optional fields — keep the existing version number; the Swift
-/// caller and Rust engine each fall back gracefully on the absence of
-/// new fields they don't understand.
+/// Bump on any breaking frame-shape change. Additive changes (new
+/// optional fields, new variants) keep the version number — the
+/// Swift caller and Rust engine each fall back gracefully on
+/// fields they don't understand.
 ///
-/// The Swift client compares this against its own constant during
-/// `CoreClient.start()` and refuses to proceed on a hard mismatch
-/// rather than letting the user hit cryptic deserialization errors
-/// later in the session. For the legacy case of an older engine that
-/// doesn't implement `Hello` at all (returns `invalid_request` for the
-/// unknown method), the Swift side treats that as protocol version 0
-/// — accept and continue, since the historical behaviour is what the
-/// engine still implements.
+/// The Swift client refuses to proceed on a hard mismatch. A
+/// legacy engine that doesn't implement `Hello` is treated as
+/// version 0 (Swift accepts and continues).
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// One request frame from the Swift app.
@@ -87,38 +61,20 @@ pub struct Request {
 pub enum RequestKind {
     /// Validate a profile and return a structured report.
     ///
-    /// Takes [`RawProfile`] (the wire shape, no validation runs
-    /// at deserialize) so the handler can inspect *which field*
-    /// failed and produce a per-field reason. Returns a
-    /// successful [`Outbound::Response`] in both cases:
+    /// Takes [`RawProfile`] (no validation at deserialize) so the
+    /// handler can produce a per-field reason. Always returns
+    /// [`Outbound::Response`]:
     ///
-    /// - Valid input → `ValidationReport { ok: true,
-    ///   reason: None }`.
-    /// - Invalid input → `ValidationReport { ok: false,
-    ///   reason: Some("…") }` with the
-    ///   [`crate::domain::ValidationError`] display string
-    ///   explaining which field failed and why.
+    /// - Valid → `ValidationReport { ok: true, reason: None }`.
+    /// - Invalid → `ValidationReport { ok: false, reason: Some("…") }`
+    ///   with the [`crate::domain::ValidationError`] display.
     ///
-    /// **2026-05-06 design reversal.** Previously carried
-    /// validated [`Profile`], so the handler was unconditionally
-    /// `ok: true` and invalid profiles were rejected by the
-    /// outer deserializer as `invalid_request` error frames.
-    /// The reversal aligns stdio with server-mode's HTTP
-    /// `/naive/validate` shape (SM-3) and lets `validate_profile`
-    /// work as a probe — Swift callers can ask "is this profile
-    /// valid?" and parse the structured reason without catching
-    /// a transport error. The Swift caller at
-    /// `TunnelOrchestrator.swift:834` already had the
-    /// `validation.ok == false` branch coded; under the prior
-    /// design it was dead code.
-    ///
-    /// Other request variants ([`RequestKind::StartProxy`],
-    /// [`RequestKind::GenerateNaiveConfig`]) continue to carry
-    /// validated [`Profile`] — their handlers rely on the
-    /// type-system invariants, and their callers are committing
-    /// to *use* the profile, so an invalid one there is
-    /// genuinely an error condition (an `invalid_request` frame
-    /// is right for them).
+    /// `validate_profile` works as a probe — callers can ask "is
+    /// this profile valid?" without catching a transport error.
+    /// Other variants ([`StartProxy`](RequestKind::StartProxy),
+    /// [`GenerateNaiveConfig`](RequestKind::GenerateNaiveConfig))
+    /// carry validated [`Profile`] because their callers commit
+    /// to *using* it.
     ValidateProfile {
         /// The raw profile to validate. The handler attempts
         /// `Profile::try_from(this)` and reports the outcome.
@@ -145,19 +101,9 @@ pub enum RequestKind {
         /// The local SOCKS listener port (must match what's in the config).
         port: Port,
         /// Optional override for the connection-monitor poll
-        /// interval in seconds. The monitor periodically probes
-        /// `lsof` for the supervised PID's listening socket and the
-        /// bound flag (loopback) for the anomaly detector; lowering
-        /// the interval cuts the time-to-detect for naive crashes
-        /// at the cost of more `lsof` invocations per minute.
-        ///
-        /// `None` (or the field absent on the wire) keeps the
-        /// historical 5-second cadence. The handler clamps the
-        /// effective value into `[1, 60]` so a misuse can't burn
-        /// CPU by spinning lsof at sub-second intervals or hide a
-        /// crash for hours by setting an enormous value. Added in
-        /// `PROTOCOL_VERSION` 1 as an optional field — older engines
-        /// that ignore it stay on the constant.
+        /// interval in seconds. `None` keeps the 5 s default. The
+        /// handler clamps to `[1, 60]` so misuse can't spin lsof
+        /// at sub-second cadence or hide a crash for hours.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monitor_interval_secs: Option<u64>,
     },
@@ -172,63 +118,35 @@ pub enum RequestKind {
     },
     /// Politely shut the engine down.
     Shutdown,
-    /// Liveness probe — returns whether naive is currently
-    /// running and, if so, its PID. Added for **UX-F#7**: the
-    /// Swift orchestrator's no-restart hot-swap path
-    /// (`applyModeWithoutRestart`) leaves naive untouched while
-    /// reconfiguring system proxy. If naive happens to die in
-    /// that ~50 ms window, the orchestrator's
-    /// `transitionInFlight` gate suppresses the
-    /// `stateChanged(false)` event (UX-F#5) — so the swap
-    /// declares success while the engine is in fact dead.
-    /// Calling `ProbeNaiveLive` *after* the swap converts that
-    /// silent gap into an explicit yes/no answer the
-    /// orchestrator can route on. Cheap: a single in-process
+    /// Liveness probe — returns whether naive is running and its
+    /// PID. Used by the orchestrator's no-restart hot-swap path
+    /// to detect a naive death during the swap window (the
+    /// `transitionInFlight` gate suppresses the implicit
+    /// `stateChanged(false)` event). Cheap: a single in-process
     /// read of `EngineState.supervisor.is_some()`.
     ProbeNaiveLive,
-    /// Wire-protocol handshake. Sent by the Swift client right
-    /// after spawning the engine subprocess; the engine answers
-    /// with [`ResponsePayload::HelloReply`] carrying the
-    /// [`PROTOCOL_VERSION`] constant compiled into this binary
-    /// plus its `CARGO_PKG_VERSION`. The Swift caller compares
-    /// the protocol version to its own and refuses to proceed
-    /// on hard mismatch.
-    ///
-    /// Older engines that predate this variant return an
-    /// `invalid_request` error. The Swift side treats that as
-    /// protocol version 0 (legacy) and continues — the
-    /// historical behaviour is what the engine still
-    /// implements.
+    /// Wire-protocol handshake. Engine replies with
+    /// [`ResponsePayload::HelloReply`] carrying
+    /// [`PROTOCOL_VERSION`] and `CARGO_PKG_VERSION`. Older
+    /// engines that predate this variant return `invalid_request`;
+    /// the Swift side treats that as version 0 and continues.
     Hello,
-    /// Pre-flight reachability probe against the upstream
-    /// server. Resolves the hostname and opens a TCP connection
-    /// to `host:port` (defaulting to `:443` when the profile's
-    /// `ServerAddress` carries no explicit port), measuring
-    /// each step. Surfaced in the Swift UI as a "Test
-    /// Connection" affordance the user can hit before clicking
-    /// Start; catches the most common failure modes — wrong
-    /// hostname, blocked port, server down, SNI proxy not
-    /// responding — without standing up the full naive child.
+    /// Pre-flight reachability probe against the upstream server.
+    /// Resolves the hostname and opens a TCP connection to
+    /// `host:port` (defaulting `:443`), timing each step.
     ///
-    /// Intentionally *not* a TLS handshake or auth probe at
-    /// this revision: a real auth probe would require pulling
-    /// in a TLS stack (the crate forbids `unsafe_code`, so
-    /// rolling our own is off the table) and the most common
-    /// reason a connect succeeds today is that the cover-site
-    /// is replying — useful signal on its own. Full TLS+auth
-    /// validation continues to live in `RunDiagnostics`, which
-    /// requires a running proxy.
+    /// Intentionally not a TLS or auth probe: a real auth probe
+    /// would require a TLS stack (the crate forbids `unsafe_code`)
+    /// and the cover-site reply is itself useful signal. Full
+    /// TLS+auth validation lives in `RunDiagnostics`.
     ProbeServer {
-        /// The validated profile to probe. Only the
-        /// [`crate::domain::ServerAddress`] is consulted; the
-        /// rest of the profile is accepted for parity with
-        /// other variants and so a future revision can layer
-        /// in an auth probe without changing the wire shape.
+        /// The profile to probe. Only [`crate::domain::ServerAddress`]
+        /// is consulted; the rest is accepted for parity so a
+        /// future auth probe doesn't change the wire shape.
         profile: Profile,
-        /// Optional per-step deadline in seconds, clamped into
-        /// `[1, 30]`. `None` defaults to 5. Each step (DNS,
-        /// TCP) gets its own deadline so the worst-case wall
-        /// clock is `2 * timeout_secs`.
+        /// Optional per-step deadline in seconds, clamped to
+        /// `[1, 30]`. `None` defaults to 5. Worst-case wall
+        /// clock is `2 * timeout_secs` (DNS + TCP).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
     },
@@ -300,22 +218,15 @@ pub enum ResponsePayload {
     Diagnostic(DiagnosticReport),
     /// `run_latency_test` reply.
     Latency(LatencyReport),
-    /// `probe_naive_live` reply. `running` is the canonical
-    /// flag (`EngineState.supervisor.is_some()`); `pid`
-    /// surfaces the supervisor's PID when running, `None`
-    /// otherwise. The PID is for diagnostics and isn't read
-    /// by the orchestrator's hot-swap routing logic — only
-    /// `running` matters there.
+    /// `probe_naive_live` reply. `running` is the canonical flag;
+    /// `pid` is for diagnostics only.
     NaiveLiveness {
         /// `true` when the engine has a live `ProxySupervisor`.
         running: bool,
         /// PID of the running naive child, when running.
         pid: Option<u32>,
     },
-    /// `hello` reply. Carries the engine's compiled-in
-    /// [`PROTOCOL_VERSION`] and `CARGO_PKG_VERSION` so the
-    /// Swift caller can refuse a hard version mismatch and
-    /// surface the engine version in support diagnostics.
+    /// `hello` reply.
     HelloReply {
         /// Wire-format protocol version of this engine build.
         protocol_version: u32,
@@ -357,19 +268,11 @@ pub struct ValidationReport {
     pub reason: Option<String>,
 }
 
-/// Result of [`RequestKind::ProbeServer`].
-///
-/// Resolution and connect are timed independently so the Swift UI can
-/// distinguish "the DNS server is slow" (long `dns_resolve_ms`, short
-/// `tcp_connect_ms`, `reachable: true`) from "the firewall ate the
-/// SYN" (long or zero `tcp_connect_ms`, `reachable: false`,
-/// `error: Some("…connect refused/timed out…")`).
-///
-/// On any failure the report still resolves with `reachable: false`
-/// and a human-readable `error` rather than producing an
-/// [`Outbound::Error`] frame — the probe completed, the *server* did
-/// not, and the Swift caller wants to render the timing alongside the
-/// failure rather than catch a transport-error exception.
+/// Result of [`RequestKind::ProbeServer`]. DNS and connect are
+/// timed independently so the UI can distinguish "slow DNS" from
+/// "firewall ate the SYN". Failure resolves with `reachable: false`
+/// rather than an [`Outbound::Error`] frame so the timing renders
+/// alongside the failure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeReport {
     /// The probed `host:port` after default-port substitution.
@@ -492,11 +395,9 @@ pub enum Event {
         /// Human-readable detail.
         detail: String,
     },
-    /// Diagnostic progress for long-running operations. Emitted live as
-    /// each probe inside `run_diagnostics` / `run_latency` finishes so
-    /// the UI log can render `✓ probe_name (47ms)` in real time instead
-    /// of waiting for the whole report to come back as a single
-    /// `Response::Diagnostic` / `Response::Latency` payload.
+    /// Diagnostic progress for long-running operations. Emitted live
+    /// as each probe finishes so the UI log can render in real time
+    /// rather than waiting for the full report.
     DiagnosticProgress {
         /// Step name (probe URL or symbolic identifier).
         step: String,
@@ -508,11 +409,8 @@ pub enum Event {
         elapsed_ms: u64,
     },
     /// Lightweight monitor snapshot for the developer overlay.
-    ///
-    /// Emitted on each successful connection-monitor tick. Counts
-    /// come from the same `lsof` parse that powers anomaly detection,
-    /// so the overlay's "VPS pressure" and "Local Kernel" readouts use
-    /// the same source of truth as the safety monitor.
+    /// Counts come from the same `lsof` parse that powers anomaly
+    /// detection.
     TrafficSnapshot {
         /// Supervised naive process ID.
         pid: u32,
@@ -682,10 +580,9 @@ mod tests {
 
     #[test]
     fn hello_request_serializes_with_null_params() {
-        // `RequestKind::Hello` is a serde unit variant under
-        // `tag = "method", content = "params"`, so it serializes
-        // with `params: null`. Pin the wire shape so a future
-        // serde upgrade or refactor can't silently drift.
+        // Pin the wire shape: serde unit variant under
+        // `tag = "method", content = "params"` must emit
+        // `params: null`.
         let req = Request {
             id: 99,
             kind: RequestKind::Hello,
@@ -743,11 +640,9 @@ mod tests {
             },
         };
         let value = serde_json::to_value(&req).unwrap();
-        // `skip_serializing_if = "Option::is_none"` — the field
-        // must NOT appear on the wire when the caller passed
-        // `None`. The Swift side relies on this to mean
-        // "use the engine's default" with no ambiguity between
-        // "absent" and "explicit null".
+        // `skip_serializing_if = "Option::is_none"`: the field
+        // must be absent (not explicit null) so the Swift side's
+        // "use engine default" semantics has no ambiguity.
         assert!(value["params"].get("timeout_secs").is_none());
     }
 
@@ -765,19 +660,15 @@ mod tests {
         };
         let value = serde_json::to_value(&out).unwrap();
         assert_eq!(value["kind"], "response");
-        // `Probe(ProbeReport)` is a newtype tuple variant under
-        // `serde(tag = "type")` — fields hoist alongside the tag
-        // rather than nesting under a `probe` key. Swift decodes
-        // off the same outer container; pin the shape.
+        // Newtype tuple variant under `serde(tag = "type")` —
+        // fields hoist alongside the tag, no `probe` nesting.
         assert_eq!(value["result"]["type"], "probe");
         assert_eq!(value["result"]["server"], "naive.example.com:443");
         assert_eq!(value["result"]["reachable"], true);
         assert_eq!(value["result"]["dns_resolve_ms"], 12.5);
         assert_eq!(value["result"]["tcp_connect_ms"], 33.0);
-        // `error` is `None` and `skip_serializing_if = Option::is_none`,
-        // so it must not appear on the wire. Mismatched optional
-        // semantics here would round-trip wrong against Swift
-        // (which decodes a missing key as `nil`).
+        // `None` + `skip_serializing_if`: field must be absent on
+        // the wire, not explicit null.
         assert!(value["result"].get("error").is_none());
         let back: Outbound = serde_json::from_value(value).unwrap();
         assert_eq!(out, back);
@@ -872,11 +763,8 @@ mod tests {
             },
         };
         let value = serde_json::to_value(&req).unwrap();
-        // Swift omits the field with `encodeIfPresent` when nil;
-        // the Rust side sets `default + skip_serializing_if` so
-        // a round trip preserves "absent" exactly. A drift here
-        // would silently force the engine to a hard-coded value
-        // and lose the legacy-engine fallback.
+        // Field must be absent (not explicit null) so the
+        // legacy-engine fallback path stays intact.
         assert!(
             value["params"].get("monitor_interval_secs").is_none(),
             "monitor_interval_secs must be absent on the wire when None: {value}"

@@ -3,36 +3,32 @@
 // See LICENSE for full terms.
 //! Credential redaction for log lines forwarded to the Swift UI.
 //!
-//! `naive` prints its full proxy URL — including userinfo
-//! (`https://user:pass@host:port`) — at startup with default verbosity.
-//! Anything we forward verbatim ends up in the live log view, support
-//! bundles, and screenshots. This module strips the userinfo segment
-//! before the line crosses our boundary.
+//! `naive` prints its full proxy URL — including userinfo — at
+//! default verbosity, and forwarded lines reach the live log,
+//! support bundles, and screenshots. This module strips userinfo
+//! and other credential-shaped fragments before the line crosses
+//! our boundary.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// Returns a copy of `line` with credential-bearing patterns replaced
-/// by their redacted equivalents:
+/// Returns a copy of `line` with credential-bearing patterns
+/// replaced:
 ///
-/// - `scheme://userinfo@host` → `scheme://***:***@host` for any
-///   `http`, `https`, `socks`, `socks4`, `socks5`, `ftp`, `naive` URL
+/// - `scheme://userinfo@host` → `scheme://***:***@host`
 /// - `Authorization: <type> <value>` → `Authorization: <type> ***`
-/// - `Cookie: …` → `Cookie: ***` (whole value redacted; cookies often
-///   carry session tokens that we don't want to leak by accident)
+/// - `Cookie: …` → `Cookie: ***`
+/// - JSON / k=v credential fields → redacted value
+/// - query-string `?token=…` / `&api_key=…` → redacted value
 ///
-/// Borrows when no pattern matches, allocates only when a substitution
-/// is needed. Applied to every line streamed from the `naive`
-/// subprocess and to every curl-stderr blob forwarded to the UI.
+/// Borrows on no match; allocates only on substitution.
 #[must_use]
 pub fn redact(line: &str) -> Cow<'_, str> {
-    // Each step takes a Cow and returns a Cow — passthrough when no
-    // match, owned only on substitution. Sequential reassignment
-    // keeps the zero-allocation fast path for clean lines without
-    // the previous `Option<Regex>` + `.clone()` dance that allocated
-    // even when no redaction was needed.
+    // Sequential Cow reassignment: passthrough when no match,
+    // owned only on substitution. Keeps the zero-allocation fast
+    // path for clean lines.
     let mut current = Cow::Borrowed(line);
     if let Cow::Owned(s) = USERINFO_REGEX.replace_all(&current, "${scheme}***:***@") {
         current = Cow::Owned(s);
@@ -43,35 +39,17 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     if let Cow::Owned(s) = COOKIE_HEADER_REGEX.replace_all(&current, "${prefix}***") {
         current = Cow::Owned(s);
     }
-    // **Diag-F#1 (v0.1.7.17):** JSON / k=v credential fields.
-    // `naive` config-load errors dump partial JSON like
-    // `"password":"..."`; curl -v emits `password: hunter2`.
-    // Without this, both forms reach the UI verbatim.
-    //
-    // **M6 (v2.0.38):** the strict-JSON-quoted-string pass runs
-    // FIRST. The bare-token pass that historically handled both
-    // forms stops at the first space, comma, or quote in the
-    // value, which leaks the tail of any password with embedded
-    // whitespace or punctuation (the realistic case: human-typed
-    // passwords like "Tr0ub4dor 3 cat-pic"). Two passes —
-    // strict-quoted first, then bare for the remaining
-    // k=v / k: v shapes — keep the bare-token fast path while
-    // closing the embedded-space leak for the JSON shape that
-    // naive actually emits.
+    // Strict-JSON-quoted pass runs FIRST. The bare-token matcher
+    // below stops at the first space/comma/quote, which would
+    // leak the tail of any password with embedded whitespace
+    // (e.g. `Tr0ub4dor 3 cat-pic`).
     if let Cow::Owned(s) = JSON_KV_QUOTED_REGEX.replace_all(&current, "${prefix}***${suffix}") {
         current = Cow::Owned(s);
     }
-    // **OPSEC (post-v2.0.50):** query-string credentials. URLs
-    // with the credential in the path can't be detected generically
-    // (the token is a bare opaque blob), but query-string-shaped
-    // credentials follow the well-known `?key=value` / `&key=value`
-    // pattern and ARE distinguishable. Must run BEFORE the bare
-    // k=v rule below: the bare matcher's value class `[^"\s,}\r\n]+`
-    // does not include `&`, so it would otherwise greedily eat a
-    // URL like `?token=abc&user=alice&page=2` — clobbering
-    // subsequent non-credential parameters. The query-string
-    // matcher's value class `[^&\s#]+` correctly terminates at
-    // the URL query separator.
+    // Query-string pass runs BEFORE the bare k=v rule below: the
+    // bare matcher's value class doesn't include `&`, so a URL
+    // like `?token=abc&user=alice&page=2` would otherwise have
+    // its non-credential params clobbered.
     if let Cow::Owned(s) = QUERY_STRING_CRED_REGEX.replace_all(&current, "${prefix}***") {
         current = Cow::Owned(s);
     }
@@ -79,82 +57,57 @@ pub fn redact(line: &str) -> Cow<'_, str> {
         current = Cow::Owned(s);
     }
     if let Cow::Owned(s) = AUTH_HEADER_REGEX.replace_all(&current, "${prefix}***") {
-        // Re-run after JSON pass in case a header-shaped credential
-        // appears in a log line that also contains a JSON dump.
+        // Re-run after the JSON pass in case a header-shaped
+        // credential coexists with a JSON dump on the same line.
         current = Cow::Owned(s);
     }
     current
 }
 
-// `LazyLock` (Rust 1.80+) panics on first use if the regex fails
-// to compile, which the supervisor's `kill_on_drop` reaps into a
-// fail-fast restart. The previous `OnceLock<Option<Regex>>`
-// silently degraded to a passthrough on compile failure —
-// credentials would then leak. Fail-loud is the right LTSC
-// posture for a security control. The
-// `redaction_regexes_compile` test below catches any bad edit
-// at `cargo test` time before it can ship.
-//
-// `expect` is used in spite of the crate-wide `expect_used =
-// "deny"` lint because the compile-time test acts as the safety
-// net the lint usually provides, and panic is the correct
-// response to a constant regex that won't compile.
+// `LazyLock` panics on regex-compile failure (fail-loud is correct
+// for a security control — the previous `OnceLock<Option<Regex>>`
+// silently degraded to passthrough, leaking credentials).
+// `expect` is allowed despite the crate-wide deny because the
+// `redaction_regexes_compile` test catches any bad edit at
+// `cargo test` time.
 
 /// `scheme://userinfo@` matcher. Schemes are case-insensitive
 /// (curl occasionally upper-cases them in error output).
 ///
-/// **L2 (v2.0.38):** the userinfo class is `[^/\s]+`, greedy-up-to-
-/// path-or-whitespace, with a literal `@` after. The previous class
-/// `[^@\s/]+` stopped at the *first* `@`, so a password containing
-/// an `@` (`user:p@ssword@host`) was only partially redacted —
-/// `user:p` got `***:***@` but `ssword@host` reached the log
-/// verbatim. The greedy form backtracks to the last `@` before the
-/// path-or-whitespace boundary, redacting the full userinfo run.
-/// Trade-off: a URL fragment like `https://x.com#a@b` now matches
-/// and redacts to `https://***:***@b`, but that shape doesn't
-/// appear in the `naive` / curl log surface this module guards.
+/// Userinfo class is `[^/\s]+` (greedy up to path-or-whitespace,
+/// then literal `@`) so a password containing `@` like
+/// `user:p@ssword@host` is fully redacted. The greedy form
+/// backtracks to the last `@` before the path-or-whitespace
+/// boundary.
 #[allow(clippy::expect_used)]
 static USERINFO_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^/\s]+@")
         .expect("userinfo redaction regex must compile")
 });
 
-/// `Authorization: <scheme> <value>` matcher. The scheme is left
-/// intact (Bearer / Basic / Digest tells the user what auth type the
-/// upstream wanted); the value is replaced with `***`.
-///
-/// **v0.1.7.10:** also matches `Proxy-Authorization:`. `naive` and
-/// curl emit this header verbatim on upstream-proxy failure, and
-/// the previous regex required the bare `Authorization:` prefix
-/// — letting `Proxy-Authorization: Basic <b64>` slip through and
-/// undoing every other credential-hygiene effort. Single regex
-/// covers both via the optional `Proxy-` prefix.
+/// `[Proxy-]Authorization: <scheme> <value>` matcher. The scheme
+/// is left intact (Bearer / Basic / Digest is useful diagnostic);
+/// the value is replaced with `***`.
 #[allow(clippy::expect_used)]
 static AUTH_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?P<prefix>(?:Proxy-)?Authorization:\s*[A-Za-z]+\s+)\S+")
         .expect("Authorization redaction regex must compile")
 });
 
-/// `Cookie: …` matcher. Cookies frequently carry session tokens and
-/// CSRF state — replacing the entire value (not just one cookie pair)
-/// is the conservative choice for log lines we don't control.
+/// `[Set-]Cookie: …` matcher. Replaces the entire value (not just
+/// one cookie pair) because cookies frequently carry session
+/// tokens and CSRF state.
 #[allow(clippy::expect_used)]
 static COOKIE_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?P<prefix>(?:Set-)?Cookie:\s*)[^\r\n]+")
         .expect("Cookie redaction regex must compile")
 });
 
-/// **M6 (v2.0.38):** strict-JSON-quoted-value matcher. Runs first,
-/// before the bare-token matcher below. The value `(?:[^"\\]|\\.)*`
-/// consumes any non-`"` character or any escaped pair, terminating
-/// only at the literal closing quote — so a password with embedded
-/// spaces, commas, or punctuation is fully redacted instead of
-/// leaking everything past the first delimiter. The previous
-/// single-regex design used `[^"\s,}\r\n]+` for both quoted and
-/// bare values; the realistic case (operator picks
-/// `Tr0ub4dor 3 cat-pic` and `naive` emits a JSON dump on a
-/// config-load error) was leaking everything from the first space
-/// onwards.
+/// Strict-JSON-quoted-value matcher. Value `(?:[^"\\]|\\.)*`
+/// consumes any non-`"` character or escape pair, terminating
+/// only at the literal closing quote — so a password with
+/// embedded spaces / commas / punctuation is fully redacted
+/// instead of leaking past the first delimiter.
 #[allow(clippy::expect_used)]
 static JSON_KV_QUOTED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -171,34 +124,19 @@ static JSON_KV_QUOTED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("JSON KV quoted-value credential redaction regex must compile")
 });
 
-/// **Diag-F#1 (v0.1.7.17):** matches credential-bearing JSON
-/// fields and `key=value` / `key: value` plain text dumps.
-/// Covers `password`, `passwd`, `secret`, `token`, `api_key`,
-/// `apikey`, `access_token`, `refresh_token` — case-insensitive,
-/// optional surrounding quotes on the key, optional surrounding
-/// quotes on the value. The trailing-quote `suffix` capture
-/// preserves the closing quote on JSON so the redacted output
-/// remains parse-able.
+/// Bare-token `key=value` / `key: value` matcher. Runs AFTER
+/// `JSON_KV_QUOTED_REGEX` (which handles the quoted case);
+/// bare-token formats are space-delimited by definition so the
+/// embedded-space leak doesn't apply.
 ///
-/// **M6 (v2.0.38):** this matcher now runs **after**
-/// `JSON_KV_QUOTED_REGEX`, which handles the strict-JSON case
-/// (the leak surface for human-typed passwords with spaces). This
-/// remaining matcher exclusively handles the bare-token shapes
-/// (`password=hunter2`, `password: hunter2`) which never had the
-/// embedded-space problem because those formats are
-/// space-delimited by definition.
+/// Covers `password`, `passwd`, `secret`, `token`, `api_key`,
+/// `apikey`, `access_token`, `refresh_token`.
 #[allow(clippy::expect_used)]
 static JSON_KV_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    // **OPSEC (post-v2.0.50):** `&` and `#` added to the value
-    // terminator set. Without them, the bare-token matcher applied
-    // to a URL (`?token=abc&user=alice#frag`) would consume past
-    // the `&` AND past the `#`, clobbering subsequent
-    // non-credential query parameters / URL fragments AND
-    // re-matching the already-redacted `token=***` left by
-    // QUERY_STRING_CRED_REGEX. Bare-token dumps in `naive`
-    // config-load errors and curl `-v` output don't include `&`
-    // or `#` as a value separator, so this is a strict
-    // tightening.
+    // `&` and `#` are in the value terminator set so a URL like
+    // `?token=abc&user=alice#frag` doesn't have the bare matcher
+    // eat past the `&`/`#` and clobber subsequent params (or
+    // re-match the `token=***` left by QUERY_STRING_CRED_REGEX).
     Regex::new(
         r#"(?ix)
         (?P<prefix>
@@ -213,20 +151,14 @@ static JSON_KV_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("JSON KV credential redaction regex must compile")
 });
 
-/// **OPSEC (post-v2.0.50):** query-string credentials. Matches the
-/// URL-query-string credential shapes `?token=…`, `&api_key=…`,
-/// `?session=…`, `?auth=…`, etc. The value runs from `=` to the next
-/// `&`, whitespace, or fragment `#` separator. Distinct from
-/// `JSON_KV_CRED_REGEX` because URL queries use `&` as the value
-/// terminator whereas k=v dumps terminate on whitespace / commas /
-/// brace — a URL like `https://x.com/p?token=abc&u=alice` would
-/// otherwise have the bare-token rule eat the whole tail.
+/// Query-string credential matcher (`?token=…`, `&api_key=…`,
+/// etc.). Value runs from `=` to the next `&` / whitespace /
+/// fragment `#`. Distinct from `JSON_KV_CRED_REGEX` because URL
+/// queries use `&` as the value terminator.
 #[allow(clippy::expect_used)]
 static QUERY_STRING_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    // Single-line form (no `(?x)`) because the character class
-    // `[^&\s#]+` contains a literal `#` that extended-mode would
-    // otherwise treat as a comment marker and refuse to parse.
-    // `(?i)` keeps the credential keys case-insensitive.
+    // Single-line form (not `(?x)`) — the value class contains a
+    // literal `#` that extended-mode would treat as a comment.
     Regex::new(
         r"(?i)(?P<prefix>[?&](?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|session|auth|password|secret)=)[^&\s#]+",
     )
@@ -273,8 +205,6 @@ mod tests {
         assert_eq!(redact(line), "from https://***:***@x to http://***:***@y");
     }
 
-    /// SOCKS variants must be redacted too — naive's error output and
-    /// curl's proxy diagnostics both spell SOCKS URLs explicitly.
     #[test]
     fn redacts_socks_variants() {
         for line in [
@@ -291,13 +221,10 @@ mod tests {
         }
     }
 
-    /// `naive://` and `ftp://` are also covered — both can show up in
-    /// curl error text under unusual configurations.
     #[test]
     fn redacts_naive_and_ftp_schemes() {
         let naive = "naive+https://alice:hunter2@server:443";
-        // The "naive+https://" case still has the inner https:// match
-        // — ensure the password is gone.
+        // The inner `https://` is the matched scheme here.
         let out = redact(naive);
         assert!(!out.contains("hunter2"));
 
@@ -306,9 +233,6 @@ mod tests {
         assert!(!out.contains("hunter2"), "ftp password leaked: {out}");
     }
 
-    /// Authorization headers must hide the secret while keeping the
-    /// scheme name visible (so the user can still tell whether the
-    /// proxy expected Bearer / Basic / Digest).
     #[test]
     fn redacts_authorization_header() {
         let line = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig";
@@ -316,11 +240,6 @@ mod tests {
         assert_eq!(out, "Authorization: Bearer ***");
     }
 
-    /// `Proxy-Authorization` (the upstream-proxy auth header) must
-    /// be redacted with the same posture as `Authorization`.
-    /// Regression test for v0.1.7.10's Ru-A2 fix — pre-fix the
-    /// regex required the literal `Authorization:` prefix and let
-    /// `Proxy-Authorization: Basic <b64>` slip through verbatim.
     #[test]
     fn redacts_proxy_authorization_header() {
         let line = "Proxy-Authorization: Basic bmljazpodW50ZXIy";
@@ -333,8 +252,6 @@ mod tests {
         );
     }
 
-    /// Mixed case + leading whitespace — matches the form curl
-    /// emits in `-v` output.
     #[test]
     fn redacts_proxy_authorization_with_whitespace_and_case() {
         for line in [
@@ -350,19 +267,14 @@ mod tests {
         }
     }
 
-    /// Basic auth is base64-encoded `user:pass` — must never reach
-    /// the log line in cleartext OR base64.
     #[test]
     fn redacts_basic_authorization_header() {
         let line = "  Authorization:   Basic bmljazpodW50ZXIy";
         let out = redact(line);
-        // Whitespace between scheme and value is preserved; payload
-        // is masked.
         assert!(out.ends_with("***"), "expected trailing ***: {out}");
         assert!(!out.contains("bmljazpodW50ZXIy"), "payload leaked: {out}");
     }
 
-    /// Cookies often carry session tokens — redact the whole value.
     #[test]
     fn redacts_cookie_and_set_cookie_headers() {
         for line in [
@@ -377,15 +289,14 @@ mod tests {
 
     #[test]
     fn does_not_cross_path_separator() {
-        // Pathological: `@` after the path. The regex must not capture it.
+        // `@` after the path must NOT match.
         let line = "https://example.com/owner@repo";
         assert_eq!(redact(line), line);
     }
 
-    /// Bare `user@host` outside a URL is *probably* an email or git
-    /// reference; we deliberately don't redact those because false
-    /// positives would damage log readability without any security
-    /// payoff (no password adjacent).
+    /// Bare `user@host` outside a URL is probably email / git;
+    /// false positives there would hurt log readability with no
+    /// security payoff.
     #[test]
     fn does_not_match_at_outside_url() {
         let line = "user@host (not a URL)";
@@ -397,14 +308,10 @@ mod tests {
         assert_eq!(redact(""), "");
     }
 
-    /// Force-touch every `LazyLock` so a future regex edit that
-    /// doesn't compile fails `cargo test` instead of shipping and
-    /// turning credential redaction into a runtime panic. Belt-
-    /// and-braces alongside the `LazyLock`'s own `expect`.
+    /// Force-touches every `LazyLock` so a bad regex edit fails
+    /// `cargo test` instead of becoming a runtime panic.
     #[test]
     fn redaction_regexes_compile() {
-        // The asserts force initialisation; we don't care about the
-        // match result, only that `replace_all` does not panic.
         let _ = USERINFO_REGEX.replace_all("", "");
         let _ = AUTH_HEADER_REGEX.replace_all("", "");
         let _ = COOKIE_HEADER_REGEX.replace_all("", "");
@@ -412,10 +319,8 @@ mod tests {
         let _ = JSON_KV_CRED_REGEX.replace_all("", "");
     }
 
-    /// **M6 regression test.** Strict-JSON quoted value with an
-    /// embedded space must be redacted in full. Previously the
-    /// single-regex design stopped the value match at the first
-    /// space, leaving the rest of the password in the log line.
+    /// Strict-JSON quoted value with embedded space must be
+    /// redacted in full.
     #[test]
     fn redacts_quoted_password_with_embedded_space() {
         let line = r#"config error: {"password":"Tr0ub4dor 3 cat-pic","other":"ok"}"#;
@@ -432,7 +337,6 @@ mod tests {
         );
     }
 
-    /// **M6 regression test.** Same shape with embedded comma.
     #[test]
     fn redacts_quoted_password_with_embedded_comma() {
         let line = r#"{"password":"foo,bar","u":"v"}"#;
@@ -448,8 +352,7 @@ mod tests {
         );
     }
 
-    /// **M6 regression test.** Quoted value containing an escaped
-    /// quote (`\"`) must be redacted including the escape pair.
+    /// Quoted value containing escape pair `\"` must redact in full.
     #[test]
     fn redacts_quoted_password_with_escaped_quote() {
         let line = r#"{"password":"a\"b"}"#;
@@ -461,8 +364,6 @@ mod tests {
         );
     }
 
-    /// **M6 sanity.** Existing bare-token path still works for the
-    /// `k=v` and `k: v` shapes the previous single-regex handled.
     #[test]
     fn redacts_bare_password_assignment() {
         for line in ["password=hunter2", "password: hunter2", "PASSWORD=hunter2"] {
@@ -472,9 +373,7 @@ mod tests {
         }
     }
 
-    /// **L2 regression test.** Userinfo containing an embedded `@`
-    /// is fully redacted; the previous `[^@\s/]+@` stopped at the
-    /// first `@` and leaked the password tail.
+    /// Userinfo with embedded `@` redacts in full.
     #[test]
     fn redacts_userinfo_with_embedded_at_sign() {
         let line = "https://user:p@ssword@host.example.com/path";
@@ -486,9 +385,8 @@ mod tests {
         );
     }
 
-    /// **L2 sanity.** Two URLs on one line each redact independently
-    /// — the greedy class is bounded by `\s`, not `@`, so the
-    /// second URL's userinfo is matched as its own run.
+    /// Two URLs on one line each redact independently — the greedy
+    /// class is bounded by `\s`, not `@`.
     #[test]
     fn redacts_two_urls_with_at_signs_independently() {
         let line = "from https://a:b@host1 to https://c:d@host2";
@@ -501,12 +399,8 @@ mod tests {
         );
     }
 
-    // MARK: - Query-string credentials (post-v2.0.50)
+    // MARK: - Query-string credentials
 
-    /// `?token=...` in a URL must be redacted. The previous rule
-    /// set caught `key=value` k=v dumps but only when the value
-    /// terminated at whitespace / comma / quote — URLs use `&` as
-    /// the separator and so passed through verbatim.
     #[test]
     fn redacts_query_string_token() {
         let line = "fetching https://panel.example.com/path?token=secretvalue123";
@@ -515,9 +409,8 @@ mod tests {
         assert!(out.contains("?token=***"), "shape wrong: {out}");
     }
 
-    /// Multiple credential-shaped query parameters separated by `&`
-    /// — each one's value runs only to the next `&`, so subsequent
-    /// non-credential parameters survive.
+    /// Each value runs only to the next `&`; non-credential params
+    /// after survive.
     #[test]
     fn redacts_query_string_token_followed_by_other_params() {
         let line = "https://x.com/p?token=abc&user=alice&page=2";
@@ -530,7 +423,6 @@ mod tests {
         assert!(out.contains("page=2"), "non-cred param clobbered: {out}");
     }
 
-    /// All five documented credential-shaped query keys fire.
     #[test]
     fn redacts_every_query_string_credential_shape() {
         for line in [
@@ -554,7 +446,6 @@ mod tests {
         }
     }
 
-    /// Non-credential query params must NOT match.
     #[test]
     fn passes_through_non_credential_query_params() {
         let line = "https://x.com/p?page=2&sort=asc";
@@ -563,8 +454,7 @@ mod tests {
         assert!(matches!(out, Cow::Borrowed(_)));
     }
 
-    /// Boundary tested via fragment `#`. The redaction must stop
-    /// at the URL fragment separator, not eat into the fragment.
+    /// Redaction stops at the URL fragment separator `#`.
     #[test]
     fn redacts_query_string_token_with_fragment() {
         let line = "https://x.com/p?token=abc#anchor";

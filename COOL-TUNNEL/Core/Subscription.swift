@@ -1,50 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
-// Core/Subscription.swift
 //
 // Codable mirror of `cool_tunnel_server::ct-protocol::subscription`
 // — the JSON shape served at
 // `GET https://<panel-domain>/api/v1/subscription/<token>`.
 //
-// Trust model. The manifest body carries an HMAC-SHA-256 `signature`
-// computed with the panel's `APP_KEY`. That key never leaves the
-// server, so the client physically cannot verify the HMAC. The
-// signature exists for server-side auditing — clients trust the
-// manifest because TLS authenticates the panel domain (the operator
-// configured a valid Let's Encrypt cert through Caddy).
+// Trust model: TLS authenticates the panel domain. The manifest's
+// HMAC `signature` is computed with the panel-only `APP_KEY` and
+// is not client-verifiable; it exists for server-side auditing.
 //
-// Anti-fingerprinting consequence. Every panel error path —
-// rate-limited, expired token, missing APP_KEY, malformed JSON —
-// returns the cover-site HTML at HTTP 200. The client cannot
-// distinguish "bad token" from "endpoint exists but rejected" on
-// status code alone. Reading the response `Content-Type` and
-// attempting JSON decode is the only honest signal.
-//
-// What the client validates (in `validate(now:)`):
-//   - `version == 1`.
-//   - `profiles` is non-empty AND ≤ 16 entries (defensive cap).
-//   - No profile's `host` points at loopback / link-local /
-//     private / unspecified address space, or `localhost` /
-//     `*.local` mDNS names (defense against a counterfeit
-//     panel using these to turn the user's machine into a
-//     closed-loop SSRF source).
-//   - `capabilities.http3 == false` (a `true` value is a strong
-//     counterfeit signal — see schema commentary).
-//   - `issued_at != 0` (the schema sentinel; only stub or
-//     counterfeit servers emit zero).
-//   - `issued_at <= now + 60 s` (forward clock-skew tolerance;
-//     larger drifts would let a counterfeit pair `issued_at =
-//     far_future` with `expires_at = farther_future` to bypass
-//     the staleness gate).
-//   - `expires_at >= issued_at` (rejects malformed manifests
-//     where expiry precedes issuance).
-//   - `expires_at - issued_at <= 1 year` (caps the validity
-//     window so an attacker can't pair `issued_at = now()` with
-//     `expires_at = u64::MAX`).
-//   - `expires_at > now` (manifest hasn't expired).
-//   - `now - issued_at <= 7 days` (freshness guard, matches the
-//     server-side comment in `ct-protocol::subscription`).
+// The panel returns cover-site HTML at HTTP 200 for every error
+// path (bad token, expired, rate-limited, missing APP_KEY,
+// malformed JSON). Reading `Content-Type` and attempting JSON
+// decode is the only honest signal that the token was rejected.
 //
 // HTTPS-only URL enforcement and the 1 MB body cap live in
 // `SubscriptionClient`, not here.
@@ -60,7 +29,7 @@ public struct SubscriptionManifestV1: Sendable, Codable, Hashable {
     public let server: String
     /// One or more profiles this subscription resolves to. Clients
     /// usually pick the first; the rest are operator-defined
-    /// alternates (per-team rotation, hot-spare in another region).
+    /// alternates.
     public let profiles: [SubscriptionProfileV1]
     /// Server capabilities the operator has opted into.
     public let capabilities: ServerCapabilitiesV1
@@ -68,14 +37,11 @@ public struct SubscriptionManifestV1: Sendable, Codable, Hashable {
     public let issuedAt: UInt64
     /// Unix timestamp after which clients must re-fetch.
     public let expiresAt: UInt64
-    /// Free-form operator note ("hot-spare server in Tokyo");
-    /// rendered in the UI when present.
+    /// Free-form operator note; rendered in the UI when present.
     public let note: String?
-    /// HMAC-SHA-256 of the canonical body with `signature: nil`.
-    /// Hex-encoded. Decorative on the client — the panel signs with
-    /// `APP_KEY` which the client doesn't have. Surfaced for
-    /// completeness so a future protocol revision can move to
-    /// asymmetric signing without changing the wire shape.
+    /// HMAC-SHA-256 of the canonical body, hex-encoded. Not
+    /// client-verifiable — the panel signs with `APP_KEY` which
+    /// the client doesn't hold.
     public let signature: String?
 
     private enum CodingKeys: String, CodingKey {
@@ -108,14 +74,10 @@ public struct ServerCapabilitiesV1: Sendable, Codable, Hashable {
     /// means none — surface a warning in the UI before the user
     /// connects.
     public let antiTracking: [AntiTrackingFeature]
-    /// Whether HTTP/3 is advertised. Always `false` from a real
-    /// `cool-tunnel-server` deployment (`NaiveProxy` is HTTP/2-only;
-    /// advertising true would lead to a recognisable QUIC fallback
-    /// pattern). A `true` here is a strong signal the panel is
-    /// counterfeit.
+    /// Always `false` from a real deployment (NaiveProxy is
+    /// HTTP/2-only). A `true` value is a strong counterfeit signal.
     public let http3: Bool
     /// Stable identifier for the cover site currently active.
-    /// Surface in UI as "connected via 'minimal-blog'".
     public let fakeSiteSlug: String?
 
     private enum CodingKeys: String, CodingKey {
@@ -125,16 +87,12 @@ public struct ServerCapabilitiesV1: Sendable, Codable, Hashable {
     }
 }
 
-/// One anti-tracking feature flag. Mirrors
-/// `cool_tunnel_server::ct-protocol::subscription::AntiTrackingFeature`.
+/// One anti-tracking feature flag.
 ///
-/// Custom `Decodable` (instead of the auto-derived `String` raw-value
-/// init) so a manifest carrying a future flag this v1 client doesn't
-/// know about decodes into [`AntiTrackingFeature.unknown`] rather
-/// than failing the entire `[AntiTrackingFeature]` array decode.
-/// Without that, a server-side rollout adding `case x = "future_flag"`
-/// would brick every v1 client with a misleading
-/// `malformedManifest → tokenInvalid` UI banner.
+/// Custom `Decodable` (not the auto-derived raw-value init) so a
+/// future flag this v1 client doesn't know decodes into
+/// [`unknown`] rather than failing the entire array decode and
+/// bricking every v1 client on a server-side rollout.
 public enum AntiTrackingFeature: Sendable, Codable, Hashable {
     case hideIp
     case hideVia
@@ -142,9 +100,7 @@ public enum AntiTrackingFeature: Sendable, Codable, Hashable {
     case dohResolver
     case http3
     /// Forward-compat sink for any flag the server adds in a
-    /// future revision. Carrying the raw string lets the UI
-    /// surface "unknown protection: <name>" rather than silently
-    /// drop it.
+    /// future revision.
     case unknown(String)
 
     public init(from decoder: Decoder) throws {
@@ -176,71 +132,41 @@ public enum AntiTrackingFeature: Sendable, Codable, Hashable {
 // MARK: - Validation
 
 extension SubscriptionManifestV1 {
-    /// Maximum manifest age the client accepts. Matches the
-    /// 7-day freshness guard documented in
-    /// `ct-protocol::subscription::SubscriptionManifestV1`. A
-    /// manifest that arrives older than this — typically because a
-    /// caching proxy on the user's network is serving a stale copy
-    /// — is refused so the user gets fresh credentials and current
-    /// capability flags.
+    /// Maximum manifest age the client accepts (7 days).
     public static let maxAge: TimeInterval = 7 * 24 * 60 * 60
 
-    /// Acceptable forward clock-skew on `issued_at` (60 seconds).
-    /// A manifest stamped at most this far ahead of the client
-    /// clock is accepted as freshly-issued; anything beyond is
-    /// refused because future-dating bypasses the staleness gate
-    /// (a counterfeit panel could pair `issued_at = far_future`
-    /// with `expires_at = farther_future` to produce an
-    /// indefinitely-valid manifest).
+    /// Acceptable forward clock-skew on `issued_at`. Beyond this,
+    /// future-dating bypasses the staleness gate (a counterfeit
+    /// panel could pair `issued_at = far_future` with
+    /// `expires_at = farther_future` for an indefinitely-valid
+    /// manifest).
     ///
-    /// Typed `UInt64` (not `TimeInterval`) so the arithmetic at
-    /// `validate(now:)` runs without a `Double → UInt64`
-    /// conversion that would trap on a future negative or NaN
-    /// value — defensive code shouldn't itself be a crash
-    /// vector.
+    /// Typed `UInt64` so `validate(now:)`'s arithmetic runs without
+    /// a `Double → UInt64` conversion that would trap on a future
+    /// negative or NaN value.
     public static let maxForwardSkew: UInt64 = 60
 
-    /// Maximum manifest validity window (`expires_at - issued_at`).
-    /// One year — well beyond any legitimate LTSC subscription
-    /// renewal cadence. Without this gate, a counterfeit panel
-    /// could pair `issued_at = now()` with `expires_at = u64::MAX`
-    /// and the manifest would pass every other check, valid until
-    /// year 5.84×10¹¹ AD.
+    /// Maximum manifest validity window (`expires_at - issued_at`),
+    /// one year. Without this gate, a counterfeit panel could pair
+    /// `issued_at = now()` with `expires_at = u64::MAX`.
     public static let maxValidity: UInt64 = 365 * 24 * 60 * 60
 
-    /// Maximum number of profile entries inside a single manifest.
-    /// Real subscriptions emit one or a small handful; the cap is
-    /// defense-in-depth against a hostile panel packing thousands
+    /// Maximum number of profile entries per manifest.
+    /// Defense-in-depth against a hostile panel packing thousands
     /// of profiles into the 1 MB body cap to chew memory.
     public static let maxProfiles: Int = 16
 
-    /// Returns `true` for any host string that points at the
-    /// user's own machine, link-local, or private/non-routable
-    /// address space — values a counterfeit panel could use to
-    /// turn the user's machine into a closed-loop SSRF source.
-    /// Recognises:
-    ///
-    /// - `localhost`, `*.local` (mDNS) by name.
-    /// - Bracketed IPv6 literals (`[::1]`, `[fe80::...]`,
-    ///   `[fc00::...]`).
-    /// - IPv4 dotted-quads in the loopback (`127.0.0.0/8`),
-    ///   link-local (`169.254.0.0/16`), private (`10.0.0.0/8`,
-    ///   `172.16.0.0/12`, `192.168.0.0/16`), and unspecified
-    ///   (`0.0.0.0`) ranges.
-    ///
-    /// Public so a future caller (e.g. a CLI subscription
-    /// importer) can apply the same rule.
+    /// Returns `true` for any host string pointing at the user's
+    /// own machine, link-local, or private / non-routable address
+    /// space — values a counterfeit panel could use to turn the
+    /// user's machine into a closed-loop SSRF source.
     public static func isBlockedHost(_ host: String) -> Bool {
         let normalised = host.trimmingCharacters(in: .whitespaces).lowercased()
         if normalised.isEmpty { return true }
-        // Hostname forms.
         if normalised == "localhost" { return true }
         if normalised.hasSuffix(".local") || normalised == "local" { return true }
-        // Bracketed IPv6 literal: strip the brackets and check
-        // canonical loopback / link-local / ULA prefixes. The
-        // engine's `ServerAddress::parse` requires brackets for
-        // IPv6 (round-3 fix), so this is the only IPv6 shape we
-        // can see here.
+        // Bracketed IPv6 literal (the only IPv6 shape
+        // `ServerAddress::parse` accepts).
         if normalised.hasPrefix("[") {
             let stripped = normalised.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             if stripped == "::1" || stripped == "::" { return true }
@@ -251,46 +177,32 @@ extension SubscriptionManifestV1 {
             }
             return false
         }
-        // IPv4 dotted-quad. Use Foundation's `inet_pton`-style
-        // parser via `IPv4Address` from the Network framework
-        // (available since macOS 10.14). Failed parse means it's
-        // a hostname — fall through to the allow-list at the
-        // end.
         let parts = normalised.split(separator: ".")
         if parts.count == 4, let a = UInt8(parts[0]), let b = UInt8(parts[1]),
             let c = UInt8(parts[2]), UInt8(parts[3]) != nil
         {
-            // 0.0.0.0 — unspecified.
-            if a == 0 && b == 0 && c == 0 { return true }
-            // 10.0.0.0/8 — private.
-            if a == 10 { return true }
-            // 127.0.0.0/8 — loopback.
-            if a == 127 { return true }
-            // 169.254.0.0/16 — link-local.
-            if a == 169 && b == 254 { return true }
-            // 172.16.0.0/12 — private.
-            if a == 172 && (16...31).contains(b) { return true }
-            // 192.168.0.0/16 — private.
-            if a == 192 && b == 168 { return true }
+            if a == 0 && b == 0 && c == 0 { return true }  // 0.0.0.0
+            if a == 10 { return true }  // 10.0.0.0/8
+            if a == 127 { return true }  // 127.0.0.0/8
+            if a == 169 && b == 254 { return true }  // 169.254.0.0/16
+            if a == 172 && (16...31).contains(b) { return true }  // 172.16.0.0/12
+            if a == 192 && b == 168 { return true }  // 192.168.0.0/16
         }
         return false
     }
 
-    /// Returns the first profile, or `nil` when the manifest
-    /// shipped with an empty profile list (which the panel won't
-    /// produce, but a hijacked or stub server might).
+    /// Returns the first profile, or `nil` on an empty profile
+    /// list (which a real panel won't produce).
     public var primaryProfile: SubscriptionProfileV1? {
         profiles.first
     }
 
     /// Validates the manifest against the schema-version,
-    /// profile-cardinality, capability-counterfeit,
-    /// issued-at-sentinel, forward-skew, expiry-ordering,
-    /// validity-window, expiry, and freshness rules — in that
-    /// order. Throws [`SubscriptionValidationError`] describing
-    /// the first violated rule. `now` is injected so tests don't
-    /// depend on wall-clock time. See the file-header comment for
-    /// the full list and rationale per rule.
+    /// profile-cardinality, blocked-host, capability-counterfeit,
+    /// issued-at, forward-skew, expiry-ordering, validity-window,
+    /// expiry, and freshness rules. Throws
+    /// [`SubscriptionValidationError`] describing the first
+    /// violated rule. `now` is injected for testability.
     public func validate(now: Date = Date()) throws {
         if version != 1 {
             throw SubscriptionValidationError.unsupportedVersion(got: version, expected: 1)
@@ -303,71 +215,33 @@ extension SubscriptionManifestV1 {
                 got: profiles.count, max: Self.maxProfiles
             )
         }
-        // Reject any profile whose `host` points at the user's own
-        // machine, link-local, or private/non-routable address
-        // space. A counterfeit panel returning
-        // `host: "127.0.0.1:8080"` would otherwise direct naive at
-        // whatever local service was listening — turning the user's
-        // machine into a closed-loop SSRF source against their own
-        // localhost, and (depending on what's listening there)
-        // potentially defeating same-origin assumptions for any
-        // request the user makes through the proxy. Matches by host
-        // string: bracketed IPv6 literals (`[::1]:443`) are
-        // recognised; hostname-string `localhost` and `*.local`
-        // (mDNS) are also blocked.
         for profile in profiles {
             if Self.isBlockedHost(profile.host) {
                 throw SubscriptionValidationError.blockedHost(profile.host)
             }
         }
-        // `capabilities.http3 == true` is documented in the schema
-        // as "always false from a real cool-tunnel-server
-        // deployment" — naive is HTTP/2-only, advertising HTTP/3
-        // would produce a recognisable QUIC fallback pattern. A
-        // `true` value here is a strong counterfeit signal.
         if capabilities.http3 {
             throw SubscriptionValidationError.counterfeitCapabilities
         }
-        // `issued_at` must be a real Unix timestamp. A real panel
-        // stamps `now()` at emission; the only source of `0` is a
-        // schema fixture or a counterfeit/stub server. Refuse
-        // outright so a stub manifest can't bypass the freshness
-        // check by sentinel.
+        // `0` is a schema sentinel; only stub or counterfeit
+        // servers emit it. Refuse so a stub manifest can't bypass
+        // the freshness check by sentinel.
         if issuedAt == 0 {
             throw SubscriptionValidationError.invalidIssuedAt
         }
         let nowSecs = UInt64(max(0, now.timeIntervalSince1970))
-        // Future-dated `issued_at` beyond clock-skew tolerance is
-        // refused. Without this guard, a counterfeit panel could
-        // pair `issued_at = now + 365 days` with a far-future
-        // `expires_at` and produce an indefinitely-valid manifest
-        // — every staleness check would trip the `now > issuedAt`
-        // gate and silently skip the age comparison. The 60 s
-        // window matches the panel's documented NTP discipline.
-        //
-        // Saturating add (not `&+`): wrapping defensive arithmetic
-        // is the wrong shape — on the `nowSecs > UInt64.max - 60`
-        // edge, a wrap would produce `skewCeiling ≈ 0` and
-        // *every* legitimate `issuedAt` would be flagged. The
-        // saturating form pins to `UInt64.max` instead, which
-        // correctly accepts any plausible `issuedAt` near the
-        // edge. (Year 5.84×10¹¹ AD problem: not ours.)
+        // Saturating add (not wrapping `&+`): on the
+        // `nowSecs > UInt64.max - 60` edge a wrap would produce
+        // `skewCeiling ≈ 0` and flag every legitimate `issuedAt`.
         let (sum, overflow) = nowSecs.addingReportingOverflow(Self.maxForwardSkew)
         let skewCeiling = overflow ? UInt64.max : sum
         if issuedAt > skewCeiling {
             throw SubscriptionValidationError.invalidIssuedAt
         }
-        // Malformed manifest where expiry precedes issuance. A
-        // real panel always emits `expires_at = issued_at + ttl`,
-        // so this can only be a stub or transcription error.
         if expiresAt < issuedAt {
             throw SubscriptionValidationError.malformedExpiry
         }
-        // Bound the validity window so an attacker can't pair a
-        // legitimate-looking `issued_at` with `expires_at =
-        // u64::MAX` and produce an indefinitely-valid manifest.
-        // Same saturating-add discipline as the skew ceiling
-        // above.
+        // Same saturating-add discipline as the skew ceiling.
         let (validityCap, validityOverflow) = issuedAt.addingReportingOverflow(Self.maxValidity)
         let maxExpires = validityOverflow ? UInt64.max : validityCap
         if expiresAt > maxExpires {
@@ -378,10 +252,9 @@ extension SubscriptionManifestV1 {
         if expiresAt <= nowSecs {
             throw SubscriptionValidationError.expired(at: expiresAt)
         }
-        // Freshness gate. Only meaningful when the client clock
-        // is at or after `issuedAt`; the future-skew guard above
-        // already rejected larger drifts, so this branch fires
-        // only on legitimate forward time.
+        // Freshness gate — only meaningful when client clock is at
+        // or after `issuedAt`; the future-skew guard above already
+        // rejected larger drifts.
         if nowSecs > issuedAt {
             let age = TimeInterval(nowSecs - issuedAt)
             if age > Self.maxAge {
@@ -394,56 +267,30 @@ extension SubscriptionManifestV1 {
 /// Reasons a manifest fetched from the panel is unusable.
 ///
 /// Routed through `TunnelOrchestrator.translate(_:)` into
-/// `SubscriptionImportError` for the UI, but conforms to
+/// `SubscriptionImportError` for the UI; conforms to
 /// `LocalizedError` so any direct render path also reads cleanly.
 public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
-    /// Manifest's `version` field is not `1`. The client only
-    /// understands V1 today; a future server might emit V2 alongside
-    /// V1 during a migration, but the URL is supposed to negotiate
-    /// the version and this client doesn't yet.
+    /// Manifest's `version` field is not `1`.
     case unsupportedVersion(got: UInt32, expected: UInt32)
-    /// Manifest had an empty `profiles` array. A real panel always
-    /// emits at least one entry; an empty list is a sign of a stub
-    /// or counterfeit server.
+    /// Empty `profiles` array.
     case noProfiles
-    /// Manifest carried more than [`SubscriptionManifestV1.maxProfiles`]
-    /// entries. A hostile panel packing thousands of profiles into
-    /// the 1 MB body cap is the only way to reach this — a real
-    /// subscription emits a small handful at most.
+    /// Profile count exceeds [`SubscriptionManifestV1.maxProfiles`].
     case tooManyProfiles(got: Int, max: Int)
-    /// `capabilities.http3 == true`. The schema documents this
-    /// flag as "always false from a real cool-tunnel-server
-    /// deployment" — `naive` is HTTP/2-only, so a `true` value
-    /// is a strong counterfeit signal that should refuse import
-    /// outright rather than warn.
+    /// `capabilities.http3 == true` (strong counterfeit signal —
+    /// real naive is HTTP/2-only).
     case counterfeitCapabilities
-    /// `issued_at` is `0` or future-dated beyond clock-skew
-    /// tolerance. Either is a counterfeit / stub signal — a real
-    /// panel stamps the manifest with `now()` at emission, never
-    /// with `0` and never far in the future.
+    /// `issued_at` is `0` or future-dated beyond clock-skew.
     case invalidIssuedAt
-    /// `expires_at < issued_at` — malformed manifest. Real panels
-    /// emit `expires_at = issued_at + ttl`; this can only happen
-    /// from a stub server or transcription error.
+    /// `expires_at < issued_at`.
     case malformedExpiry
-    /// `expires_at - issued_at > 1 year`. A counterfeit panel
-    /// pairing a legitimate-looking `issued_at` with `expires_at =
-    /// u64::MAX` would otherwise pass every other check. Real
-    /// subscriptions renew well inside a year.
+    /// `expires_at - issued_at > 1 year`.
     case validityTooLong(gotSeconds: UInt64, maxSeconds: UInt64)
-    /// `expires_at` is in the past — server tells the client to
-    /// re-fetch. The user pasted an old cached URL.
+    /// `expires_at` is in the past.
     case expired(at: UInt64)
-    /// `now - issued_at > 7 days` — almost always a caching proxy on
-    /// the user's network serving a stale copy. Re-fetch over a
-    /// different network typically resolves it.
+    /// `now - issued_at > 7 days` — typically a caching proxy.
     case stale(ageSeconds: TimeInterval)
-    /// A profile's `host` points at the user's own machine,
-    /// link-local, or private/non-routable address space. A
-    /// counterfeit panel using such a value would point naive at
-    /// whatever local service was listening, turning the user's
-    /// machine into a closed-loop SSRF source. Carries the
-    /// rejected host string for support diagnostic.
+    /// Profile's `host` is loopback / link-local / private (SSRF
+    /// risk). Carries the rejected host string for diagnostics.
     case blockedHost(String)
 
     public var errorDescription: String? {
@@ -479,16 +326,11 @@ public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
 
 extension SubscriptionManifestV1 {
     /// Builds a local [`Profile`] from the primary subscription
-    /// profile, using `localPort` as the user's chosen SOCKS
-    /// listener port (the manifest itself doesn't carry a local
-    /// port — that's a per-machine UI choice, not server-issued).
-    /// `id` defaults to the upstream `host:port` so a user importing
-    /// two subscriptions for the same server gets a stable, unique
-    /// identifier without picking one by hand.
+    /// profile. `localPort` is per-machine UI state, not server-
+    /// issued. `id` defaults to the upstream `host:port` for a
+    /// stable identifier across imports.
     ///
-    /// Returns `nil` when [`primaryProfile`] is absent (an empty
-    /// `profiles` array on the wire); use [`validate`] to surface a
-    /// real error before reaching here.
+    /// Returns `nil` when [`primaryProfile`] is absent.
     public func toLocalProfile(localPort: String, id: String? = nil) -> Profile? {
         guard let p = primaryProfile else { return nil }
         let profileID = id ?? "\(p.host):\(p.port)"

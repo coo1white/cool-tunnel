@@ -1,20 +1,10 @@
 # NaiveProxy Server Setup on Debian
 
-This guide shows how to build a working NaiveProxy + Caddy server on
-Debian.
+Build a working NaiveProxy + Caddy server on Debian.
 
-> ⚠️ **Replace every `<USERNAME>` and `<PASSWORD>` placeholder below
-> with strong, unique values that you generate fresh.** Pick a long
-> random password (e.g. `openssl rand -base64 24`); never copy a
-> literal example password from a guide — including this one — into
-> production. Earlier revisions of this file shipped a real password
-> by mistake; if you used those values verbatim, rotate them now.
+**Replace every `<USERNAME>` and `<PASSWORD>` placeholder below with strong, unique values that you generate fresh** (e.g. `openssl rand -base64 24`). Never copy a literal example password from a guide — including this one — into production. Earlier revisions of this file shipped a real password by mistake; if you used those values verbatim, rotate them now.
 
-## Prerequisites
-
-- Debian server with root access
-- Domain pointing to server IP
-- Docker installed
+Prerequisites: Debian server with root access, domain pointing to server IP, Docker installed.
 
 ## Files
 
@@ -46,11 +36,7 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 }
 ```
 
-**Important:**
-- Use `:443, DOMAIN` syntax (not just `DOMAIN`)
-- Include `tls your@email.com` directive
-- Use `root * /srv` with `file_server` (not `respond "OK"`)
-- Do not pin Caddy version (use `caddy:builder` and `caddy:latest`)
+Requirements: use `:443, DOMAIN` syntax (not just `DOMAIN`); include `tls your@email.com`; use `root * /srv` with `file_server` (not `respond "OK"`); do not pin Caddy version (use `caddy:builder` and `caddy:latest`); `order forward_proxy before file_server` is required.
 
 ### docker-compose.yml
 ```yaml
@@ -74,14 +60,12 @@ volumes:
   naive_caddy_config:
 ```
 
-## Setup Commands
+## Setup commands
 
 ```bash
-# Create project folder
 mkdir -p /opt/cool-tunnel
 cd /opt/cool-tunnel
 
-# Create Dockerfile
 cat > Dockerfile <<'EOF'
 FROM caddy:builder AS builder
 RUN xcaddy build \
@@ -90,7 +74,6 @@ FROM caddy:latest
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 EOF
 
-# Create Caddyfile (replace email and credentials)
 cat > Caddyfile <<'EOF'
 {
     order forward_proxy before file_server
@@ -109,11 +92,9 @@ cat > Caddyfile <<'EOF'
 }
 EOF
 
-# Create site folder
 mkdir -p site
 echo OK > site/index.html
 
-# Create docker-compose.yml
 cat > docker-compose.yml <<'EOF'
 services:
   cool-tunnel:
@@ -135,73 +116,36 @@ volumes:
   naive_caddy_config:
 EOF
 
-# Build and start
 docker compose build --no-cache
 docker compose up -d
 ```
 
-## Management Commands
+## Management
 
 ```bash
-# Check logs
-docker logs --tail 30 cool-tunnel
-
-# Watch logs in real-time
-docker logs -f cool-tunnel
-
-# Confirm forward_proxy module loaded
-docker exec cool-tunnel caddy list-modules | grep forward
-
-# Restart container
+docker logs --tail 30 cool-tunnel                              # check logs
+docker logs -f cool-tunnel                                     # watch in real-time
+docker exec cool-tunnel caddy list-modules | grep forward      # confirm forward_proxy loaded
 docker compose restart
-
-# Stop container
 docker compose down
-
-# Rebuild after changes
-docker compose down
-docker compose build --no-cache
-docker compose up -d
+docker compose down && docker compose build --no-cache && docker compose up -d   # rebuild after changes
 ```
 
 ## Testing
 
-### Test HTTPS directly
 ```bash
+# HTTPS directly — expected: OK
 curl -v https://proxy.example.com
-```
-Expected: `OK`
 
-### Test proxy directly from server
-```bash
+# Proxy directly from server — expected: shows server IP
 curl -v --proxy "https://<USERNAME>:<PASSWORD>@proxy.example.com:443" https://ipinfo.io
-```
-Expected: Shows server IP
 
-### Test from Mac client
-```bash
+# From Mac client — expected: HTTP/2 204
 curl -x socks5h://127.0.0.1:1080 -vk --max-time 30 https://www.google.com/generate_204
 ```
-Expected: `HTTP/2 204`
-
-## Key Points
-
-1. **Caddyfile syntax is critical** - use `:443, DOMAIN` format
-2. **Include TLS directive** - `tls your@email.com`
-3. **Use file_server as fallback** - `root * /srv file_server`
-4. **Do not use respond "OK"** - this breaks forward_proxy
-5. **Do not pin Caddy version** - use latest for compatibility
-6. **Order directive is required** - `order forward_proxy before file_server`
 
 ## Troubleshooting
 
-If you get `SSL_ERROR_SYSCALL` on Mac client:
-- Verify Caddyfile uses `:443, DOMAIN` syntax
-- Check that `tls` directive is present
-- Ensure `file_server` is used instead of `respond "OK"`
-- Confirm forward_proxy module is loaded: `docker exec cool-tunnel caddy list-modules | grep forward`
+`SSL_ERROR_SYSCALL` on Mac client: verify Caddyfile uses `:443, DOMAIN` syntax; check `tls` directive is present; ensure `file_server` (not `respond "OK"`); confirm forward_proxy module loaded (`docker exec cool-tunnel caddy list-modules | grep forward`).
 
-If container won't start:
-- Check port 80 and 443 are free: `ss -ltnp | grep -E ':80|:443'`
-- Stop conflicting services: `systemctl stop nginx apache2 caddy`
-- Check Docker logs: `docker logs cool-tunnel`
+Container won't start: check ports 80 and 443 are free (`ss -ltnp | grep -E ':80|:443'`); stop conflicting services (`systemctl stop nginx apache2 caddy`); check Docker logs (`docker logs cool-tunnel`).
