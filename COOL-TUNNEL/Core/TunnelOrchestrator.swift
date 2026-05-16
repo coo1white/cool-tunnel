@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
-// Core/TunnelOrchestrator.swift
 //
 // Single source of truth for the UI: combines `CoreClient`,
-// `SystemProxyController`, persistence, and filesystem paths into one
-// observable façade. Views read state from here and call its methods;
-// nothing else is `@Observable` in the app.
+// `SystemProxyController`, persistence, and filesystem paths
+// into one observable façade. Nothing else in the app is
+// `@Observable`.
 
 import Darwin
 import Foundation
@@ -41,21 +40,15 @@ public final class TunnelOrchestrator {
     public private(set) var activeMode: ProxyMode = .stopped
     public private(set) var isRunning: Bool = false
 
-    /// **v2.0.28 (Seamless Recovery Protocol):** live state of the
-    /// system-sleep / wake transition. Drives the `HeaderStatusPill`'s
-    /// transient *"Pausing for sleep…" / "Asleep" / "Recovering after
-    /// wake…"* labels so the user sees the recovery phases instead of
-    /// a stale *"Connected"* or *"Error"* pill while the orchestrator
-    /// is mid-cycle. `.idle` is the steady-state and never observed by
-    /// the user as a pill label — the base `isRunning` / `lastError`
-    /// rendering takes over.
+    /// Live state of the sleep / wake transition. Drives the
+    /// `HeaderStatusPill`'s transient labels; `.idle` is the
+    /// steady state and falls back to the base `isRunning` /
+    /// `lastError` rendering.
     public private(set) var sleepWakeState: SleepWakeState = .idle
 
-    /// Snapshot of `activeMode` taken at `handleSystemWillSleep`.
-    /// Re-applied by `handleSystemDidWake` to bring the proxy back
-    /// to the same mode the user was running before the system
-    /// suspended — autonomously, without an operator click.
-    /// Cleared once the wake recovery completes (success or failure).
+    /// Snapshot of `activeMode` at `handleSystemWillSleep`,
+    /// re-applied autonomously on wake. Cleared once recovery
+    /// completes (success or failure).
     private var modeBeforeSleep: ProxyMode?
     public private(set) var logEntries: [LogEntry] = []
     public private(set) var firewallState: FirewallState = .unknown
@@ -64,14 +57,9 @@ public final class TunnelOrchestrator {
     public private(set) var developerMetrics: DeveloperMetrics = .idle
     public private(set) var lastError: String?
 
-    /// **v2.0.29 (Deterministic Error Reporting):** layer attribution
-    /// for the most recent connection failure. Set whenever `recordError`
-    /// is called from a connection-failure path; cleared on successful
-    /// `start()` / `switchMode()`. Renders as a chip on the
-    /// `HeaderView` error banner — `[ISP]` / `[VPS]` / `[Local Kernel]`.
-    /// `nil` means "no layer attributed" (operational error, or
-    /// classification was inconclusive); the banner falls back to the
-    /// pre-2.0.29 plain-text rendering.
+    /// Layer attribution for the most recent connection failure.
+    /// Renders as a `[ISP]` / `[VPS]` / `[Local Kernel]` chip on
+    /// the error banner. `nil` falls back to plain-text rendering.
     public private(set) var lastErrorLayer: ErrorLayer?
 
     // MARK: - Dependencies (injected; defaultable)
@@ -87,54 +75,32 @@ public final class TunnelOrchestrator {
 
     private var eventTask: Task<Void, Never>?
     private var didBootstrap: Bool = false
-    /// Hardware-derived cap on retained log entries — 1000 on a
-    /// modern Apple Silicon, 600 on a mid-tier Mac, 300 on older
-    /// Intel hardware. A lower cap keeps the SwiftUI diff cheap on
-    /// every append, which is the hot path that gets noticeable
-    /// pause-spikes if naive starts streaming hundreds of lines a
-    /// second on a flaky network.
+    /// Hardware-derived cap on retained log entries: a lower cap
+    /// keeps the SwiftUI diff cheap on a flaky-network burst.
     private let maxLogEntries: Int = PerformanceProfile.current.maxLogEntries
-    /// In-flight task for [`refreshNaiveDescriptor`]. The Settings
-    /// view's `.task` can fire two refreshes back-to-back if the
-    /// user opens / dismisses / reopens the sheet quickly; without
-    /// this each invocation would spawn its own `lipo` +
-    /// `--version` subprocess pair and stomp the cached descriptor.
-    /// Late callers `await` the existing task instead of spinning
-    /// (the old `while … { await Task.yield() }` was a MainActor
-    /// busy-loop that pinned a CPU under contention).
+    /// In-flight task for [`refreshNaiveDescriptor`]. Late callers
+    /// `await` the existing task rather than spawning duplicate
+    /// `lipo` + `--version` subprocess pairs.
     private var refreshNaiveTask: Task<Void, Never>?
 
-    /// In-flight debounced settings autosave; cancelled and
-    /// replaced on every `persistSettings()` call so a rapid burst
-    /// of edits collapses into a single write.
+    /// Debounced settings autosave; replaced on every call so a
+    /// burst collapses into a single write.
     private var persistSettingsTask: Task<Void, Never>?
 
-    /// Single-flight guard for the `listeningOutsideLoopback`
-    /// auto-stop. A burst of anomaly events would otherwise queue
-    /// duplicate `stop()` tasks racing on `activeMode`.
+    /// Single-flight guard for `listeningOutsideLoopback`
+    /// auto-stop. Defeats the queued-stop race on a burst.
     private var autoStopTask: Task<Void, Never>?
     private var selfHealTask: Task<Void, Never>?
     private var vpsHealthTask: Task<Void, Never>?
-    /// Single-flight guard for the credential auto-sync flow.
-    /// Triggered by HTTP-407-class auth failures in the engine's
-    /// stderr stream when the active profile has a
-    /// `subscriptionURL`. A burst of auth-failure log lines from
-    /// a single failed start would otherwise queue duplicate
-    /// re-fetches against the panel; once one is in flight, every
-    /// other auth-failure line in the same window is a no-op.
+    /// Single-flight guard for credential auto-sync. A burst of
+    /// HTTP-407-shaped stderr lines from one failed start would
+    /// otherwise queue duplicate re-fetches against the panel.
     private var credentialAutoSyncTask: Task<Void, Never>?
-    /// Timestamp of the last auto-sync attempt (success or
-    /// failure). Pairs with `credentialAutoSyncCooldown` to keep
-    /// a continuously-retrying engine from hammering the
-    /// subscription panel — once the sync runs and returns "no
-    /// drift," any further auth-failure stderr lines in the
-    /// cooldown window are accepted and dropped, not retried.
+    /// Timestamp of the last auto-sync attempt. Pairs with
+    /// `credentialAutoSyncCooldown` so a continuously-retrying
+    /// engine can't hammer the panel.
     private var lastCredentialAutoSyncAt: ContinuousClock.Instant?
-    /// Lower bound between consecutive auto-sync attempts. 30 s
-    /// is long enough to let a transient panel hiccup self-heal,
-    /// short enough that a real credential rotation propagates
-    /// to the operator within one minute even if the first sync
-    /// races a panel restart.
+    /// Lower bound between auto-sync attempts.
     private static let credentialAutoSyncCooldown: Duration = .seconds(30)
     private var lastTrafficSnapshot: TrafficSnapshotState?
     private var pendingLogEntries: [LogEntry] = []
@@ -143,18 +109,10 @@ public final class TunnelOrchestrator {
     private let maxLogBatchEntries: Int = PerformanceProfile.current.maxLogBatchEntries
     private let maxLogLineCharacters: Int = PerformanceProfile.current.maxLogLineCharacters
 
-    /// Cached descriptor for the naive binary the app is currently
-    /// configured to spawn. Populated on bootstrap and after each
-    /// settings change so the Settings view can render the chip / arch
-    /// summary without firing extra subprocesses.
+    /// Cached descriptor for the naive binary the app is
+    /// configured to spawn. Settings reads from this rather than
+    /// re-firing `lipo` / `--version` subprocesses.
     public private(set) var activeNaiveDescriptor: NaiveBinaryDescriptor?
-
-    // `hostArchitecture` was previously re-exported here as a
-    // convenience for the Settings view. Removed because
-    // `HostArchitecture.current` is itself a static cached value
-    // — the orchestrator was just a second alias adding no value
-    // and inflating its public surface. Settings now reads
-    // `HostArchitecture.current` directly.
 
     // MARK: - Construction
 
@@ -184,18 +142,11 @@ public final class TunnelOrchestrator {
         )
     }
 
-    /// Builds an orchestrator wired with default dependencies sourced from
-    /// the running app bundle.
+    /// Builds an orchestrator with default dependencies.
     public static func bootstrap() -> TunnelOrchestrator {
-        // Try the real Application Support directory first. If that
-        // genuinely cannot be created (sandbox quirk, broken home
-        // dir, full disk on `/Users`) we degrade to a temporary
-        // directory and surface the failure as `lastError` after
-        // construction — the user sees a real error message
-        // explaining why Start fails, instead of a `fatalError`
-        // that takes down the app with no UI feedback. LTSC users
-        // landing security fixes in 2027 cannot afford boot-time
-        // crashes that bypass every diagnostic surface.
+        // Degrade to a temp dir + visible `lastError` rather than
+        // `fatalError` if Application Support is unavailable —
+        // boot-time crashes bypass every diagnostic surface.
         let paths: AppSupportPaths
         var bootstrapError: String?
         do {
@@ -206,14 +157,10 @@ public final class TunnelOrchestrator {
             paths = AppSupportPaths.fallback()
         }
 
-        // Pick the engine binary the orchestrator will spawn. The
-        // settings store is read here (no I/O beyond UserDefaults
-        // — no credential store, no keychain) so we honour any
-        // `customRustCorePath` the user installed via the Settings
-        // → Rust Core → Update flow on a previous run. Falls back
-        // to the bundled binary when the path is empty or the
-        // file no longer exists (e.g. the user manually removed
-        // the managed copy under Application Support).
+        // Read settings (UserDefaults only — no credential store)
+        // so a custom `customRustCorePath` from a previous
+        // Settings → Rust Core → Update is honoured. Falls back
+        // to the bundled binary on missing override.
         let savedSettings = SettingsStore().load()
         let bundledCore = RustCoreResolver.bundledURL()
         let executableURL: URL
@@ -225,15 +172,13 @@ public final class TunnelOrchestrator {
             executableURL = bundledCore
         }
 
-        // v0.1.5.5: passwords moved off the macOS Keychain by default.
-        // The file-backed store writes to ~/Library/Application Support/
-        // COOL-TUNNEL/credentials.json with mode 0600 — same protection
-        // posture as Keychain on a single-user Mac, but no system
-        // password prompt fires when the app launches under a fresh
-        // ad-hoc-signed binary hash. The Keychain stays wired as the
-        // *legacy* leg of `MigratingCredentialStore` so users upgrading
-        // from v0.1.5.4 keep their saved passwords; the migration only
-        // runs on a user-initiated Start, never at boot.
+        // Passwords default to a file-backed store at
+        // `~/Library/Application Support/COOL-TUNNEL/credentials.json`
+        // mode 0600. Same posture as Keychain on a single-user
+        // Mac, without the system password prompt that fires
+        // when the ad-hoc-signed binary hash changes. Keychain
+        // stays as the legacy leg of `MigratingCredentialStore`
+        // for upgrades from pre-Keychain-migration builds.
         let fileStore = FileCredentialStore.defaultStore(paths: paths)
         let credentials = MigratingCredentialStore(
             primary: fileStore,
@@ -257,29 +202,22 @@ public final class TunnelOrchestrator {
 
     /// Loads persisted state and starts the engine. Idempotent.
     ///
-    /// Performs **exactly one** code-signature check before the UI
-    /// appears: `cool-tunnel-core` is verified inside [`CoreClient.start`]
-    /// because the engine has to launch for the app to function. The
-    /// bundled `naive` binary is **not** verified here — its signature,
-    /// host-arch slice, and `--version` output are inspected lazily the
-    /// first time the user opens Settings or clicks Start, so launch
-    /// stays fast and we avoid pre-paying authentication cost the user
-    /// may never need (read-only profile browsing doesn't spawn naive).
+    /// Verifies `cool-tunnel-core` inside [`CoreClient.start`]
+    /// (it has to launch for the app to function). The bundled
+    /// `naive` binary is NOT verified here — its sig / arch /
+    /// version are inspected lazily on first Settings open or
+    /// Start, so read-only profile browsing doesn't pre-pay the
+    /// authentication cost.
     public func bootstrapIfNeeded() async {
-        // **UX-F#16 (v0.1.7.19):** the `subscribeToEvents`
-        // stream-end handler now flips `didBootstrap = false`
-        // when the engine dies, so this guard correctly
-        // re-bootstraps (re-spawns the engine) on the
-        // next call rather than short-circuiting.
+        // `subscribeToEvents` flips `didBootstrap = false` on
+        // engine death so a follow-up call re-spawns.
         guard !didBootstrap else { return }
         recordTelemetry("bootstrap.begin")
 
-        // **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep
-        // BEFORE any other startup work. If the previous run
-        // died with system proxy enabled, the user's network
-        // is currently broken — disable the proxy first so
-        // `firewall.currentState()` and any subsequent
-        // network-touching calls actually work.
+        // Crash-recovery sweep BEFORE other startup work: if the
+        // previous run died with system proxy enabled, the user's
+        // network is currently broken and subsequent
+        // network-touching calls would fail.
         await recoverFromCrashIfNeeded()
 
         profiles = profileStore.loadProfiles()
@@ -290,41 +228,23 @@ public final class TunnelOrchestrator {
         do {
             try await core.start()
             subscribeToEvents()
-            // Only flip the guard on success so a future call (e.g.
-            // a Retry button after a transient launch failure) can
-            // re-attempt the engine spawn instead of permanently
-            // short-circuiting on the previous failure.
+            // Flip the guard only on success so a Retry button
+            // can re-attempt after a transient launch failure.
             didBootstrap = true
             recordTelemetry("bootstrap.success")
         } catch {
-            // **v2.0.29:** engine spawn failure is local-kernel-by-construction
-            // — the Rust core couldn't be exec'd, the JSON-over-stdio
-            // pipe never opened, or the orchestrator's own bootstrap
-            // path threw. Hardcoded `.localKernel`; running the classifier
-            // would only confirm what we already know.
+            // Engine spawn failure is local-kernel-by-construction;
+            // the classifier would only confirm what we know.
             recordError("engine failed to start: \(error)", layer: .localKernel)
             recordTelemetry("bootstrap.failure", layer: .localKernel, message: error.localizedDescription)
         }
     }
 
-    /// Re-inspects the active naive binary and caches the descriptor for
-    /// the Settings view. Called from `SettingsView.onAppear` (lazy first
-    /// inspection) and after the user changes the override path so the
-    /// chip / arch summary stays accurate. **Not** called from
-    /// `bootstrapIfNeeded` — see that method's docs for the rationale.
-    ///
-    /// Re-entrant calls overlap when the user opens / dismisses /
-    /// reopens Settings rapidly. We guard with `isRefreshingNaive` so
-    /// only one inspection runs at a time; subsequent callers get the
-    /// cached descriptor produced by the first call.
+    /// Re-inspects the active naive binary and caches the
+    /// descriptor for the Settings view. Coalesces concurrent
+    /// refreshes onto the in-flight task — a MainActor busy-loop
+    /// would pin a CPU and starve the UI.
     public func refreshNaiveDescriptor() async {
-        // Coalesce concurrent refreshes onto the in-flight task
-        // instead of spinning. The previous `while isRefreshingNaive
-        // { await Task.yield() }` was a MainActor busy-loop — under
-        // contention it pinned a CPU and starved the UI. Holding a
-        // single shared `Task` lets late callers `await` for free,
-        // and dropping the cached task inside `defer` means the next
-        // call genuinely re-runs the resolver.
         if let inFlight = refreshNaiveTask {
             await inFlight.value
             return
@@ -334,11 +254,9 @@ public final class TunnelOrchestrator {
             do {
                 self.activeNaiveDescriptor = try await self.naiveResolver.resolve(settings: self.settings)
             } catch let error as NaiveResolverError {
-                // **v2.0.29:** naive binary failure is local-kernel-by-construction.
                 self.recordError("naive binary unusable: \(error.localizedDescription)", layer: .localKernel)
                 self.activeNaiveDescriptor = nil
             } catch {
-                // **v2.0.29:** naive binary inspection failure is local-kernel-by-construction.
                 self.recordError(
                     "naive binary inspection failed: \(error.localizedDescription)",
                     layer: .localKernel)
@@ -350,11 +268,9 @@ public final class TunnelOrchestrator {
         refreshNaiveTask = nil
     }
 
-    /// Stops the engine and reverts the system proxy. Called from
-    /// `AppDelegate.applicationWillTerminate` on real app quit.
-    /// Sets `isShuttingDown = true` so the event-stream-end handler
-    /// in `subscribeToEvents` knows the upcoming silence is
-    /// expected (and not an engine crash).
+    /// Stops the engine and reverts the system proxy. Sets
+    /// `isShuttingDown` so the event-stream-end handler knows
+    /// the upcoming silence is expected (not an engine crash).
     public func shutdown() async {
         recordTelemetry("shutdown.begin")
         isShuttingDown = true
@@ -365,16 +281,14 @@ public final class TunnelOrchestrator {
         credentialAutoSyncTask?.cancel()
         credentialAutoSyncTask = nil
         flushPendingLogs()
-        // Flush any pending debounced settings write before we go
-        // away — without this, a settings edit made <250ms before
-        // Cmd+Q would be silently dropped.
+        // Flush the debounced settings write — without this, an
+        // edit made <250 ms before Cmd+Q is silently dropped.
         flushSettings()
         eventTask?.cancel()
         eventTask = nil
         try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
-        // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel after
-        // clean disable so next launch's recovery scan doesn't
-        // fire spuriously.
+        // Clear the sentinel so next launch's recovery scan
+        // doesn't fire spuriously.
         ProxyActiveFlag.clear(
             at: ProxyActiveFlag.path(in: paths.supportDirectory))
         await core.stop()
@@ -391,62 +305,36 @@ public final class TunnelOrchestrator {
         recordTelemetry("shutdown.success")
     }
 
-    /// Set true the moment the orchestrator is about to tear the
-    /// engine down on purpose. Lets the `subscribeToEvents` loop
-    /// distinguish "the user quit the app" from "the engine just
-    /// died on us" when its event stream finishes.
+    /// True from the moment we begin tearing the engine down on
+    /// purpose. Lets `subscribeToEvents` distinguish "user quit"
+    /// from "engine died on us" when the event stream finishes.
     private var isShuttingDown: Bool = false
 
-    /// **Lifecycle-F#7 (v0.1.7.19):** transition lock. While
-    /// true, `switchMode` / `start` / `stop` short-circuit to
-    /// no-op. Without this, a user who clicks Smart at t=0 and
-    /// Global at t=50 ms (mid-`stopQuiet`) gets two concurrent
-    /// transitions racing on `paths.configFile`,
-    /// `proxyController` state, and `core.send(...)` ordering.
-    /// Both transitions write `naive`'s config; whichever wins
-    /// the file race is what naive sees, and the system proxy
-    /// state is whatever the last `enableX` call applied. The
-    /// flag makes "second click while a transition is in
-    /// flight" a clean no-op — the user's first intent wins.
+    /// Transition lock. Two concurrent mode switches would race
+    /// on `paths.configFile`, `proxyController` state, and
+    /// `core.send` ordering; the second click is a clean no-op.
     private var transitionInFlight: Bool = false
 
-    /// **Engine-F#P1.2 (v0.2):** suppresses the
-    /// `stateChanged(false)` recovery-error path while a
-    /// user-initiated stop is in flight. Without this, every
-    /// clean Stop produces a misleading "naive stopped
-    /// unexpectedly — system proxy reverted" banner one tick
-    /// later — naive's intentional shutdown event arrives at
-    /// `handle(event:)` before `stop()` has reached its
-    /// `isRunning = false` line, so the recovery branch fires
-    /// for what was actually a healthy shutdown. Set true at
-    /// the head of `stop()` and `stopQuiet()`, cleared in their
-    /// `defer`. The event handler reads it as part of the
-    /// existing `wasRunning && !isShuttingDown` guard.
+    /// Suppresses the `stateChanged(false)` recovery-error path
+    /// for the duration of a user-initiated stop. Without this,
+    /// naive's intentional shutdown event arrives before
+    /// `stop()` sets `isRunning = false`, and the recovery
+    /// branch fires for a healthy shutdown.
     private var userStopInFlight: Bool = false
 
-    /// **UX-F#3 (v0.1.7.19):** captured at start time so
-    /// `selectedProfile.set` can detect "user edited the
-    /// active profile while connected" and surface a banner.
-    /// Without this, a profile-field edit silently keeps the
-    /// running engine using the old config, but the form
-    /// shows the new value — confusing.
+    /// Profile ID the engine started with — separate from
+    /// `selectedProfileID` so `selectedProfile.set` can detect
+    /// "user edited the active profile while connected" and
+    /// surface a banner instead of silently keeping the running
+    /// engine on the old config.
     private var activeProfileID: String?
 
-    /// **UX-F#6 (v2.0.14):** dirty flag set by the
-    /// `selectedProfile.set` UX-F#3 detection path. While `true`
-    /// the running naive instance's config is stale; a mode
-    /// switch must therefore go through the full
-    /// stop-engine / start-engine path so naive picks up the
-    /// edits. Cleared on every successful `startCore` —
-    /// re-launching the engine resyncs naive to the current
-    /// profile, so subsequent mode switches can take the
-    /// no-restart hot-swap path again.
-    ///
-    /// The flag is intentionally separate from `lastError` (which
-    /// the same setter writes a banner into) — `lastError` is a
-    /// user-facing surface that may be cleared independently
-    /// (e.g. dismissing a banner) without affecting the
-    /// orchestrator's internal "engine config is stale" truth.
+    /// Dirty flag: when true, the running naive's config is
+    /// stale and a mode switch must go through the full
+    /// stop-engine / start-engine path rather than the no-restart
+    /// hot-swap. Separate from `lastError` so dismissing the
+    /// banner doesn't accidentally clear the orchestrator's
+    /// internal "config is stale" truth.
     private var activeProfileEdited: Bool = false
 
     // MARK: - Profile management
@@ -458,44 +346,25 @@ public final class TunnelOrchestrator {
         }
         set {
             guard let updated = newValue else { return }
-            // **UX-F#3 (v0.1.7.19):** detect "user edited the
-            // active profile while connected" and surface a
-            // banner. The running engine's config is locked at
-            // the start-of-session moment; subsequent edits are
-            // silently buffered for the next start. Without
-            // this banner, users edit the server field, see
-            // their input persist (correct), but get confused
-            // when their browser keeps using the old server.
-            // We flag it but don't auto-restart — restart-on-
-            // edit could lose mid-session work for users who
-            // are just typing a new draft profile.
+            // Detect "user edited the active profile while
+            // connected" and surface a banner. We flag (not
+            // auto-restart) — restart-on-edit could drop in-flight
+            // work for users typing a draft.
             if isRunning, let active = activeProfileID, active == updated.id {
                 let prior = profiles.first(where: { $0.id == updated.id })
                 if let prior = prior, prior != updated {
                     lastError =
                         "Profile edits applied — click Stop, then a mode chip to use them. The running connection is still on the old config."
-                    // **UX-F#6 (v2.0.14):** mark the running
-                    // engine's config as stale so subsequent
-                    // `switchMode` calls take the full restart
-                    // path (which picks up the edits) instead of
-                    // the no-restart hot-swap path (which would
-                    // keep naive on the old config).
+                    // Mark the running engine's config stale so a
+                    // subsequent `switchMode` takes the full
+                    // restart path that picks up the edits.
                     activeProfileEdited = true
                 }
             }
-            // **v2.0.25 hotfix:** previously this was an
-            // update-in-place only — `if let index { profiles[index]
-            // = updated }`. When the assigned profile carried an id
-            // not present in `profiles` (the subscription-import
-            // path's `selectedProfile?.id ?? UUID().uuidString`
-            // fallback fires, or the previous selectedProfileID was
-            // dangling), the new profile was silently dropped:
-            // `selectedProfileID` advanced to the phantom id but the
-            // array — and therefore `save(profiles:)` and the
-            // credential store — never saw the imported credentials.
-            // Result: subscription-imported password not saved on
-            // next launch. Append-when-not-found makes any value
-            // assigned through `selectedProfile =` persistent.
+            // Append-when-not-found so a value assigned with an
+            // id not yet in `profiles` (subscription-import path
+            // / dangling selectedProfileID) is persisted rather
+            // than dropped.
             if let index = profiles.firstIndex(where: { $0.id == updated.id }) {
                 profiles[index] = updated
             } else {
@@ -527,21 +396,15 @@ public final class TunnelOrchestrator {
         selectedProfileID = profiles.first?.id
         profileStore.save(profiles: profiles)
         profileStore.save(selectedID: selectedProfileID)
-        // Delete the credential entry for the removed profile so a
-        // stale entry does not linger if the user later creates a new
-        // profile with the same id (e.g. another "default"). Goes
-        // through the migrating store so the legacy Keychain copy is
-        // cleaned up too.
+        // Delete the credential entry too — through the migrating
+        // store so the legacy Keychain copy is cleaned up.
         profileStore.deletePassword(forProfileID: id)
     }
 
-    /// Debounced settings autosave. The Settings view binds form
-    /// fields directly to `settings` and calls this on every
-    /// keystroke; the previous unconditional `settingsStore.save`
-    /// wrote the full UserDefaults blob once per character. The
-    /// 250ms coalesce window means a typed paragraph turns into a
-    /// single write; an explicit `commit()` (Done button) still
-    /// flushes immediately via `flushSettings()`.
+    /// Debounced settings autosave (250 ms). Bound directly to
+    /// SwiftUI form fields so a typed paragraph collapses into
+    /// one write; `flushSettings()` flushes synchronously on
+    /// explicit commit.
     public func persistSettings() {
         persistSettingsTask?.cancel()
         persistSettingsTask = Task { [weak self] in
@@ -561,32 +424,19 @@ public final class TunnelOrchestrator {
 
     // MARK: - Subscription import
 
-    /// Fetches a subscription manifest from `urlString` and imports the first
-    /// profile's credentials into the selected profile (or a new profile if
-    /// none is selected). Throws a typed [`SubscriptionImportError`] keyed
-    /// on the failure mode so the UI can surface actionable banners
-    /// (revoked, expired, server-down) instead of a single generic message.
+    /// Fetches a subscription manifest from `urlString` and
+    /// imports its first profile's credentials. Throws typed
+    /// [`SubscriptionImportError`] keyed on the failure mode so
+    /// the UI banner can match (revoked / expired / server-down).
     ///
-    /// **Status-code mapping (Hardening v2.0.18-pre).** Laravel-side
-    /// failures land on three buckets:
-    /// - `401` — authenticated but the token resolves to a disabled /
-    ///   expired / quota-exceeded account (`isActive() == false`).
-    /// - `404` / `422` — token malformed or unknown. NOTE: the
-    ///   server's `SubscriptionController` deliberately serves the
-    ///   cover-site response for these to defeat enumeration, so the
-    ///   client typically sees a `200 text/html` instead. The
-    ///   manifest-decode-fails branch below handles that case.
-    /// - `5xx` — the panel is down or APP_KEY is misconfigured.
-    /// All three become distinct `SubscriptionImportError` cases below
-    /// so the SwiftUI banner copy can match the failure mode.
+    /// Note: 404 / 422 don't reach this branch in practice — the
+    /// panel's `SubscriptionController` deliberately serves the
+    /// cover-site response to defeat enumeration, so the client
+    /// typically sees `200 text/html` and routes through the
+    /// manifest-decode-fails branch.
     public func importFromSubscriptionURL(_ urlString: String) async throws {
-        // Validate the URL shape (https:// + parseable) up-front so
-        // we surface `invalidURL` before paying for a fetch attempt.
-        // `SubscriptionClient.parseURL` enforces the same rules; we
-        // pre-call here so a malformed input throws the right
-        // user-facing error rather than the client's
-        // `malformedURL`/`nonHTTPSURL` distinction the UI would just
-        // collapse anyway.
+        // Up-front URL validation so a malformed input surfaces
+        // as `invalidURL` rather than paying for a fetch.
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard
             let url = URL(string: trimmed),
@@ -594,16 +444,11 @@ public final class TunnelOrchestrator {
         else {
             throw SubscriptionImportError.invalidURL
         }
-        // **OPSEC (post-v2.0.50):** never log the raw subscription
-        // string. The path of a panel URL typically embeds the
-        // operator's subscription token (e.g.
-        // `/api/v1/subscription/<TOKEN>`); the previous form
-        // (`url.host ?? urlString`) fell back to the full string
-        // when `url.host` was nil (edge case: `https:///path` or
-        // similar parser-permissive shapes), leaking the token
-        // into the in-memory log AND the lifecycle-telemetry
-        // file. Log host-only; if even the host can't be
-        // resolved, log a fixed-shape placeholder.
+        // Never log the raw subscription string — the URL path
+        // typically embeds the subscription token. A
+        // `url.host ?? urlString` fallback would leak the token
+        // for `https:///path` and similar parser-permissive
+        // shapes. Log host only.
         let host = url.host.flatMap { $0.isEmpty ? nil : $0 } ?? "<unknown>"
         appendInfo("subscription: fetching \(host)…")
 
@@ -614,64 +459,38 @@ public final class TunnelOrchestrator {
             throw Self.translate(err)
         }
 
-        // The client's `validate` already rejected an empty profile
-        // list; this guard is defence-in-depth and matches the
-        // existing public error type.
+        // Defence-in-depth — `manifest.validate` already
+        // rejected an empty profile list.
         guard let primary = manifest.primaryProfile else {
             throw SubscriptionImportError.noProfiles
         }
 
-        // Preserve the user's chosen `localPort` and existing
-        // profile id (if any) — the manifest is the source of
-        // truth for credentials, not for per-machine UI state.
-        // **v2.0.21 (Phase A fix):** previously the `host:port`
-        // field was dropped on import — `Profile.server` got just
-        // `first.host`. Subscriptions for panels on non-default
-        // ports lost the port and silently fell back to the
-        // engine's hardcoded :443. Now we serialize `host:port`
-        // straight from the manifest's `ProfileV1`.
+        // Preserve user's `localPort` and existing profile id —
+        // the manifest is authoritative for credentials, not
+        // per-machine UI state. `subscriptionURL` is persisted so
+        // the auth-failure auto-sync flow can re-fetch when the
+        // upstream rotates credentials.
         let imported = Profile(
             id: selectedProfile?.id ?? UUID().uuidString,
             server: "\(primary.host):\(primary.port)",
             username: primary.username,
             password: primary.password,
             localPort: selectedProfile?.localPort ?? "1080",
-            // **Auto-sync foundation (post-v2.0.48):** remember
-            // the URL we just imported from so the auth-failure
-            // auto-sync flow can re-fetch transparently when the
-            // upstream rotates credentials. Stored on the
-            // profile, persisted via ProfileStore alongside the
-            // other fields.
             subscriptionURL: trimmed
         )
         selectedProfile = imported
-        // Username deliberately omitted — the in-memory log buffer
-        // backs the LogConsole's copy-to-pasteboard / share path,
-        // and the engine treats usernames as account identifiers
-        // worth redacting (`core/src/domain/credentials.rs`
-        // `Username::Display` returns `"***"`). Matching that
-        // discipline on the Mac side avoids leaking the username
-        // into a support log the user pastes into a ticket.
-        // **OPSEC (post-v2.0.50):** previously logged
-        // `\(primary.host):\(primary.port)`, which leaked the
-        // operator's proxy hostname into the in-memory log + the
-        // lifecycle-telemetry file (the same redaction gap the
-        // v2.0.47 debug_handshake fix closed at a different
-        // callsite). Hostname:port is operator-fingerprinting
-        // infrastructure metadata; the import-success message
-        // doesn't need it to be useful.
+        // Don't log username (treated as account identifier by
+        // the engine's redaction) or `host:port` (operator-
+        // fingerprinting infrastructure metadata).
         appendInfo("subscription: imported new credentials")
     }
 
-    /// Translates a [`SubscriptionClientError`] (transport-shape
-    /// failures) into the UI-facing [`SubscriptionImportError`]
-    /// (failure-mode-shape errors, paired with actionable banner
-    /// copy in `errorDescription`). Status-code routing matches
-    /// the panel's `SubscriptionController` defensive-CDN cases:
-    /// the panel itself answers every error with a 200 cover-site,
-    /// so the explicit 4xx/5xx branches only fire when something
-    /// in front of the panel (CDN, proxy interposition, DNS
-    /// hijack) returns its own status.
+    /// Translates `SubscriptionClientError` (transport shape) to
+    /// `SubscriptionImportError` (UI failure mode). The panel
+    /// itself answers every error with a 200 cover-site, so the
+    /// 4xx/5xx branches fire only when something in front of the
+    /// panel (CDN, proxy interposition, DNS hijack) returns its
+    /// own status.
     private static func translate(_ err: SubscriptionClientError) -> SubscriptionImportError {
         switch err {
         case .malformedURL, .nonHTTPSURL:
@@ -687,11 +506,8 @@ public final class TunnelOrchestrator {
             default: return .unexpectedStatus(code)
             }
         case .malformedManifest, .unexpectedContentType:
-            // 200 + non-manifest body (or non-JSON Content-Type)
-            // is the cover-site path the panel uses for any
-            // rejected token — UI surfaces this as `tokenInvalid`
-            // so the user understands the URL didn't match an
-            // account.
+            // Cover-site path for any rejected token — UI shows
+            // "URL didn't match an account".
             return .tokenInvalid
         case .oversizeBody(let cap):
             return .manifestTooLarge(cap: cap)
@@ -704,12 +520,10 @@ public final class TunnelOrchestrator {
             case .tooManyProfiles, .counterfeitCapabilities,
                 .invalidIssuedAt, .malformedExpiry, .validityTooLong,
                 .blockedHost:
-                // All six signal a stub or counterfeit manifest.
-                // The user action is identical: do not connect,
-                // contact the operator. Lumping into one UI case
-                // keeps the banner copy clear; support can pivot
-                // on the os_log entry that includes the structured
-                // reason if a real distinction matters.
+                // All six are stub/counterfeit signals with the
+                // same user action ("do not connect"); collapse
+                // to one banner. Support can pivot on the
+                // structured os_log entry if needed.
                 return .manifestCounterfeit
             case .expired:
                 return .manifestExpired
@@ -722,55 +536,24 @@ public final class TunnelOrchestrator {
 
     // MARK: - Mode switching
 
-    /// Atomically switches the *active* proxy mode. Three cases:
+    /// Atomically switches the active proxy mode.
     ///
-    /// 1. Proxy is stopped → equivalent to `start(mode:)`
-    /// 2. Proxy is running in `mode` already → no-op (don't bounce
-    ///    the supervisor for a click that selects the current mode)
-    /// 3. Proxy is running in a *different* mode → stop, then start in
-    ///    the new mode in one shot — the UI sees a single observable
-    ///    transition (`activeMode` flips old→new at the very end of
-    ///    the bring-up); `isRunning` never blinks false.
+    /// - Stopped → equivalent to `start(mode:)`.
+    /// - Already running in `mode` → no-op.
+    /// - Running in a different mode → hot-swap with a single
+    ///   observable transition. `isRunning` never blinks false.
     ///
-    /// This is what powers the single-button mode picker in the UI:
-    /// tapping a mode chip while the tunnel is live hot-swaps it
-    /// instead of forcing the user to stop first.
-    ///
-    /// **UX-F#5 (v2.0.13):** publish-state suppression during a
-    /// hot-swap. The earlier implementation flipped
-    /// `isRunning = false` and `activeMode = .stopped` inside
-    /// `stopQuiet`, then flipped them back to true / newMode at the
-    /// end of `startCore`. Between the two flips SwiftUI got at least
-    /// one render opportunity (every `await` yield is a render
-    /// boundary), so the Stop button visibly blinked through "Start"
-    /// and the mode picker briefly de-highlighted every segment.
-    /// Now `stopQuiet` is told to leave the published state alone
-    /// during a hot-swap; `startCore` writes the new mode at the end
-    /// as a single observable transition. On a failure inside the
-    /// bring-up the engine is genuinely dead, so we restore truthful
-    /// state (`isRunning = false`, `activeMode = .stopped`) before
-    /// re-throwing — the UI must not lie about a non-running engine.
-    ///
-    /// **UX-F#6 (v2.0.14):** skip the engine restart entirely when
-    /// the active profile is unchanged. Smart / Global / Local modes
-    /// only differ in **system proxy configuration** (PAC vs SOCKS5
-    /// vs none) and, for Smart, **PAC file regeneration**. The naive
-    /// process binds to 127.0.0.1:port with the same config in all
-    /// three modes, so killing and re-spawning it on every mode
-    /// switch is unnecessary work that also drops in-flight TCP
-    /// connections (apps see ~200-500 ms of "connection refused"
-    /// during the gap). The new no-restart path reapplies the
-    /// system-proxy + PAC bits and updates `activeMode` in a single
-    /// observable transition, with naive untouched. Falls through to
-    /// the full restart path if:
-    ///
-    ///   - the active profile has been edited (`activeProfileEdited`)
-    ///     — naive must restart to pick up the new config;
-    ///   - the user switched the *selected* profile to a different one
-    ///     (`selectedProfileID != activeProfileID`) — same reasoning;
-    ///   - `applyModeWithoutRestart` itself throws — partial
-    ///     `proxyController` state is recovered by stopQuiet's
-    ///     `disableAll()`, then startCore writes the correct config.
+    /// When the active profile is unchanged the hot-swap takes
+    /// the no-restart path: naive keeps its listener, only the
+    /// system-proxy + PAC config changes, and apps don't see the
+    /// 200-500 ms "connection refused" gap a respawn produces.
+    /// Falls through to the full restart path on:
+    /// - profile edited (`activeProfileEdited` — naive needs new
+    ///   config);
+    /// - selected profile changed
+    ///   (`selectedProfileID != activeProfileID`);
+    /// - `applyModeWithoutRestart` threw (partial proxyController
+    ///   state recovered by `stopQuiet.disableAll()`).
     public func switchMode(to newMode: ProxyMode) async throws {
         recordTelemetry(
             "switch.request",
@@ -778,18 +561,11 @@ public final class TunnelOrchestrator {
         )
         selfHealTask?.cancel()
         selfHealTask = nil
-        // A mode switch supersedes any in-flight credential
-        // auto-sync — the auto-sync's captured `activeModeAtTrigger`
-        // would otherwise restart the engine in the previous mode
-        // a beat after the user picked the new one.
+        // Mode switch supersedes any in-flight credential
+        // auto-sync — its captured `activeModeAtTrigger` would
+        // otherwise restart the engine in the previous mode.
         credentialAutoSyncTask?.cancel()
         credentialAutoSyncTask = nil
-        // **Lifecycle-F#7 (v0.1.7.19):** transition lock. A
-        // rapid second click while a prior switchMode is
-        // mid-flight (between stopQuiet and startCore) is a
-        // clean no-op. The user's first intent wins. See the
-        // `transitionInFlight` declaration above for the race
-        // it defends against.
         guard !transitionInFlight else { return }
         transitionInFlight = true
         defer { transitionInFlight = false }
@@ -806,18 +582,13 @@ public final class TunnelOrchestrator {
             return
         }
         if isRunning {
-            // One logical user action, one log line. The earlier
-            // implementation called the public `stop()` here, which
-            // emitted "stopped" before the subsequent "started in X" —
-            // so the live log read as a three-step dance for what the
-            // user experiences as one tap. Quiet-stop here and let the
-            // post-start switch line do the talking.
+            // One user action, one log line: quiet-stop here so
+            // only the post-start "switched from X to Y" line is
+            // emitted, not "stopped" + "started in Y".
             let from = activeMode
 
-            // **UX-F#6 (v2.0.14):** try the no-restart path first.
-            // Gating: same-profile + not-edited + currently-running.
-            // Anything else falls through to the full restart below
-            // (which preserves the old behaviour exactly).
+            // Try the no-restart path first; gated on same
+            // profile, not edited, currently running.
             let canHotSwapWithoutRestart =
                 !activeProfileEdited
                 && selectedProfileID == activeProfileID
@@ -825,18 +596,11 @@ public final class TunnelOrchestrator {
             if canHotSwapWithoutRestart {
                 do {
                     try await applyModeWithoutRestart(newMode)
-                    // **UX-F#7 (v2.0.15):** verify naive is still
-                    // alive before declaring the swap successful.
-                    // The orchestrator's `transitionInFlight` gate
-                    // (UX-F#5) suppresses any `stateChanged(false)`
-                    // event the engine emits during this window, so
-                    // a naive death that happens between
-                    // `applyModeWithoutRestart` starting and ending
-                    // would otherwise go undetected — the user
-                    // would see "switched to X" with the Stop
-                    // button still red while their browser quietly
-                    // stalls. Throwing here routes the call into
-                    // the fallback full-restart path below.
+                    // Verify naive is still alive — the
+                    // `transitionInFlight` gate suppresses any
+                    // `stateChanged(false)` during the swap
+                    // window, so a naive death would otherwise
+                    // be silent.
                     try await verifyNaiveLiveAfterHotSwap()
                     appendInfo("switched from \(from.title) to \(newMode.title)")
                     recordTelemetry(
@@ -849,21 +613,13 @@ public final class TunnelOrchestrator {
                     )
                     return
                 } catch {
-                    // No-restart attempt failed — `proxyController`
-                    // state may be partial (e.g. enableSmartPAC
-                    // succeeded for some network services but not
-                    // others before throwing). Fall through to the
-                    // full restart path; stopQuiet's `disableAll()`
-                    // will reset proxyController to a clean state
-                    // before startCore reapplies the correct config.
-                    //
-                    // Defensive: mark the active profile as edited
-                    // so any later code path that re-checks the
-                    // hot-swap gate sees it as ineligible. The
-                    // current call's fallback below is unconditional
-                    // (it doesn't re-check the gate), so this is
-                    // belt-and-suspenders for future refactors.
-                    // Cleared at the next successful `startCore`.
+                    // Partial `proxyController` state is reset by
+                    // stopQuiet's `disableAll()`; startCore then
+                    // reapplies. Mark `activeProfileEdited` as
+                    // belt-and-suspenders so any future re-check
+                    // of the hot-swap gate sees this call as
+                    // ineligible. Cleared on next successful
+                    // `startCore`.
                     activeProfileEdited = true
                     Self.hotSwapLogger.notice(
                         "no-restart switch to \(newMode.rawValue, privacy: .public) failed (\(error.localizedDescription, privacy: .public)); falling back to full engine restart"
@@ -871,21 +627,15 @@ public final class TunnelOrchestrator {
                 }
             }
 
-            // UX-F#5: skip the published `isRunning = false /
-            // activeMode = .stopped` flips in stopQuiet. The user's
-            // intent is "still running, just under a different mode",
-            // and that is what the UI should show throughout. The
-            // engine IS torn down and brought back up internally, but
-            // the observable state stays at the OLD mode until
-            // `startCore` writes the NEW one in a single transition.
+            // Skip stopQuiet's `isRunning = false / .stopped`
+            // flips: observable state stays at the OLD mode until
+            // `startCore` writes the NEW one in a single
+            // transition, so the UI doesn't blink through "Stop".
             await stopQuiet(publishStoppedState: false)
             do {
                 try await startQuiet(mode: newMode)
             } catch {
-                // Engine is genuinely dead — startCore's writes never
-                // ran. Restore truthful UI state so the user sees the
-                // failure instead of a phantom "Stop" button over a
-                // dead engine.
+                // Engine genuinely dead — restore truthful state.
                 activeMode = .stopped
                 isRunning = false
                 developerMetrics = .idle
@@ -920,44 +670,27 @@ public final class TunnelOrchestrator {
         try await start(mode: newMode)
     }
 
-    /// **UX-F#6 (v2.0.14):** hot-swap mode without restarting the
-    /// engine. Reapplies the system-proxy configuration for
-    /// `newMode` and, when switching *to* Smart, regenerates the
-    /// PAC file. The running naive process is left untouched —
-    /// `127.0.0.1:port` keeps accepting connections throughout, so
-    /// long-lived TCP sessions don't drop and apps connecting
-    /// during the swap don't get refused.
+    /// Hot-swap mode without restarting the engine.
+    /// Reapplies system-proxy config (and regenerates PAC for
+    /// Smart) while naive keeps accepting on 127.0.0.1:port — no
+    /// connection drops.
     ///
-    /// Order of operations:
+    /// 1. Regenerate PAC (Smart only) — before touching
+    ///    `proxyController` so a PAC-gen failure surfaces with
+    ///    no system-proxy change applied.
+    /// 2. Apply system-proxy config for `newMode`.
+    /// 3. Update the recovery sentinel.
+    /// 4. Publish `activeMode = newMode` as a single transition.
     ///
-    ///   1. Regenerate PAC (only if `newMode == .smart`). Done
-    ///      before touching `proxyController` so a PAC-gen failure
-    ///      surfaces before any system-proxy change has happened.
-    ///   2. Apply the system-proxy configuration for `newMode`
-    ///      (the same `enableSmartPAC` / `enableGlobalSOCKS` /
-    ///      `disableAll` calls `startCore` makes at the equivalent
-    ///      step in the full path).
-    ///   3. Update the recovery sentinel (`ProxyActiveFlag`) so a
-    ///      hard crash before the next clean stop is recoverable —
-    ///      same invariant as the full path.
-    ///   4. Publish `activeMode = newMode` as a single observable
-    ///      transition. The picker and any other UI bound to
-    ///      `activeMode` re-renders once.
-    ///
-    /// Throws on any failure. The caller (`switchMode`) handles
-    /// the error by falling through to the full engine restart —
-    /// see the `do/catch` around the call site for the rationale.
+    /// Throws on any failure; caller falls through to the full
+    /// engine restart.
     private func applyModeWithoutRestart(_ newMode: ProxyMode) async throws {
         recordTelemetry(
             "switch.hotswap.begin",
             details: ["to_mode": newMode.rawValue]
         )
-        // Mirror `startCore`'s optimistic banner clear (line ~582):
-        // a successful mode switch should not leave the user
-        // staring at a stale failure banner. If the body below
-        // throws, `switchMode` falls through to `startCore`, which
-        // also clears `lastError` at its own top — so either path
-        // ends with a coherent banner state.
+        // Mirror `startCore`'s optimistic banner clear so a
+        // successful swap doesn't leave a stale failure banner.
         lastError = nil
         lastErrorLayer = nil
 
@@ -967,12 +700,9 @@ public final class TunnelOrchestrator {
         let port = try parsePort(profile.localPort)
 
         if newMode == .smart {
-            // The set of direct-domains may have changed in
-            // `settings` since the last start; regenerate the PAC
-            // every time we hot-swap into Smart so the routing
-            // table reflects the user's current intent. (The full
-            // `startCore` path does the same — this is parity, not
-            // a new policy.)
+            // `settings.directDomains` may have changed since
+            // the last start; regenerate every swap so the PAC
+            // reflects current intent.
             let pacResponse = try await core.send(
                 .generatePac(directDomains: settings.directDomains, port: port)
             )
@@ -1000,15 +730,14 @@ public final class TunnelOrchestrator {
             ProxyActiveFlag.clear(
                 at: ProxyActiveFlag.path(in: paths.supportDirectory))
         case .stopped:
-            // switchMode never calls this with `.stopped` — that
-            // branch routes to `stop()` instead. Keep the case
-            // defensively explicit so a future caller can't slip
-            // through to silently no-op.
+            // switchMode never calls here with `.stopped` —
+            // explicit case prevents a future caller silently
+            // no-op'ing through.
             return
         }
 
-        // Single observable transition for SwiftUI. `isRunning` is
-        // already true and stays true; only the mode chip changes.
+        // Single observable transition: `isRunning` stays true,
+        // only the mode chip changes.
         activeMode = newMode
         updateDeveloperKernelHealth(pid: lastTrafficSnapshot?.pid)
         recordTelemetry(
@@ -1017,33 +746,25 @@ public final class TunnelOrchestrator {
         )
     }
 
-    /// Internal stop path used by `switchMode` — same teardown work as
-    /// `stop()`, no `appendInfo("stopped")`. Stays private; callers
-    /// outside the orchestrator should use `stop()` so the log is
-    /// always informative for explicit stops.
+    /// Stop path used by `switchMode`. Same teardown as
+    /// `stop()` without the `appendInfo("stopped")` line so
+    /// switchMode can emit a single "switched from X to Y".
     ///
-    /// `publishStoppedState` controls whether `isRunning` and
-    /// `activeMode` are flipped to `false` / `.stopped` after the
-    /// engine teardown completes. Default `true` matches the
-    /// always-stop semantics every legacy caller wants. Pass `false`
-    /// from `switchMode` so the UI doesn't observe the brief
-    /// "stopped" intermediate state during a hot-swap (UX-F#5).
+    /// `publishStoppedState: false` (passed from a hot-swap)
+    /// leaves `isRunning` / `activeMode` alone so the UI
+    /// doesn't observe a brief "stopped" intermediate state.
     private func stopQuiet(publishStoppedState: Bool = true) async {
         recordTelemetry(
             "stop.quiet.begin",
             details: ["publish_stopped_state": String(publishStoppedState)]
         )
-        // **Engine-F#P1.2 (v0.2):** mark this stop as user-
-        // initiated for the duration of the call so the
-        // `stateChanged(false)` event handler doesn't post a
-        // phantom "naive stopped unexpectedly" banner for the
-        // shutdown event we just *asked* naive to emit.
+        // Mark this stop user-initiated for the duration of the
+        // call so the `stateChanged(false)` event doesn't post a
+        // phantom "naive stopped unexpectedly" banner.
         userStopInFlight = true
         defer { userStopInFlight = false }
 
         try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
-        // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
-        // clean stop. Same reasoning as `shutdown()`.
         ProxyActiveFlag.clear(
             at: ProxyActiveFlag.path(in: paths.supportDirectory))
         do {
@@ -1069,36 +790,17 @@ public final class TunnelOrchestrator {
         )
     }
 
-    /// Internal start path mirror of `start(mode:)` that omits the
-    /// trailing "started in X" log line so `switchMode` can replace
-    /// the pair of stop/start lines with a single "switched from X
-    /// to Y".
+    /// Quiet `startCore` variant for switchMode — omits the
+    /// "started in X" line.
     private func startQuiet(mode: ProxyMode) async throws {
         try await startCore(mode: mode, log: false)
     }
 
-    /// **UX-F#7 (v2.0.15):** post-hot-swap liveness probe.
-    ///
-    /// Sends `probe_naive_live` to the engine and throws if the
-    /// engine reports naive is no longer running. The
-    /// `transitionInFlight` gate (UX-F#5) suppresses
-    /// `stateChanged(false)` events delivered during a hot-swap
-    /// so the UI doesn't blink, but that suppression also hides
-    /// a genuine naive crash if it happens in the ~50 ms swap
-    /// window. This probe converts that silent gap into an
-    /// explicit yes/no answer the orchestrator can route on.
-    ///
-    /// Throws on:
-    ///   - The engine reports `running: false`. Caller's catch
-    ///     arm logs at `.notice` and falls through to the
-    ///     full-restart path; `startCore` re-spawns naive.
-    ///   - The engine itself is dead and `core.send` errors out
-    ///     with broken-pipe / connection-closed. Same recovery
-    ///     path; the full-restart path will surface a more
-    ///     useful error if it can't bring the engine back.
-    ///   - The engine returns a response shape we don't
-    ///     recognise (`.unexpectedResponse`). Defensive — won't
-    ///     fire under normal operation.
+    /// Post-hot-swap liveness probe. The `transitionInFlight`
+    /// gate suppresses `stateChanged(false)` during the swap so
+    /// the UI doesn't blink, but that also hides a genuine
+    /// naive crash. This probe converts the silent gap into a
+    /// yes/no answer the caller can route on.
     private func verifyNaiveLiveAfterHotSwap() async throws {
         let response = try await core.send(.probeNaiveLive)
         guard case .naiveLiveness(let running, let pid) = response else {
@@ -1112,56 +814,35 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// Internal control-flow signal used by
-    /// `verifyNaiveLiveAfterHotSwap` to route the swap back
-    /// through the full-restart fallback. Never surfaces to the
-    /// user — `switchMode`'s catch arm logs and re-tries via
-    /// `stopQuiet`/`startQuiet`. Kept as a private nested type
-    /// (rather than added to `OrchestratorError`) because it
-    /// describes an *internal* recovery transition, not a
-    /// user-facing failure mode.
+    /// Internal control-flow signal for the hot-swap → full-
+    /// restart fallback. Not user-facing.
     private enum HotSwapError: Error {
         case engineDied
     }
 
     // MARK: - Lifecycle commands
 
-    /// Validates the selected profile, writes config + PAC, spawns naive,
-    /// and applies the requested system-proxy configuration. Logs
-    /// "started in X" on success.
+    /// Validates the selected profile, writes config + PAC,
+    /// spawns naive, applies system-proxy. Logs "started in X".
     public func start(mode: ProxyMode) async throws {
         try await startCore(mode: mode, log: true)
     }
 
-    /// Underlying start implementation. `log` controls whether the
-    /// trailing "started in X" line is appended — `switchMode` calls
-    /// this with `log: false` so it can emit a single "switched
-    /// from X to Y" line in the public log instead of the
-    /// stop/start pair the user sees as visual noise.
+    /// Implementation. `log: false` from `switchMode` suppresses
+    /// "started in X" so the caller can emit a single "switched
+    /// from X to Y" instead.
     ///
-    /// **Engine-F#P0 (v0.2):** the entire body is wrapped in a
-    /// single do/catch that publishes any failure to `lastError`
-    /// (via `recordError`) before re-throwing. Pre-v0.2, every
-    /// throw inside this method propagated to the view's empty
-    /// catch block, where the comment claimed "lastError carries
-    /// the user-facing surface" — but no path here ever set it on
-    /// failure. Result: a port-collision or naive-spawn-failure
-    /// produced silent UI on the click of Smart / Global / Local.
-    /// Now: any failure path inside `startCore` populates
-    /// `lastError` and the live log before the throw escapes, so
-    /// the existing HeaderView error banner becomes the visible
-    /// surface for engine errors too.
+    /// Wrapped in do/catch that publishes any failure to
+    /// `lastError` before re-throwing — without this, a
+    /// port-collision or spawn-failure showed no UI banner.
     private func startCore(mode: ProxyMode, log: Bool) async throws {
         guard mode != .stopped else { return }
         recordTelemetry(
             "start.begin",
             details: ["target_mode": mode.rawValue]
         )
-        // Clear stale error from any previous failed attempt — a successful
-        // start should not leave the user staring at last week's failure.
-        // Hoisted above the do/catch so a successful start always begins
-        // with a clean banner, while a failing start will repopulate
-        // `lastError` from the catch arm below.
+        // Hoisted above the do/catch so success always begins
+        // with a clean banner; failure repopulates from below.
         lastError = nil
         lastErrorLayer = nil
 
@@ -1172,14 +853,13 @@ public final class TunnelOrchestrator {
 
             try hydratePasswordIfNeeded(&profile)
 
-            // Validate via engine. The engine's `Profile` deserializer enforces
-            // every rule the Swift form previously did inline.
+            // The engine's `Profile` deserializer enforces every
+            // rule the Swift form used to do inline.
             let validation = try await core.send(.validateProfile(profile))
             guard case .validation(let report) = validation, report.ok else {
                 throw OrchestratorError.invalidProfile(reason: extractValidationReason(validation))
             }
 
-            // Generate engine artifacts.
             let configResponse = try await core.send(.generateNaiveConfig(profile))
             guard case .naiveConfig(let configJSON) = configResponse else {
                 throw OrchestratorError.unexpectedResponse
@@ -1198,10 +878,9 @@ public final class TunnelOrchestrator {
                 try RestrictedFile.write(pacJS, to: paths.pacFile)
             }
 
-            // Resolve the naive binary through the dedicated resolver: it
-            // checks the host arch slice, runs `--version`, verifies the
-            // code signature, and refuses to return a descriptor that would
-            // crash on spawn. One typed error covers all four failure modes.
+            // Resolver checks host-arch slice, runs `--version`,
+            // verifies the code signature, and refuses to return
+            // a descriptor that would crash on spawn.
             let descriptor: NaiveBinaryDescriptor
             do {
                 descriptor = try await naiveResolver.resolve(settings: settings)
@@ -1221,13 +900,11 @@ public final class TunnelOrchestrator {
                 throw OrchestratorError.unexpectedResponse
             }
 
-            // Apply system proxy.
             switch mode {
             case .smart:
                 try await proxyController.enableSmartPAC(pacURL: paths.pacFile)
-                // **Lifecycle-F#16 (v0.1.7.18):** write the
-                // proxy-active sentinel so a crash before
-                // `disableAll()` runs is recoverable on next launch.
+                // Recovery sentinel so a crash before
+                // `disableAll()` is recoverable on next launch.
                 ProxyActiveFlag.write(
                     at: ProxyActiveFlag.path(in: paths.supportDirectory),
                     mode: "smart"
@@ -1240,8 +917,7 @@ public final class TunnelOrchestrator {
                 )
             case .localOnly:
                 try await proxyController.disableAll()
-                // local mode doesn't touch system proxy — clear
-                // any stale flag from a previous mode run.
+                // Local mode doesn't touch system proxy.
                 ProxyActiveFlag.clear(
                     at: ProxyActiveFlag.path(in: paths.supportDirectory))
             case .stopped:
@@ -1252,13 +928,10 @@ public final class TunnelOrchestrator {
             isRunning = true
             updateDeveloperKernelHealth(pid: naivePID)
             startVPSHealthLoop()
-            // **UX-F#3 (v0.1.7.19):** capture which profile the
-            // engine started with. The selectedProfile setter
-            // compares against this to detect edits to the
-            // currently-active profile.
+            // Capture which profile the engine started with —
+            // `selectedProfile.set` compares to detect edits.
             activeProfileID = selectedProfileID
-            // **UX-F#6 (v2.0.14):** the engine just resynced to
-            // the current profile — clear the stale-config flag.
+            // Engine just resynced — clear the stale-config flag.
             activeProfileEdited = false
             if log {
                 appendInfo("started in \(mode.title)")
@@ -1272,22 +945,15 @@ public final class TunnelOrchestrator {
                 ]
             )
         } catch {
-            // Build a user-readable message: the typed
-            // `OrchestratorError` cases already carry localized
-            // descriptions; everything else falls back to the
-            // error's own description. Engine wire errors
-            // (`ErrorPayload`) include the engine's own message
-            // string, which is what we want surfaced for things
-            // like "address already in use".
+            // `OrchestratorError` carries localized descriptions;
+            // engine wire errors (`ErrorPayload`) carry the
+            // engine's own message ("address already in use").
             let detail =
                 (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
-            // **v2.0.29 (Deterministic Error Reporting):** classify
-            // the connection failure into ISP / VPS / Local Kernel so
-            // the banner chip pinpoints the broken node. Pre-2.0.29
-            // the operator saw a generic "Couldn't start <mode>" with
-            // no signal whether to check their wifi, their server, or
-            // their app — they had to run `Diag` manually to find out.
+            // Classify the failure into ISP / VPS / Local Kernel
+            // so the banner chip points the user at the broken
+            // node without making them run Diag manually.
             await recordClassifiedError("Couldn't start \(mode.title): \(detail)")
             recordTelemetry(
                 "start.failure",
@@ -1305,32 +971,19 @@ public final class TunnelOrchestrator {
         selfHealTask = nil
         vpsHealthTask?.cancel()
         vpsHealthTask = nil
-        // User-initiated stop cancels any in-flight credential
-        // auto-sync — the operator wants the tunnel down, not a
-        // background restart that surprises them by re-spawning
-        // naive a half-second after they hit Stop.
+        // Cancel auto-sync — Stop means tunnel down, not a
+        // background re-spawn half a second later.
         credentialAutoSyncTask?.cancel()
         credentialAutoSyncTask = nil
-        // Guard against re-entry when we're already stopped. A
-        // user spam-clicking the Stop button would otherwise loop
-        // back through `disableAll()` (which iterates every active
-        // network service and runs `networksetup` twice each) and
-        // then call `core.send(.stopProxy)` against an engine
-        // that no longer has a proxy to stop — surfacing as a
-        // misleading "stop failed: not_running" log line. Single
-        // exit point keeps the user-facing behaviour clean.
+        // Spam-clicking Stop would otherwise re-run
+        // `disableAll()` (iterates every network service twice
+        // through `networksetup`) and emit a misleading
+        // "stop failed: not_running".
         guard isRunning || activeMode != .stopped else { return }
-        // **Engine-F#P1.2 (v0.2):** see `userStopInFlight` doc —
-        // suppresses the spurious "naive stopped unexpectedly"
-        // recovery error that would otherwise fire when naive's
-        // intentional `stateChanged(false)` event arrives mid-
-        // stop, before this body has set `isRunning = false`.
         userStopInFlight = true
         defer { userStopInFlight = false }
 
         try? await proxyController.disableAll()  // try-ok: best-effort proxy revert
-        // **Lifecycle-F#16 (v0.1.7.18):** clear sentinel on
-        // user-initiated stop.
         ProxyActiveFlag.clear(
             at: ProxyActiveFlag.path(in: paths.supportDirectory))
         do {
@@ -1352,22 +1005,13 @@ public final class TunnelOrchestrator {
         recordTelemetry("stop.success")
     }
 
-    /// **Lifecycle-F#16 (v0.1.7.18):** crash-recovery sweep.
-    /// Called by AppDelegate before any other startup work. If
-    /// the proxy-active sentinel exists, the previous run died
-    /// without disabling — force-disable the system proxy now
-    /// so the user gets a working network on launch.
-    ///
-    /// **Engine-F#P2.5 (v0.2):** also sweeps for orphan `naive`
-    /// processes that survived the crash. If `cool-tunnel-core`
-    /// was SIGKILL'd while `naive` was its child, naive gets
-    /// reparented to launchd and keeps holding its local port.
-    /// On the next launch, `core.send(.startProxy)` would fail
-    /// with EADDRINUSE — combined with the silent-error fix
-    /// (P0 #1) the user would just see "Couldn't start: address
-    /// already in use" with no obvious culprit. This sweep
-    /// terminates orphans (parent PID == 1) before the next
-    /// start attempt so launches are deterministic.
+    /// Crash-recovery sweep. If the proxy-active sentinel
+    /// exists, the previous run died with system proxy enabled
+    /// and the user's network is currently broken. Also
+    /// terminates orphan `naive` processes (parent PID == 1)
+    /// that survived a SIGKILL'd parent and would otherwise
+    /// hold the local port, surfacing as EADDRINUSE on the next
+    /// start.
     public func recoverFromCrashIfNeeded() async {
         let flagURL = ProxyActiveFlag.path(in: paths.supportDirectory)
         guard ProxyActiveFlag.existsIndicatingCrash(at: flagURL) else {
@@ -1384,23 +1028,14 @@ public final class TunnelOrchestrator {
         await sweepOrphanNaiveIfAny()
     }
 
-    /// **Engine-F#P2.5 (v0.2):** terminate any `naive` process
-    /// reparented to launchd (PID 1) — the signature of an
-    /// orphan that outlived its `cool-tunnel-core` parent.
-    /// Two-stage match keeps this targeted and safe:
+    /// Terminates `naive` processes reparented to launchd
+    /// (PID 1). Two-stage match:
+    /// 1. `pgrep -x naive` — exact executable name (not `-f`),
+    ///    so a user's `cat /path/to/naive` survives.
+    /// 2. `ps -o ppid=` — parent must be 1.
     ///
-    /// 1. `pgrep -x naive` returns processes whose **executable
-    ///    name** is exactly `naive`. Matching the process name
-    ///    (not `-f` against the cmdline) avoids killing a user's
-    ///    own `cat /path/to/naive` or text editor.
-    /// 2. `ps -o ppid=` filters to PIDs whose parent is `1`
-    ///    (launchd). A naive whose parent is still alive belongs
-    ///    to that parent — leave it alone.
-    ///
-    /// SIGTERM with a 500 ms grace, then SIGKILL any survivors.
-    /// Failures (sandbox-blocked `kill`, missing `pgrep`, etc.)
-    /// are logged and skipped — the sweep is best-effort, never
-    /// blocks the bootstrap.
+    /// SIGTERM with 500 ms grace, then SIGKILL. Best-effort —
+    /// failures (sandbox-blocked, missing tools) are logged.
     private func sweepOrphanNaiveIfAny() async {
         let pgrep = URL(fileURLWithPath: "/usr/bin/pgrep")
         let ps = URL(fileURLWithPath: "/bin/ps")
@@ -1418,8 +1053,8 @@ public final class TunnelOrchestrator {
             )
             return
         }
-        // pgrep convention: exit 0 = matches printed; exit 1 =
-        // no match (clean); exit ≥ 2 = error. Only act on exit 0.
+        // Only act on `exit 0` (matches printed); `exit 1`
+        // means no match, `≥ 2` means error.
         guard listing.exitCode == 0 else { return }
 
         let candidatePIDs: [pid_t] = listing.stdout
@@ -1437,8 +1072,7 @@ public final class TunnelOrchestrator {
             }
         }
         guard !orphans.isEmpty else {
-            // naive processes exist but have living parents —
-            // owned by another tool, not our orphan.
+            // Owned by another tool; not our orphan.
             return
         }
 
@@ -1455,14 +1089,13 @@ public final class TunnelOrchestrator {
         }
         try? await Task.sleep(nanoseconds: 500_000_000)  // try-ok: sleep cancellation
         for pid in orphans where kill(pid, 0) == 0 {
-            // Still alive after SIGTERM grace — escalate.
             _ = kill(pid, SIGKILL)
         }
     }
 
-    /// Helper: returns the parent PID of `pid` via `ps -o ppid=`.
-    /// `nil` on any failure (process gone, ps unavailable, malformed
-    /// output) so callers treat the candidate as "don't touch."
+    /// Returns the parent PID of `pid` via `ps -o ppid=`.
+    /// `nil` on any failure so callers treat the candidate as
+    /// "don't touch".
     private static func parentPID(of pid: pid_t, ps: URL) async -> pid_t? {
         do {
             let result = try await Subprocess.run(
@@ -1479,42 +1112,25 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// **Engine-F#P2.5 (v0.2):** dedicated logger for the
-    /// crash-recovery / orphan-sweep path. Same subsystem as
-    /// `ProxyActiveFlag.logger` (`ProxyRecovery`) so the full
-    /// recovery story shows up under one `log show` predicate.
+    /// Crash-recovery / orphan-sweep logger. Same subsystem as
+    /// `ProxyActiveFlag.logger` so the full recovery story
+    /// surfaces under one `log show` predicate.
     private static let recoveryLogger = Logger.cooltunnel("ProxyRecovery")
 
-    /// **UX-F#6 (v2.0.14):** dedicated logger for the no-restart
-    /// mode-switch path (`applyModeWithoutRestart`). When the
-    /// no-restart attempt fails and we fall back to the full
-    /// engine restart, the diagnostic goes here at `.notice` so a
-    /// support engineer can confirm whether the hot-swap path is
-    /// the right shape for the failures they see in the field.
-    /// User-visible errors come from the subsequent
-    /// `startCore` catch arm via `recordError`.
+    /// No-restart mode-switch diagnostic logger. Fires at
+    /// `.notice` when the hot-swap path fails; user-visible
+    /// errors come from the subsequent `startCore` catch arm.
     private static let hotSwapLogger = Logger.cooltunnel("HotSwap")
 
-    /// **F-1 (v2.0.28 — Seamless Recovery Protocol):** called by
-    /// AppDelegate when `NSWorkspace.willSleepNotification` fires.
-    /// Pauses the engine cleanly *before* the system suspends so
-    /// upstream TCP gets closed gracefully and the lsof
-    /// `monitor_loop` stops hammering across the sleep window.
-    /// Pre-v2.0.28 there was no willSleep listener at all — the
-    /// engine kept its state through suspend, hardware NIC dropped
-    /// the upstream connections under it, and the user woke up to
-    /// a "Connected" pill that no longer carried any traffic
-    /// (the "zombie" symptom).
+    /// Called by AppDelegate on
+    /// `NSWorkspace.willSleepNotification`.
+    /// Pauses cleanly before suspend so upstream TCP closes
+    /// gracefully and `monitor_loop` stops hammering across the
+    /// sleep window — without this the user wakes to a
+    /// "Connected" pill over dropped connections.
     ///
-    /// Skips:
-    /// - `.stopped` mode — nothing to pause.
-    /// - `.localOnly` mode — the SOCKS listener on `127.0.0.1` has
-    ///   no upstream TCP that gets dropped by hardware sleep, so
-    ///   there's nothing to recover from on wake.
-    ///
-    /// State machine: `.idle → .pausing → .paused`. The wake
-    /// handler picks up from `.paused` and re-applies
-    /// `modeBeforeSleep`.
+    /// Skips `.stopped` and `.localOnly` (the loopback SOCKS
+    /// listener has no upstream to drop).
     public func handleSystemWillSleep() async {
         guard isRunning, activeMode != .stopped, activeMode != .localOnly else {
             return
@@ -1524,39 +1140,27 @@ public final class TunnelOrchestrator {
         appendInfo(
             "system entering sleep — pausing engine to avoid zombie connections after wake")
         await stop()
-        // `stop()` clears `activeMode` and `isRunning`; we pinned
-        // the pre-sleep mode in `snapshotMode` above so the wake
-        // handler can re-apply it.
+        // `stop()` cleared `activeMode`; the wake handler reads
+        // `modeBeforeSleep` to re-apply.
         modeBeforeSleep = snapshotMode
         sleepWakeState = .paused
     }
 
-    /// **F-2 (v2.0.28 — Seamless Recovery Protocol):** called by
-    /// AppDelegate when `NSWorkspace.didWakeNotification` fires.
-    /// Two paths:
+    /// Called by AppDelegate on `didWakeNotification`.
     ///
-    /// **Path A — clean checkpoint (preferred).** If `willSleep`
-    /// reached us (so `sleepWakeState == .paused` and
-    /// `modeBeforeSleep` carries the pre-sleep mode), the engine
-    /// is already stopped and we just re-spawn it in the same
-    /// mode. 500 ms cooldown lets the network stack settle (DNS
-    /// TTLs reset, route table sync, Wi-Fi association complete)
-    /// before we ask `naive` to bind upstream again. End state:
-    /// `sleepWakeState = .idle`, mode restored, no operator
-    /// intervention required.
+    /// Path A (preferred): clean checkpoint from willSleep —
+    /// re-spawn in the same mode after a 500 ms network-stack
+    /// settle window (DNS TTLs reset, route table sync, Wi-Fi
+    /// association complete).
     ///
-    /// **Path B — missing checkpoint (fallback).** If we somehow
-    /// missed `willSleep` (app launched mid-sleep window, or the
-    /// notification raced after the system already suspended), we
-    /// fall through to the prior probe-only behaviour from
-    /// v0.1.7.18 so we at least surface the zombie state through
-    /// the error banner.
+    /// Path B (fallback): missed willSleep (mid-sleep launch /
+    /// notification raced) — probe-only behaviour that surfaces
+    /// the zombie state through the error banner.
     public func handleSystemDidWake() async {
-        // Path A — we cleanly paused via willSleep.
+        // Path A — clean checkpoint.
         if sleepWakeState == .paused, let mode = modeBeforeSleep {
             sleepWakeState = .recovering
             appendInfo("system woke — recovering engine in \(mode.title) mode")
-            // 500 ms cooldown for the network stack to settle.
             try? await Task.sleep(nanoseconds: 500_000_000)  // try-ok: sleep cancellation
             do {
                 try await switchMode(to: mode)
@@ -1566,18 +1170,6 @@ public final class TunnelOrchestrator {
             } catch {
                 sleepWakeState = .idle
                 modeBeforeSleep = nil
-                // **v2.0.29 (Deterministic Error Reporting):** the
-                // wake-recovery failure is exactly the path where
-                // layer attribution helps most — a wake into a
-                // dead Wi-Fi association reads as `.isp`, a
-                // wake while travelling to a network that blocks
-                // the operator's VPS reads as `.vps`, and a wake
-                // where naive crashed during sleep reads as
-                // `.localKernel`. The chip on the banner gives the
-                // operator the right next click — open Wi-Fi
-                // settings, open the server's status page, or
-                // click a mode to respawn naive — without having
-                // to run `Diag` manually.
                 await recordClassifiedError(
                     "auto-recovery after sleep failed: \(error.localizedDescription)"
                 )
@@ -1585,7 +1177,7 @@ public final class TunnelOrchestrator {
             return
         }
 
-        // Path B — missing checkpoint, fall back to probe-only.
+        // Path B — missed checkpoint, probe-only.
         guard isRunning, activeMode != .stopped, activeMode != .localOnly else {
             return
         }
@@ -1620,11 +1212,8 @@ public final class TunnelOrchestrator {
 
     public func runDiagnostics() async {
         recordTelemetry("diagnostics.begin")
-        // Wall-clock the whole call client-side so the summary can show
-        // total elapsed (engine probes are streamed individually via
-        // `diagnosticProgress` events while we await the response).
-        // `ContinuousClock` is monotonic — `Date()` can jump backward
-        // on NTP adjustments and report a negative elapsed time.
+        // `ContinuousClock` is monotonic; `Date()` can jump
+        // backward on NTP adjustment and report negative elapsed.
         let started = ContinuousClock.now
         appendInfo("diagnostics: starting…")
         do {
@@ -1655,10 +1244,8 @@ public final class TunnelOrchestrator {
             if case .latency(let report) = response {
                 lastLatencyReport = report
                 updateEncryptionOverhead(from: report)
-                // Per-sample timing breakdown into the live log so the
-                // user can read the DNS / connect / TLS / first-byte
-                // split alongside the total — matches how clash-verge
-                // surfaces probe results in its log pane.
+                // Per-sample DNS / connect / TLS / first-byte
+                // split into the live log alongside the total.
                 for sample in report.samples {
                     appendInfo(Self.formatSampleLine(sample))
                 }
@@ -1703,39 +1290,18 @@ public final class TunnelOrchestrator {
             guard case .debugHandshake(let report) = response else {
                 throw OrchestratorError.unexpectedResponse
             }
-            // **post-v2.0.53 — streamlined live-log output.**
-            //
-            // Previously this surface emitted six lines per probe:
-            //
-            //   debug handshake: ✗ server=… target=… connect_ok=true post_connect_recv=0B elapsed=336ms
-            //   debug handshake sent[0..1024]=43 4f 4e 4e 45 43 54 …    (262 bytes of hex)
-            //   debug handshake recv[0..1024]=48 54 54 50 2f 31 2e 31 … (85+ bytes of hex)
-            //   [debug handshake error] post-CONNECT read failed: Connection reset by peer (os error 54)
-            //   (+ naive stdout/stderr passthrough)
-            //
-            // The hex dumps buried the verdict, the verbose key=value
-            // pairs leaked operator infrastructure metadata into the
-            // live log (`server` is the operator's proxy hostname),
-            // and the raw `Connection reset by peer` error told the
-            // operator nothing about the actual remediation path.
-            //
-            // New shape — verdict + actionable hint:
-            //
-            //   debug handshake: ✗ elapsed=336ms
-            //     ↪ Server accepted credentials but cannot reach the destination. … On the VPS run …
-            //
-            // The hex dumps are dropped from the live log entirely.
-            // Operators who need byte-level forensics can read
-            // naive's own stderr passthrough below, which carries
-            // the same wire-level signature from naive's perspective.
+            // Verdict + actionable hint. Hex dumps and operator
+            // infrastructure metadata (`server` hostname) are
+            // omitted from the live log; operators needing
+            // byte-level forensics read naive's stderr passthrough
+            // below, which carries the same wire-level signature
+            // from naive's perspective.
             let glyph = report.ok ? "✓" : "✗"
             appendInfo("debug handshake: \(glyph) elapsed=\(report.elapsedMs)ms")
 
-            // Surface the actionable hint (post-v2.0.53 classifier).
-            // Falls back to the raw error string only when the
-            // failure shape is unrecognised — that's the `.other`
-            // branch in `DebugHandshakeFailureClass`, where the
-            // operator genuinely needs to see the verbatim cause.
+            // Falls back to raw error only on `.other` —
+            // unrecognised failure shape where the operator needs
+            // the verbatim cause.
             if let classification = report.failureClassification {
                 appendInfo("  ↪ \(classification.operatorHint)")
                 if classification == .other, let error = report.error, !error.isEmpty {
@@ -1743,9 +1309,8 @@ public final class TunnelOrchestrator {
                 }
             }
 
-            // Naive's own stdout/stderr stays in the log — it
-            // already carries naive-perspective diagnostics that an
-            // operator may need when the failure mode is unusual.
+            // Naive's stdout/stderr stays in the log — carries
+            // naive-perspective diagnostics for unusual failures.
             for line in report.naiveStdout {
                 appendInfo("debug handshake naive stdout: \(line)")
             }
@@ -1753,20 +1318,13 @@ public final class TunnelOrchestrator {
                 appendLog(source: .stderr, text: "[debug handshake naive stderr] \(line)")
             }
             let total = Self.formatElapsed(since: started)
-            // **Redaction (post-v2.0.45):** the `server` and `target`
-            // bare-hostname strings (e.g. `"cookie.coolwhite.space:443"`,
-            // `"www.google.com:443"`) do not match any pattern in
-            // `LifecycleTelemetryLogger.redact` — the rule set only
-            // catches `scheme://userinfo@host`, auth headers, cookies,
-            // and JSON credential pairs. Emitting them verbatim leaked
-            // the operator's server hostname into the 0600-mode
-            // telemetry file on every Debug Handshake click. Both
-            // values are already visible in the user's live log
-            // surface and exported on demand through the log
-            // console's Copy / Save / Share path, so dropping them
-            // from auto-persisted telemetry loses nothing the
-            // operator can't recover. Regression-tested by
-            // `LifecycleTelemetryRedactionTests
+            // Telemetry details intentionally omit `server` and
+            // `target` hostnames — bare hostnames don't match any
+            // `LifecycleTelemetryLogger.redact` pattern, so
+            // emitting them would leak operator infrastructure
+            // metadata into the persisted telemetry file. Both
+            // values are recoverable from the live log on demand.
+            // Regression: `LifecycleTelemetryRedactionTests
             // .testDebugHandshakeDetailsCarryNoServerHostname`.
             recordTelemetry(
                 report.ok ? "debug_handshake.success" : "debug_handshake.failure",
@@ -1779,16 +1337,10 @@ public final class TunnelOrchestrator {
 
     // MARK: - Time formatting helpers
 
-    /// Renders a monotonic interval as `Nms` (or `N.NNs` if ≥ 1s) for
-    /// log lines. Fractional under-millisecond values round up to `1ms`
-    /// so user-visible timings never show `0ms`. Driven by
-    /// `ContinuousClock` so wall-clock NTP adjustments cannot make a
-    /// successful operation appear to take negative time.
+    /// Renders a monotonic interval as `Nms` / `N.NNs`. Sub-ms
+    /// rounds up to `1ms` so timings never read `0ms`.
     private static func formatElapsed(since start: ContinuousClock.Instant) -> String {
         let elapsed = ContinuousClock.now - start
-        // `Duration.components` is `(seconds: Int64, attoseconds: Int64)`.
-        // Convert to milliseconds via Double — this is a logging helper,
-        // so we don't need integer-exact precision.
         let comps = elapsed.components
         let ms = max(
             1.0,
@@ -1800,11 +1352,9 @@ public final class TunnelOrchestrator {
         return "\(Int(ms.rounded()))ms"
     }
 
-    /// One-liner readout for a [`LatencySample`], suitable for the live
-    /// log. Includes total elapsed, the curl-reported breakdown
-    /// (DNS / connect / TLS / first-byte), and a status glyph. Each
-    /// numeric field is run through [`formatMs`] so a malformed engine
-    /// payload (NaN, infinity, negative) cannot trap with `Int(_:)`.
+    /// One-liner readout for a [`LatencySample`]. Each numeric
+    /// field goes through [`formatMs`] so a malformed payload
+    /// (NaN / infinity / negative) doesn't trap on `Int(_:)`.
     private static func formatSampleLine(_ sample: LatencySample) -> String {
         let glyph = sample.ok ? "✓" : "✗"
         let total = formatMs(sample.elapsedMs)
@@ -1816,11 +1366,10 @@ public final class TunnelOrchestrator {
             "\(glyph) \(sample.url) total=\(total) dns=\(dns) connect=\(connect) tls=\(tls) ttfb=\(firstByte)"
     }
 
-    /// Defensive `Double → "Nms"` formatter. Rust clamps these values
-    /// to a finite non-negative `u64` before serialising, but the Swift
-    /// `Codable` decoder accepts any `Double`. Keeping the guard here
-    /// means a future protocol-version mismatch (or a hand-crafted
-    /// engine reply) cannot crash the UI with an `Int(_:)` trap.
+    /// Defensive `Double → "Nms"` formatter. Rust clamps to a
+    /// finite non-negative `u64`, but Swift's `Codable` accepts
+    /// any `Double` — guard against a protocol-version drift /
+    /// hand-crafted reply that would `Int(_:)`-trap the UI.
     private static func formatMs(_ ms: Double) -> String {
         guard ms.isFinite, ms >= 0 else { return "?" }
         return "\(Int(ms.rounded()))ms"
@@ -1837,15 +1386,12 @@ public final class TunnelOrchestrator {
                 self.handle(event: event)
             }
             self.flushPendingLogs()
-            // Stream ended. Two cases produce that:
-            //   1. We deliberately shut the engine down via
-            //      `shutdown()` — `isShuttingDown` is true and we
-            //      stay quiet.
-            //   2. The engine subprocess died on us — pipe broke,
-            //      cool-tunnel-core crashed, OS killed it. The user
-            //      needs to know; otherwise the live log just stops
-            //      receiving lines and they assume "nothing's
-            //      happening" while the proxy is silently dead.
+            // Stream ended. Two sources:
+            //   1. We tore the engine down via `shutdown()` —
+            //      `isShuttingDown` is true; stay quiet.
+            //   2. Engine died on us — pipe broke / cool-tunnel-core
+            //      crashed / OS killed it. Surface, or the user
+            //      thinks "nothing's happening" over a dead proxy.
             if !self.isShuttingDown {
                 await self.handleEngineStreamEnded()
             }
@@ -1914,14 +1460,11 @@ public final class TunnelOrchestrator {
                     )
                     return
                 } catch {
-                    // **M7 (v2.0.38):** classify the failure so a
-                    // permanent error (bad profile shape, missing
-                    // naive binary, wire-protocol drift) doesn't
-                    // burn the full retry budget and three confused
-                    // log lines before the operator sees the real
-                    // cause. Transient failures (engine race,
-                    // keychain unlock pending, network blip) still
-                    // retry as before.
+                    // Classify so permanent errors (bad profile,
+                    // missing binary, protocol drift) don't burn
+                    // the full retry budget before the operator
+                    // sees the real cause; transient failures
+                    // still retry.
                     if Self.isPermanentStartFailure(error) {
                         self.appendInfo(
                             "self-healing aborted on attempt \(index + 1): \(error.localizedDescription) (permanent failure — not retrying)"
@@ -1946,19 +1489,12 @@ public final class TunnelOrchestrator {
 
     // MARK: - Credential auto-sync (HTTP-407 self-healing)
 
-    /// Detects HTTP-407-class auth failures in the engine's
-    /// stderr. NaiveProxy is built on Chromium's networking stack
-    /// and reports proxy-auth failures with `ERR_PROXY_AUTH_*` /
-    /// `ERR_TUNNEL_AUTH_*` chips, plus the raw `407` status if it
-    /// surfaces in any log line. The match is permissive on
-    /// purpose — a false positive turns into a no-op
-    /// `scheduleCredentialAutoSync` when the upstream credentials
-    /// are unchanged, but a false negative leaves the operator
-    /// stranded with a stale password.
+    /// Detects HTTP-407-class auth failures in naive's stderr.
+    /// Permissive on purpose: a false positive is a no-op
+    /// `scheduleCredentialAutoSync`; a false negative leaves the
+    /// operator stuck with a stale password.
     ///
-    /// Pure / nonisolated so the function is testable from outside
-    /// the MainActor and so the hot stderr loop in `handle(event:)`
-    /// doesn't need to hop actors for the check.
+    /// `nonisolated` so the hot stderr loop doesn't hop actors.
     nonisolated static func isProxyAuthFailureLine(_ line: String) -> Bool {
         let upper = line.uppercased()
         if upper.contains("ERR_PROXY_AUTH") { return true }
@@ -1966,11 +1502,9 @@ public final class TunnelOrchestrator {
         if upper.contains("407 PROXY AUTHENTICATION") { return true }
         if upper.contains("PROXY AUTHENTICATION REQUIRED") { return true }
         if upper.contains("AUTHENTICATION REQUIRED") { return true }
-        // Raw status-code match — surrounded by non-alphanumeric
-        // separators so a coincidental "407" inside a longer
-        // numeric run (port numbers, byte counts) doesn't fire.
-        // The separators include space, comma, period, colon,
-        // bracket, paren, slash, equals, quote, and end-of-line.
+        // Raw "407" match — surrounded by non-alphanumeric
+        // separators so a coincidence inside a longer numeric
+        // run (port number, byte count) doesn't fire.
         let separators: [Character] = [
             " ", ",", ".", ":", ";", "[", "]", "(", ")", "{", "}",
             "/", "=", "\"", "'", "\t", "\n", "\r",
@@ -1993,32 +1527,14 @@ public final class TunnelOrchestrator {
         return false
     }
 
-    /// Auto-sync triggered by an auth-failure log line. Returns
-    /// early when there's nothing to do (no profile, no
-    /// subscription URL on the profile, or a sync already in
-    /// flight). Otherwise: fetches the subscription URL,
-    /// compares the returned credentials to the cached values,
-    /// and restarts the engine only when they actually differ.
+    /// Auto-sync triggered by an auth-failure log line.
+    /// Single-flight via `credentialAutoSyncTask` so a burst of
+    /// 407-shaped stderr lines doesn't queue duplicate fetches.
     ///
-    /// **Single-flight discipline.** A failed start can emit
-    /// many 407-shaped stderr lines in a few milliseconds; only
-    /// the first one schedules an actual sync. The
-    /// `credentialAutoSyncTask` property is the gate.
-    ///
-    /// **Fail-quiet on the "no drift" path.** If the upstream
-    /// returns the same credentials we already cached, the auth
-    /// failure was something else (subscription token revoked,
-    /// server-side basic_auth misconfiguration, etc.) — the sync
-    /// logs a one-line info note and falls through to the
-    /// existing error-classification path the user has always
-    /// seen.
-    ///
-    /// **Restart path.** When credentials do change, the engine
-    /// is stopped via `stopQuiet()` (the same path
-    /// `switchMode` uses for hot-swap) and started against the
-    /// previous mode. A start failure here surfaces through the
-    /// usual self-heal pipeline — auto-sync is best-effort,
-    /// not a hard guarantee.
+    /// Fail-quiet on the "no drift" path — if the upstream
+    /// returns identical credentials, the auth failure was
+    /// something else (revoked token, server-side misconfig);
+    /// the existing error path takes over.
     private func scheduleCredentialAutoSync(reason: String) {
         guard credentialAutoSyncTask == nil else { return }
         guard let profile = selectedProfile else { return }
@@ -2027,11 +1543,8 @@ public final class TunnelOrchestrator {
         else {
             return
         }
-        // Cooldown — drop the request silently if we're inside
-        // the window of the previous attempt. The continuously-
-        // failing case (panel down + engine retrying) should
-        // hit the panel at most twice per minute, not 200 times
-        // per second.
+        // Cooldown — keeps a continuously-failing engine from
+        // hitting the panel hundreds of times per second.
         if let last = lastCredentialAutoSyncAt,
             ContinuousClock.now - last < Self.credentialAutoSyncCooldown
         {
@@ -2061,29 +1574,21 @@ public final class TunnelOrchestrator {
                     "credentials.auto_sync.fetch_failed",
                     details: ["error": error.localizedDescription]
                 )
-                // Don't recordError here — the existing
-                // error-classification path already produced a
-                // user-facing banner for the underlying auth
-                // failure. A second banner about a failed
-                // sync would be noise.
+                // No `recordError` — the existing error path
+                // already produced a banner; a second one is
+                // noise.
                 return
             }
 
-            // **UX-F#3 race:** the `selectedProfile` setter
-            // raises a "Profile edits applied — click Stop,
-            // then a mode chip" banner whenever a running
-            // session's profile is mutated. The auto-sync IS
-            // about to do exactly that, so the banner is
-            // false-positive guidance — the user can't act on
-            // it any faster than we're already acting. Clear
-            // it here before the restart.
+            // `selectedProfile.set` raises a "click Stop then a
+            // mode chip" banner whenever a running session's
+            // profile mutates — auto-sync IS about to do that, so
+            // the banner is false-positive guidance. Clear before
+            // the restart.
             self.lastError = nil
             self.lastErrorLayer = nil
             self.activeProfileEdited = false
 
-            // After import, selectedProfile reflects the upstream's
-            // current credentials. If nothing changed, the auth
-            // failure was something other than credential drift.
             let refreshed = self.selectedProfile
             let changed =
                 refreshed?.password != oldPassword
@@ -2105,10 +1610,8 @@ public final class TunnelOrchestrator {
                 details: ["mode": activeModeAtTrigger.rawValue]
             )
 
-            // Quiet stop (no recovery banner, no system-proxy
-            // revert flicker) followed by a fresh start. If start
-            // fails, the engine's existing event-driven self-heal
-            // path takes over from there.
+            // Quiet stop + fresh start. A failed start hands off
+            // to the existing event-driven self-heal path.
             await self.stopQuiet()
             do {
                 try await self.start(mode: activeModeAtTrigger)
@@ -2128,17 +1631,12 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// Returns true for failures that retrying `start(mode:)` will not
-    /// recover. Used by `scheduleSelfHeal` to short-circuit the retry
-    /// budget when the cause is unambiguously configuration / shape
-    /// rather than a transient race.
-    ///
-    /// Conservatively false-by-default: when in doubt, retry. The
-    /// retry budget (3 attempts over ~7.5 s total) is cheap enough
-    /// that a wrong "permanent" classification is more harmful than
-    /// a wrong "transient" one. Specifically, `credentialReadFailed`
-    /// is treated as transient — the keychain can unlock between
-    /// attempts.
+    /// Returns true for failures that retrying won't recover.
+    /// False-by-default — when in doubt, retry. The 3-attempt
+    /// budget is cheap so a wrong "permanent" classification is
+    /// more harmful than a wrong "transient" one (e.g.
+    /// `credentialReadFailed` is transient because the keychain
+    /// can unlock between attempts).
     private static func isPermanentStartFailure(_ error: Error) -> Bool {
         switch error {
         case OrchestratorError.noProfile,
@@ -2148,9 +1646,8 @@ public final class TunnelOrchestrator {
         default:
             break
         }
-        // Wire-protocol error codes the engine emits for malformed /
-        // unknown requests are bugs in the Swift caller, not transient
-        // — retrying produces the same frame and the same rejection.
+        // Wire-protocol rejections are Swift-side bugs — retry
+        // produces the same frame and the same rejection.
         if let payload = error as? ErrorPayload,
             payload.code == "invalid_request" || payload.code == "malformed_request"
         {
@@ -2163,52 +1660,30 @@ public final class TunnelOrchestrator {
         switch event {
         case .logLine(let source, let line):
             appendLog(source: source, text: line)
-            // **Auto-sync hook (post-v2.0.48):** if the engine
-            // reports an HTTP-407-class auth failure in stderr,
-            // the active profile carries a `subscriptionURL`, and
-            // no sync is already in flight, fetch fresh
-            // credentials from the panel and restart the engine.
-            // The check is cheap (substring scan on each stderr
-            // line) and gated by `selectedProfile?.subscriptionURL`
-            // inside `scheduleCredentialAutoSync`, so profiles
-            // without a subscription URL never pay any cost
-            // beyond the substring test.
+            // Cheap substring-check on every stderr line — gated
+            // inside `scheduleCredentialAutoSync` on the profile
+            // having a `subscriptionURL`, so profiles without one
+            // never pay beyond the substring test.
             if source == .stderr,
                 Self.isProxyAuthFailureLine(line)
             {
                 scheduleCredentialAutoSync(reason: "engine reported HTTP 407 / proxy auth failure")
             }
         case .stateChanged(let running):
-            // **UX-F#5 (v2.0.13):** during a hot-swap
-            // (`switchMode`) the engine emits stateChanged(false)
-            // for the .stopProxy and stateChanged(true) for the
-            // subsequent .startProxy. Surfacing those to
-            // `isRunning` / `activeMode` produces the
-            // Stop→Start→Stop button blink and a brief de-
-            // highlight of the mode picker — exactly the
-            // "single observable transition" semantics the
-            // hot-swap was supposed to give us. switchMode owns
-            // the public state during its window and writes the
-            // final mode as a single transition at the end of
-            // startCore; we defer to it here.
-            //
-            // Outside `transitionInFlight`, the event handler
-            // remains the source of truth for natural-death
-            // recovery (naive segfaults, OOMs, etc.) — that's
-            // the path the recovery banner below was added for.
+            // During a hot-swap the engine emits stateChanged
+            // pairs for the implicit stopProxy/startProxy.
+            // switchMode owns the public state across that
+            // window and writes the final mode as a single
+            // transition; defer here. Outside the gate this
+            // handler is the source of truth for natural death.
             if transitionInFlight {
                 return
             }
-            // **UX-F#5 (v0.1.7.19):** when naive dies on its
-            // own (`running:false` arriving outside a
-            // user-initiated stop), revert system proxy
-            // immediately. Without this, macOS keeps routing
-            // browser requests at `127.0.0.1:1080` where
-            // nothing is listening — the user sees a misleading
-            // "Idle" header but every page in their browser
-            // stalls. The status flip is visible in the
-            // HeaderView; the proxy revert makes the visible
-            // state actually match the network state.
+            // When naive dies outside a user-initiated stop,
+            // revert system proxy immediately. Without this,
+            // macOS keeps routing at `127.0.0.1:1080` where
+            // nothing is listening — every page stalls behind
+            // a misleading "Idle" header.
             let wasRunning = isRunning
             let modeBeforeStop = activeMode
             isRunning = running
@@ -2228,14 +1703,9 @@ public final class TunnelOrchestrator {
                 lastTrafficSnapshot = nil
                 vpsHealthTask?.cancel()
                 vpsHealthTask = nil
-                // **Engine-F#P1.2 (v0.2):** the recovery branch
-                // is gated on `!userStopInFlight` so an
-                // intentional Stop's own `stateChanged(false)`
-                // doesn't trigger a phantom "naive stopped
-                // unexpectedly" banner. The flag is set by
-                // `stop()` / `stopQuiet()` for the duration of
-                // the call — see its declaration for the
-                // race window it covers.
+                // `!userStopInFlight` keeps an intentional Stop's
+                // own `stateChanged(false)` from triggering a
+                // phantom "naive stopped unexpectedly" banner.
                 if wasRunning && !isShuttingDown && !userStopInFlight {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
@@ -2250,21 +1720,14 @@ public final class TunnelOrchestrator {
             }
         case .anomaly(let reason, let detail):
             appendLog(source: .stderr, text: "[anomaly:\(reason.rawValue)] \(detail)")
-            // `ListeningOutsideLoopback` means naive is exposed beyond
-            // 127.0.0.1 — every byte from any LAN client could be
-            // proxied. This is the one anomaly the original Swift
-            // implementation auto-stopped on; we restore that behaviour
-            // here. The other anomalies (count thresholds) stay advisory.
+            // `ListeningOutsideLoopback` exposes naive beyond
+            // `127.0.0.1` — every LAN byte could be proxied.
+            // Other anomalies stay advisory.
             if reason == .listeningOutsideLoopback {
-                // **v2.0.29:** anomaly auto-stop is local-kernel-by-construction
-                // (e.g. naive bound outside loopback, too many established
-                // connections). Hardcoded `.localKernel`.
                 recordError("Critical: \(detail). Auto-stopping.", layer: .localKernel)
-                // Single-flight the auto-stop. Multiple anomalies
-                // arriving in quick succession would otherwise
-                // queue multiple `stop()` Tasks, each racing on
-                // `activeMode` / `isRunning` and each potentially
-                // logging a "stop failed: not_running" tail.
+                // Single-flight — duplicate anomalies arriving
+                // in quick succession would otherwise queue
+                // racing `stop()` tasks.
                 if autoStopTask == nil {
                     autoStopTask = Task { [weak self] in
                         await self?.stop()
@@ -2273,9 +1736,8 @@ public final class TunnelOrchestrator {
                 }
             }
         case .diagnosticProgress(let step, let ok, let elapsedMs):
-            // `elapsedMs == 0` means the engine omitted timing (older
-            // build); fall back to the legacy bare-step format so users
-            // running mismatched binaries still get useful output.
+            // `elapsedMs == 0` means an older engine omitted
+            // timing; fall back to the legacy bare-step format.
             let glyph = ok ? "✓" : "✗"
             if elapsedMs == 0 {
                 appendInfo("\(glyph) \(step)")
@@ -2302,16 +1764,9 @@ public final class TunnelOrchestrator {
         enqueueLog(LogEntry(source: .stdout, text: "[orchestrator] \(boundedLogText(message))"))
     }
 
-    /// Synchronous error record — stores the message + optional
-    /// `ErrorLayer` and writes the formatted line to `logEntries`.
-    /// Pre-2.0.29 took only the message; the new `layer:` parameter
-    /// defaults to `nil` so every existing call site keeps the prior
-    /// plain-text behaviour. Connection-failure paths use
-    /// [`recordClassifiedError`] which runs the layer probe before
-    /// calling this; layer-by-construction paths (engine spawn
-    /// failure, naive binary unusable, anomaly auto-stop) hardcode
-    /// `.localKernel` because the classifier would just confirm what the
-    /// caller already knows.
+    /// Synchronous error record. Connection-failure paths use
+    /// [`recordClassifiedError`] (runs the layer probe first);
+    /// layer-by-construction paths hardcode `.localKernel`.
     private func recordError(_ message: String, layer: ErrorLayer? = nil) {
         let bounded = boundedLogText(message)
         lastError = bounded
@@ -2351,57 +1806,36 @@ public final class TunnelOrchestrator {
         return "\(prefix)... [truncated]"
     }
 
-    /// **v2.0.29 (Deterministic Error Reporting):** runs the
-    /// connection-failure classifier (3 second budget), then
-    /// records the error with the resulting layer. Classifier
-    /// returns `nil` only on inconclusive probes — in which case
-    /// the banner falls back to the pre-2.0.29 plain-text
-    /// rendering, no chip. Used by the connection-bring-up paths
-    /// in `startCore` and the wake-recovery branch of
-    /// `handleSystemDidWake`.
+    /// Runs the layer classifier (3 s budget) then records.
+    /// Inconclusive probes yield `nil` and the banner falls
+    /// back to plain-text (no chip).
     private func recordClassifiedError(_ message: String) async {
         let layer = await classifyConnectionFailure()
         recordError(message, layer: layer)
     }
 
-    /// **v2.0.29 (Deterministic Error Reporting):** layer
-    /// classifier. Two parallel probes:
+    /// Two parallel reachability probes:
+    /// 1. Apple's NCSI endpoint — ISPs rarely block it.
+    /// 2. Direct TCP to the user's VPS hostname (bypasses the
+    ///    in-flight broken proxy).
     ///
-    /// 1. **Apple NCSI endpoint** — Apple's own captive-portal
-    ///    detection URL. Unlikely to be blocked by ISPs and
-    ///    returns a deterministic body. If the probe fails,
-    ///    general internet is broken → ISP layer.
-    /// 2. **Direct TCP probe to the user's VPS hostname** —
-    ///    bypasses the system proxy so the probe sees raw
-    ///    network state, not the in-flight broken proxy path.
-    ///    If Apple succeeds but VPS fails, the VPS is broken.
+    /// |           | Apple ✓        | Apple ✗ |
+    /// |-----------|----------------|---------|
+    /// | **VPS ✓** | `.localKernel` | `.isp`  |
+    /// | **VPS ✗** | `.vps`         | `.isp`  |
     ///
-    /// Both probes have a 3 s budget. The decision matrix:
-    ///
-    /// |           | Apple ✓     | Apple ✗      |
-    /// |-----------|-------------|--------------|
-    /// | **VPS ✓** | `.localKernel`    | `.isp`* |
-    /// | **VPS ✗** | `.vps`      | `.isp`  |
-    ///
-    /// `*` Apple unreachable but VPS reachable is unusual — typically
-    /// indicates ISP-level NCSI blocking, DNS hijack, or a captive
-    /// portal that lets the user's VPS through (some hotel networks).
-    /// Most actionable verdict for the user is `.isp`: their
-    /// path to the broader internet is constrained even if the
-    /// specific path to their VPS happens to work.
+    /// Apple ✗ + VPS ✓ is unusual (NCSI block / captive portal)
+    /// — `.isp` is the actionable verdict either way.
     private func classifyConnectionFailure() async -> ErrorLayer? {
-        // Capture the VPS host string on `@MainActor` BEFORE the
-        // `async let` branches. `selectedProfile` is MainActor-
-        // isolated; reading it from inside a Sendable async closure
-        // is a Swift 6 strict-concurrency error. Pinning to a `let`
-        // here also keeps the host stable across the parallel probes
-        // — a profile-switch mid-classification can't cause one
-        // probe to test against a different server than the other.
+        // Capture `vpsHost` on the MainActor BEFORE the
+        // `async let` branches — `selectedProfile` is
+        // MainActor-isolated and reading it from a Sendable
+        // closure is a Swift 6 strict-concurrency error. Also
+        // pins the host stable across both probes.
         let vpsHost: String? = {
             guard let profile = self.selectedProfile else { return nil }
-            // `profile.server` is "host" or "host:port" — strip the
-            // port for the TCP probe; we always test :443 since
-            // that's where NaiveProxy listens.
+            // Strip the port — we always test :443 (NaiveProxy's
+            // listen port).
             let host = String(profile.server.split(separator: ":").first ?? "")
             return host.isEmpty ? nil : host
         }()
@@ -2423,22 +1857,16 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// **v2.0.29 (Deterministic Error Reporting):** raw TCP
-    /// reachability probe. Bypasses the system proxy by going
-    /// through `Network.NWConnection` directly — `URLSession`
-    /// would honour the system proxy that the orchestrator's own
-    /// `proxyController.enableSmartPAC` may have just installed,
-    /// and we'd loop the probe through the broken `naive` path
-    /// instead of testing raw connectivity.
+    /// Raw TCP reachability probe via `NWConnection`. Bypasses
+    /// the system proxy — `URLSession` would honour the in-flight
+    /// `proxyController.enableSmartPAC` install and loop through
+    /// the broken naive path instead of testing raw connectivity.
     ///
-    /// `port` defaults to 443 (NaiveProxy's standard listen port,
-    /// and Apple's NCSI endpoint is HTTPS too). 3 s timeout. The
-    /// continuation-resume guard uses an `NSLock` because the
-    /// `NWConnection.stateUpdateHandler` can fire multiple times
-    /// (e.g. `.preparing` → `.ready` → `.cancelled`) and the
-    /// timeout task races against real state transitions; without
-    /// the guard a `CheckedContinuation` would crash on a double
-    /// resume.
+    /// The continuation-resume guard uses `NSLock`:
+    /// `stateUpdateHandler` can fire multiple times
+    /// (`.preparing` → `.ready` → `.cancelled`) and races against
+    /// the timeout task, so a `CheckedContinuation` would crash
+    /// on double resume without it.
     private static func probeReachability(
         host: String,
         port: UInt16 = 443,
@@ -2454,15 +1882,10 @@ public final class TunnelOrchestrator {
         let queue = DispatchQueue(label: "ct.probe.\(host).\(port)", qos: .userInitiated)
 
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            // `@Sendable` is required because `resumeOnce` is
-            // captured into both `stateUpdateHandler` (a Sendable
-            // closure on `NWConnection`) and the dispatch-queue
-            // timeout block; Swift 6 strict concurrency rejects
-            // capture of a non-Sendable local function in a
-            // Sendable closure. The body only touches Sendable
-            // state (`NSLock`, the `@unchecked Sendable` flag
-            // box, and the `CheckedContinuation` which is itself
-            // Sendable), so the annotation is sound.
+            // `@Sendable` required: Swift 6 strict concurrency
+            // rejects capture of a non-Sendable local function
+            // in a Sendable closure. Sound here — body only
+            // touches Sendable state.
             @Sendable func resumeOnce(_ value: Bool) {
                 state.lock.lock()
                 defer { state.lock.unlock() }
@@ -2553,15 +1976,11 @@ public final class TunnelOrchestrator {
             developerMetrics.vps = .idle
             return
         }
-        // **H3 (v2.0.38):** hydration can now throw on credential-store
-        // failure. Distinguish that from "no password set": the
-        // latter falls through with profile.password == "" and the
-        // probe runs against the user's server with an empty
-        // password (which the server will reject — that's the
-        // diagnostic we want); the former skips the probe and
-        // labels the metric so the operator sees the real cause
-        // instead of an empty-password rejection that misroutes
-        // them into the wrong fix.
+        // Distinguish credential-store failure from "no password
+        // set": the latter probes with empty password (server
+        // rejects — diagnostic we want); the former labels the
+        // metric so the operator isn't misrouted into an
+        // empty-password fix.
         do {
             try hydratePasswordIfNeeded(&profile)
         } catch {
@@ -2619,37 +2038,20 @@ public final class TunnelOrchestrator {
         }
     }
 
-    /// Fills in the profile's password from the credential store
-    /// when the in-memory copy is empty. Instance-method form;
-    /// delegates to the static `hydratePassword(_:from:)` so the
-    /// H3 plumbing is unit-testable without standing up a full
-    /// `TunnelOrchestrator`.
+    /// Fills the password from the credential store when the
+    /// in-memory copy is empty. Delegates to the static form.
     private func hydratePasswordIfNeeded(_ profile: inout Profile) throws {
         try Self.hydratePassword(&profile, from: profileStore)
     }
 
-    /// Static helper that does the actual H3 hydration. Pure: takes
-    /// the profile (inout) and a `ProfileStore`, throws
-    /// `OrchestratorError.credentialReadFailed(reason:)` on credential
-    /// backend failure. Item-not-found returns `""` per the
-    /// `CredentialStore` contract and falls through to the original
-    /// no-password UX — the orchestrator's validation gate handles
-    /// the empty-string case.
+    /// Throws `OrchestratorError.credentialReadFailed` on
+    /// backend failure so callers can distinguish "keychain
+    /// locked" from "no password set" (item-not-found returns
+    /// `""` per `CredentialStore` contract and the validation
+    /// gate handles the empty case).
     ///
-    /// **H3 (v2.0.38):** the throw lets callers distinguish "keychain
-    /// locked" from "no password was ever set." The previous
-    /// implementation collapsed both into the empty-string path, which
-    /// then surfaced a misleading "please enter a password" banner.
-    ///
-    /// Visibility: marked `internal` (no access modifier) and `static`
-    /// so the unit-test target can pin the H3 contract directly via
-    /// `@testable import Cool_Tunnel` without constructing a real
-    /// orchestrator (which would need `CoreClient`, `SystemProxyController`,
-    /// `FirewallProbe`, etc.). `nonisolated` because the helper is
-    /// pure (no instance state, no MainActor-bound dependencies);
-    /// the implicit `@MainActor` from the enclosing class would
-    /// otherwise force every caller — production and test — onto
-    /// the main actor for no benefit.
+    /// `nonisolated` static so the unit-test target can pin the
+    /// contract without standing up a full `TunnelOrchestrator`.
     nonisolated static func hydratePassword(
         _ profile: inout Profile, from store: ProfileStore
     )
@@ -2717,18 +2119,14 @@ public final class TunnelOrchestrator {
         logFlushTask?.cancel()
         logFlushTask = nil
         logEntries.removeAll()
-        // Also clear `lastError` — a user clicking "Clear logs"
-        // expects the error pill to disappear too. The previous
-        // behaviour left a stale error visible after the log
-        // showed empty, leading users to think the clear didn't
-        // work or that the error reappeared.
+        // "Clear logs" clears the error pill too — users expect
+        // it to disappear with the log.
         lastError = nil
         lastErrorLayer = nil
     }
 
-    /// **UX-F#1 (v0.1.7.17):** dismiss the error banner from
-    /// `HeaderView`. Encapsulated so the public setter on
-    /// `lastError` stays `private(set)`.
+    /// Dismisses the error banner. Encapsulated so `lastError`
+    /// stays `private(set)`.
     public func dismissLastError() {
         lastError = nil
         lastErrorLayer = nil
@@ -2737,14 +2135,10 @@ public final class TunnelOrchestrator {
     // MARK: - Declarative UI schema
 
     /// Pure projection from mutable orchestrator fields to the
-    /// structured state SwiftUI renders.
-    ///
-    /// **Heng / Silent Operator invariant:** this is the public map
-    /// of what the UI is allowed to know. Keep operational recovery
-    /// policy in the orchestrator, and keep views as pure functions
-    /// of this value plus local UI draft state. Future AI-led edits
-    /// should extend this schema before reaching directly into
-    /// lifecycle internals from a leaf view.
+    /// structured state SwiftUI renders. This is the public map
+    /// of what the UI is allowed to know; keep operational
+    /// recovery policy in the orchestrator and keep views as
+    /// pure functions of this value plus local draft state.
     public func viewState(
         ui: CoolTunnelUIState = CoolTunnelUIState()
     ) -> CoolTunnelViewState {
@@ -2821,14 +2215,10 @@ public final class TunnelOrchestrator {
         )
     }
 
-    /// Applies an explicit UI intent. This is the only imperative
-    /// bridge the SwiftUI composition root needs for tunnel controls.
-    ///
-    /// Leaf views should emit `TunnelIntent` instead of invoking
-    /// `start`, `stop`, diagnostics, or log mutation directly. That
-    /// preserves the Silent Operator design: screens describe operator
-    /// intent, while this layer decides the quietest safe operational
-    /// action.
+    /// Applies an explicit UI intent. The only imperative bridge
+    /// the SwiftUI composition root needs for tunnel controls;
+    /// leaf views should emit `TunnelIntent` rather than calling
+    /// `start` / `stop` / diagnostics directly.
     public func perform(_ intent: TunnelIntent) async {
         switch intent {
         case .switchMode(let mode):
@@ -2925,10 +2315,10 @@ public final class TunnelOrchestrator {
             && profile.localPortValue != nil
     }
 
-    /// Final UI-intent gate before any control surface reaches the
-    /// engine. The form performs live validation, but this guard keeps
-    /// the menu bar, keyboard shortcuts, and future surfaces under the
-    /// same "First Scold, Then Do Good" contract.
+    /// Final UI-intent gate before any control surface reaches
+    /// the engine — keeps the menu bar, keyboard shortcuts, and
+    /// future surfaces under the same validation contract as
+    /// the form.
     private func guardCanRequestStart() -> Bool {
         guard var profile = selectedProfile else {
             recordError("Start rejected: select or create a profile first.", layer: .localKernel)
@@ -2942,12 +2332,11 @@ public final class TunnelOrchestrator {
             return false
         }
         if profile.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // **H3 (v2.0.38):** distinguish credential-store failure
-            // from "no password set" so the rejection banner tells
-            // the user the right thing to fix. The previous
-            // implementation collapsed both into the empty-string
-            // path and emitted "Start rejected: enter a password"
-            // even when the keychain was locked.
+            // Distinguish credential-store failure from
+            // "no password set" so the rejection banner says
+            // the right thing — collapsing both produced
+            // "enter a password" even when the keychain was
+            // locked.
             do {
                 profile.password = try profileStore.password(forProfileID: profile.id)
             } catch {
@@ -2981,42 +2370,22 @@ public final class TunnelOrchestrator {
     }
 }
 
-/// Errors raised by the orchestrator (separate from engine and OS errors,
-/// which surface as their own types).
-///
-/// **v2.0.29 (Deterministic Error Reporting):** taxonomy that
-/// pinpoints which node in the connection chain is broken when a
-/// connection-failure path fires. Eliminates the "self-doubt"
-/// failure mode where the user has to run manual diagnostics to
-/// figure out whether the issue is the ISP path, the VPS, or the
-/// local macOS kernel/app stack. Classifier
-/// ([`TunnelOrchestrator.classifyConnectionFailure`])
-/// runs two parallel probes (Apple's NCSI endpoint for general
-/// upstream reachability + a direct TCP probe to the user's VPS
-/// hostname bypassing the proxy) with a 3 second budget; both
-/// probes go around the system proxy so the classifier sees the
-/// raw network state, not the in-flight broken proxy path.
+/// Identifies which node in the connection chain is broken when
+/// a connection-failure path fires. Populated by
+/// [`TunnelOrchestrator.classifyConnectionFailure`].
 public enum ErrorLayer: String, Sendable, Codable, Equatable {
-    /// The issue is on the user's Mac — `naive` isn't running, the
-    /// loopback bind failed, the OS firewall is blocking outbound
-    /// traffic, or the app's saved credentials are wrong.
+    /// On the user's Mac — naive not running, loopback bind
+    /// failed, OS firewall blocking, wrong credentials.
     case localKernel
-    /// The issue is between the Mac and the public internet —
-    /// the ISP, Wi-Fi association, captive portal, or DNS. The
-    /// classifier reaches this verdict when even Apple's NCSI
-    /// endpoint is unreachable.
+    /// Between Mac and internet — ISP, Wi-Fi, captive portal,
+    /// DNS. Apple's NCSI endpoint is unreachable.
     case isp
-    /// The issue is the user's NaiveProxy server — DNS for the
-    /// configured hostname doesn't resolve, the host is up but
-    /// `:443` refuses connections, or the upstream daemon is
-    /// rejecting the handshake. The classifier reaches this
-    /// verdict when general internet works but the user's VPS
-    /// hostname specifically does not.
+    /// The user's NaiveProxy server — DNS doesn't resolve, host
+    /// up but `:443` refuses, or the daemon rejects the
+    /// handshake. General internet works.
     case vps
 
-    /// Short label rendered in the `HeaderView` error chip. Held to
-    /// one word + an opening / closing bracket so the chip stays
-    /// inside the banner's vertical metric.
+    /// Short label rendered in the `HeaderView` error chip.
     public var diagnosticLabel: String {
         switch self {
         case .localKernel: "Local Kernel"
@@ -3025,11 +2394,9 @@ public enum ErrorLayer: String, Sendable, Codable, Equatable {
         }
     }
 
-    /// Plain-language sentence the operator can read out loud to a
-    /// support partner. Used by `Disclaimer.md` § "Reporting issues"
-    /// + the `Diag` button's transcript export. Deliberately not
-    /// rendered in the banner itself — the banner shows the chip +
-    /// the original `lastError` so the message stays scannable.
+    /// Plain-language sentence for support transcript / `Diag`
+    /// export. Not rendered in the banner itself — banner stays
+    /// scannable.
     public var humanExplanation: String {
         switch self {
         case .localKernel:
@@ -3050,12 +2417,7 @@ public enum ErrorLayer: String, Sendable, Codable, Equatable {
     }
 }
 
-/// **v2.0.28 (Seamless Recovery Protocol):** finite state machine
-/// for the orchestrator's system-sleep / wake transition. Owned by
-/// `TunnelOrchestrator.sleepWakeState` and read by `HeaderStatusPill`
-/// to render the transient phase labels.
-///
-/// Lifecycle:
+/// Finite state machine for the sleep / wake transition.
 ///
 /// ```text
 ///                  willSleepNotification
@@ -3066,13 +2428,13 @@ public enum ErrorLayer: String, Sendable, Codable, Equatable {
 ///                                              │ didWakeNotification
 ///                                              ▼
 ///                                         .recovering
-///                                              │ (await switchMode(to: modeBeforeSleep))
+///                                              │ (await switchMode)
 ///                                              ▼
 ///                                            .idle
 /// ```
 ///
-/// `.idle` is the steady-state outside sleep transitions; the pill
-/// falls back to the base `isRunning` / `lastError` rendering.
+/// `.idle` is the steady state; the pill falls back to base
+/// `isRunning` / `lastError` rendering.
 public enum SleepWakeState: String, Sendable, Codable, Equatable {
     /// Steady state. No sleep transition in flight.
     case idle
@@ -3101,30 +2463,23 @@ extension UInt32 {
     }
 }
 
-/// **Conforms to `LocalizedError`, not just `Error`.** Without
-/// `LocalizedError`, the `(error as? LocalizedError)?.errorDescription`
-/// cast at the catch sites in `startCore` etc. silently misses
-/// these cases and the user sees Swift's default
-/// `"The operation couldn't be completed. (CoolTunnel.OrchestratorError error N.)"`
-/// instead of the strings below. Per-type round-3 review fix.
+/// Conforms to `LocalizedError` so the
+/// `(error as? LocalizedError)?.errorDescription` casts at the
+/// catch sites in `startCore` etc. hit these cases — without it
+/// the user sees Swift's default "The operation couldn't be
+/// completed. (...error N.)".
 public enum OrchestratorError: LocalizedError, Sendable, Equatable {
     case noProfile
     case invalidProfile(reason: String)
     case unexpectedResponse
-    /// The configured `naive` binary cannot be used: the file is missing,
-    /// not a Mach-O, lacks a slice for the host CPU, or has a broken
-    /// code signature. The wrapped [`NaiveResolverError`] tells the user
-    /// which one — and what to do about it.
+    /// `naive` binary unusable — file missing, not Mach-O, no
+    /// host-arch slice, or broken signature. Wrapped error
+    /// tells the user which.
     case naiveBinaryUnusable(NaiveResolverError)
-    /// **H3 (v2.0.38):** the credential store could not be read.
-    /// Distinct from "no password set" (which is not an error; the
-    /// validation gate handles it). Typical causes: keychain
-    /// locked, user dismissed the keychain access prompt, the file
-    /// backend hit an IO error, or a corrupted entry failed to
-    /// decode. The orchestrator's existing local-kernel layer maps
-    /// these to actionable user copy ("Unlock the Keychain and try
-    /// again") instead of the misleading "enter a password" banner
-    /// the previous optional-coalesce produced.
+    /// Credential store read failed — keychain locked, prompt
+    /// dismissed, file IO, corrupted entry. Distinct from "no
+    /// password set" so the banner says "unlock keychain"
+    /// rather than the misleading "enter a password".
     case credentialReadFailed(reason: String)
 
     public var errorDescription: String? {
@@ -3140,58 +2495,35 @@ public enum OrchestratorError: LocalizedError, Sendable, Equatable {
     }
 }
 
-/// Errors raised during subscription URL import.
-///
-/// Keyed on the user-facing failure mode rather than transport
-/// shape, so banner copy can be both accurate and actionable.
-/// Roughly mapped to Laravel response codes — see
-/// [`TunnelOrchestrator.importFromSubscriptionURL`] for the
-/// status-code → variant table.
+/// UI-facing subscription import errors, keyed on the failure
+/// mode rather than transport shape.
 public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
     /// URL didn't parse, or wasn't `https://…`.
     case invalidURL
-    /// Transport failure — host unreachable, TLS rejection, etc.
+    /// Transport failure.
     case networkError(String)
-    /// HTTP 401 — token resolved to an inactive account
-    /// (disabled, expired, quota exceeded). The user has to ask
-    /// the operator to re-enable the account or generate a new
-    /// password.
+    /// HTTP 401 — account disabled / expired / quota exceeded.
     case subscriptionRevoked
-    /// HTTP 404 / 422, or a 200-with-HTML cover-site response.
-    /// The token is malformed or doesn't match any account on
-    /// this panel.
+    /// HTTP 404 / 422, or 200-with-HTML cover-site response.
     case tokenInvalid
-    /// HTTP 429 — too many fetches from this IP. The panel
-    /// rate-limits at 60/min; the user should wait a minute.
+    /// HTTP 429 — panel rate-limits at 60/min.
     case rateLimited
-    /// HTTP 5xx — panel is down, APP_KEY is unset, or some
-    /// other server-side problem.
+    /// HTTP 5xx.
     case serverError(status: Int)
-    /// Anything else outside 2xx / the explicit cases above.
+    /// Anything outside 2xx / the explicit cases above.
     case unexpectedStatus(Int)
     /// JSON decoded but had no usable profile.
     case noProfiles
-    /// Manifest's `version` field is something other than `1`.
-    /// Either a counterfeit panel or a v2 server emitting v2-only
-    /// manifests; the v1-only client refuses to interpret either.
+    /// Manifest `version != 1`.
     case unsupportedVersion(got: UInt32)
-    /// Manifest's `expires_at` is in the past — the panel told
-    /// the client to re-fetch and the client got a stale URL.
+    /// `expires_at` in the past — stale URL.
     case manifestExpired
-    /// Manifest's `issued_at` is more than 7 days old. Almost
-    /// always a caching proxy on the user's network; trying again
-    /// over a different network usually resolves it.
+    /// `issued_at` > 7 days old — typically a caching proxy.
     case manifestStale(daysOld: Int)
-    /// Manifest passed JSON decode but failed structural sanity
-    /// (`issued_at == 0`, `issued_at` far in the future, or
-    /// `expires_at < issued_at`). A real panel never emits any
-    /// of these — the manifest is from a stub server, a
-    /// transcription error, or a counterfeit panel trying to
-    /// produce an indefinitely-valid manifest.
+    /// Failed structural sanity (issued_at == 0 / far future /
+    /// expires_at < issued_at) — stub / counterfeit panel.
     case manifestCounterfeit
-    /// Response body exceeded the [`SubscriptionClient.maxBytes`]
-    /// cap (1 MB). A real manifest is ~1 KB; this fires only on
-    /// a hijacked panel or MITM streaming oversized content.
+    /// Body exceeded the 1 MB cap.
     case manifestTooLarge(cap: Int)
 
     public var errorDescription: String? {
@@ -3225,14 +2557,3 @@ public enum SubscriptionImportError: LocalizedError, Sendable, Equatable {
         }
     }
 }
-
-// **v2.0.21 (Phase A):** removed the per-orchestrator
-// `SubscriptionManifest` private struct. Only `host`, `username`,
-// `password` were decoded — the manifest's `port`, `version`,
-// `expires_at`, `issued_at`, and `capabilities` fields were
-// silently dropped. Replaced by `SubscriptionManifestV1` in
-// `Core/Subscription.swift` (the full ct-protocol mirror) and
-// `SubscriptionClient` in `Core/SubscriptionClient.swift` (fetch +
-// validate). The orchestrator's `importFromSubscriptionURL` now
-// calls into those types and translates their structured errors
-// into `SubscriptionImportError` for the UI.

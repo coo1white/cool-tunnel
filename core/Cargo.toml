@@ -40,23 +40,12 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Server-mode HTTP API. Pulled in only for `--mode server` paths;
-# client mode (the macOS app's stdin/stdout dispatch) does not
-# touch axum at all but the dependency adds ~600 KB to the
-# universal binary. Keeping default-features off so we don't drag
-# in tower-http / matchit-fs / multipart machinery we don't use.
+# Server-mode HTTP API (--mode server only). default-features=off
+# keeps tower-http / matchit-fs / multipart out of the universal binary.
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
-# **v0.1.7.12 (SM-10):** ConcurrencyLimitLayer caps in-flight
-# requests in `server_mode::router()`. tower 0.5 is already in
-# the tree transitively via axum; declaring it as a direct dep
-# with the `limit` feature only keeps the audit surface tight
-# (no additional crates pulled in beyond what axum already
-# brings). `tower::timeout::TimeoutLayer` was considered for the
-# same router but introduces a non-Infallible error type that
-# requires `HandleErrorLayer` boilerplate; the audit's
-# slow-loris concern is partially addressed by the concurrency
-# cap (max 64 in-flight regardless of how slow each is) and a
-# proper body-read timeout is deferred to a later cycle.
+# Direct tower dep for ConcurrencyLimitLayer in server_mode::router()
+# (caps in-flight at 64; partial slow-loris mitigation, full body-read
+# timeout deferred).
 tower = { version = "0.5", default-features = false, features = ["limit"] }
 
 [dev-dependencies]
@@ -75,34 +64,10 @@ todo = "deny"
 unimplemented = "deny"
 
 [profile.release]
-# Performance tuning for macOS distribution. The engine is a long-
-# lived subprocess that ships in every Cool Tunnel app, so we
-# optimize hard once at build time:
-#
-# - opt-level = 3      → maximum compiler optimization
-# - lto = "fat"        → cross-crate inlining, smaller + faster
-#                        binary at the cost of slower link
-# - codegen-units = 1  → single codegen unit lets LLVM see the
-#                        whole crate; pairs with LTO for the best
-#                        optimization quality
-# - panic = "abort"    → drop the unwinding tables; saves tens of
-#                        KB and a few % runtime cost. A panic in
-#                        the engine terminates the subprocess and
-#                        the Swift CoreClient detects the SIGCHLD
-#                        and surfaces it — same UX as before, just
-#                        without unwinding through every frame.
-# - strip = "symbols"  → drop the symbol table from the shipped
-#                        binary; debug info is preserved in the
-#                        separate dSYM Xcode generates anyway.
-# - debug = false      → no debug info in the release binary
-#                        itself (was implicit; making it explicit
-#                        documents the intent).
-#
-# Together these shave the cool-tunnel-core binary from ~6 MB to
-# ~3.2 MB and meaningfully tighten the hot paths in
-# `monitor_loop`, `redaction::redact`, and `Debouncer::admit` —
-# noticeable on Intel Macs and 8 GB Apple Silicon machines that
-# can't afford a chunky engine.
+# Tuned for the shipped engine subprocess: ~6 MB → ~3.2 MB and
+# tighter hot paths in monitor_loop / redaction::redact / Debouncer::admit.
+# panic=abort is safe because a panic in the engine terminates the
+# subprocess; Swift CoreClient detects SIGCHLD and surfaces it.
 opt-level = 3
 lto = "fat"
 codegen-units = 1
