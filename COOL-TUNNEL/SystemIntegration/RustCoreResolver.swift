@@ -149,17 +149,20 @@ public struct RustCoreResolver: Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw RustCoreResolverError.fileNotFound(url)
         }
-        let archs = await Self.runLipoInfo(at: url)
+        let archs = await BinaryInspector.runLipoInfo(at: url)
         guard !archs.isEmpty else {
             throw RustCoreResolverError.notAMachO(url)
         }
         let version: String?
         if archs.contains(HostArchitecture.current.machOArchName) {
-            version = await Self.runVersion(at: url)
+            version = await BinaryInspector.runVersion(
+                at: url,
+                binaryName: "cool-tunnel-core"
+            )
         } else {
             version = nil
         }
-        let signatureValid = await Self.checkSignature(at: url)
+        let signatureValid = await BinaryInspector.checkSignature(at: url)
         return RustCoreDescriptor(
             url: url,
             origin: origin,
@@ -176,68 +179,5 @@ public struct RustCoreResolver: Sendable {
             ?? Bundle.main.bundleURL.appendingPathComponent(
                 "Contents/Resources/cool-tunnel-core"
             )
-    }
-
-    // MARK: - Subprocess helpers (same shape as NaiveBinaryResolver)
-
-    /// Spawns `lipo -info <path>` and delegates output parsing to
-    /// `LipoOutputParser`. Pair to `NaiveBinaryResolver.runLipoInfo`;
-    /// both resolvers share the parser via `LipoOutputParser` so the
-    /// known-arch allow-list lives in one place.
-    private static func runLipoInfo(at url: URL) async -> Set<String> {
-        let result = await runProcess(
-            executable: URL(fileURLWithPath: "/usr/bin/lipo"),
-            arguments: ["-info", url.path]
-        )
-        guard let output = result else { return [] }
-        return LipoOutputParser.parse(output)
-    }
-
-    /// Invokes the binary with `--version` and accepts only output
-    /// that matches the canonical pattern
-    /// `cool-tunnel-core <semver>`. Same defence-in-depth posture
-    /// as `NaiveBinaryResolver.runVersion` — a misbehaving binary
-    /// can't put arbitrary text into the Settings UI.
-    private static func runVersion(at url: URL) async -> String? {
-        let output = await runProcess(executable: url, arguments: ["--version"])
-        guard let raw = output else { return nil }
-        // Pattern allows the standard semver shape Cargo emits
-        // (`MAJOR.MINOR.PATCH`) plus an optional pre-release
-        // suffix and an optional 4th `.PATCH2` segment for our
-        // own 4-component marketing version (e.g. 0.1.5.7).
-        let pattern = #"^cool-tunnel-core\s+\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?\s*$"#
-        for line in raw.split(whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.range(of: pattern, options: .regularExpression) != nil {
-                return trimmed
-            }
-        }
-        return nil
-    }
-
-    private static func checkSignature(at url: URL) async -> Bool {
-        do {
-            try await CodeSignVerifier.verifyValid(at: url)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private static func runProcess(executable: URL, arguments: [String]) async -> String? {
-        // See NaiveBinaryResolver.runProcess for the rationale —
-        // same flow, same 10-second timeout for the same reason.
-        let result: SubprocessResult
-        do {
-            result = try await Subprocess.run(
-                executable: executable,
-                arguments: arguments,
-                timeout: 10
-            )
-        } catch {
-            return nil
-        }
-        let combined = result.stdout.isEmpty ? result.stderr : result.stdout
-        return combined
     }
 }
