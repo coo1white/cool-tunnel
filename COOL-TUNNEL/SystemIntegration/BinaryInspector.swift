@@ -65,7 +65,7 @@ public enum BinaryInspector {
         //     Passing `--version` against sing-box was a v3.0.0
         //     regression caught only when users opened Settings →
         //     sing-box: the binary loaded, signed, archs all green,
-        //     but the version row read "(no --version output)" and
+        //     but the version row read "(no `version` output)" and
         //     the verdict pill flipped to NG.
         //
         // Per-binary argv table keeps the call sites unchanged.

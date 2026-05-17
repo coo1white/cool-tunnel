@@ -193,7 +193,7 @@ public struct SettingsView: View {
                             .foregroundStyle(.red)
                     } else {
                         Text(
-                            "Test runs a full code-signature + host-CPU-slice + --version check. Update downloads the latest sing-box from upstream (SagerNet) and lipo-merges arm64 + x86_64 into a single universal binary."
+                            "Test runs a full code-signature + host-CPU-slice + `version` check. Update downloads the latest sing-box from upstream (SagerNet) and lipo-merges arm64 + x86_64 into a single universal binary."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -452,7 +452,7 @@ public struct SettingsView: View {
                 )
                 summaryRow(
                     label: "Version",
-                    value: descriptor.version ?? "(no --version output)"
+                    value: descriptor.version ?? "(no `version` output)"
                 )
                 hostSliceRow(descriptor: descriptor)
                 signatureRow(descriptor: descriptor)
@@ -663,7 +663,7 @@ public struct SettingsView: View {
             // v3.0.0 — `BinaryInspector.runVersion(binaryName:
             // "sing-box")` shells `sing-box version` (the subcommand)
             // and rejects output that doesn't match the
-            // `sing-box X.Y.Z` shape. The two ways this returns nil
+            // `sing-box version X.Y.Z` shape. The two ways this returns nil
             // are observationally identical from here (no output OR
             // wrong shape), so phrase the message for both — the
             // common v2.x → v3.0.0 upgrade case is "the path points
@@ -673,7 +673,7 @@ public struct SettingsView: View {
             // SagerNet/sing-box; both end up at the right path.
             return (
                 false,
-                "Binary's `version` output didn't match the expected `sing-box X.Y.Z` shape. The path may point at a leftover v2.x naive binary — click Reset to use the bundled sing-box, or Update to install the latest upstream."
+                "Binary's `version` output didn't match the expected `sing-box version X.Y.Z` shape. The path may point at a leftover v2.x naive binary — click Reset to use the bundled sing-box, or Update to install the latest upstream."
             )
         }
         let archDesc =
