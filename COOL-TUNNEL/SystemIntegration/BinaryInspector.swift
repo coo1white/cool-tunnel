@@ -56,9 +56,37 @@ public enum BinaryInspector {
         at url: URL,
         binaryName: String
     ) async -> String? {
-        let output = await runProcess(executable: url, arguments: ["--version"])
+        // Upstream binaries disagree on how to ask for their version:
+        //
+        //   - clap-based binaries (cool-tunnel-core, naive) use the
+        //     `--version` long flag, by convention.
+        //   - SagerNet/sing-box uses the `version` subcommand
+        //     (`sing-box version`) and prints nothing for `--version`.
+        //     Passing `--version` against sing-box was a v3.0.0
+        //     regression caught only when users opened Settings →
+        //     sing-box: the binary loaded, signed, archs all green,
+        //     but the version row read "(no --version output)" and
+        //     the verdict pill flipped to NG.
+        //
+        // Per-binary argv table keeps the call sites unchanged.
+        let arguments: [String]
+        switch binaryName {
+        case "sing-box":
+            arguments = ["version"]
+        default:
+            arguments = ["--version"]
+        }
+        let output = await runProcess(executable: url, arguments: arguments)
         guard let raw = output else { return nil }
-        let pattern = #"^\#(binaryName)\s+\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?\s*$"#
+        // sing-box prints `sing-box version 1.13.12` on the first
+        // line plus an `Environment:` / `Tags:` tail; cool-tunnel-
+        // core prints `cool-tunnel-core 3.0.0`. Same regex shape
+        // for both — anchored on the binary name + a 1-4-segment
+        // dotted-numeric version with optional pre-release suffix.
+        // The optional ` version` literal between name and number
+        // matches sing-box's output without the regex tripping on
+        // cool-tunnel-core (which omits the word).
+        let pattern = #"^\#(binaryName)(\s+version)?\s+\d+(\.\d+){0,3}(-[A-Za-z0-9.]+)?\s*$"#
         for line in raw.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.range(of: pattern, options: .regularExpression) != nil {
