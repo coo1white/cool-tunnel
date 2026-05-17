@@ -357,20 +357,22 @@ async function main(): Promise<void> {
     // --- 6. sing-box arch guard ------------------------------------------
     const singboxPath = join(root, "COOL-TUNNEL", "sing-box");
     if (existsSync(singboxPath) && statSync(singboxPath).isFile()) {
-        step(`sing-box arch guard: lipo on ${singboxPath}`);
-        const { output: lipoOut, code: lipoCode } = await captureCombined([
-            "lipo",
-            "-info",
-            singboxPath,
-        ]);
-        if (lipoCode !== 0) {
-            failMsg(state, `lipo failed: ${lipoOut.trim()}`);
-        } else {
-            const parsed = parseLipoInfo(lipoOut);
-            if (parsed.universal) {
-                step("sing-box: universal (arm64 + x86_64) ✓");
+        if (requireOrSkip("lipo", "lipo (sing-box arch guard)", state, strict)) {
+            step(`sing-box arch guard: lipo on ${singboxPath}`);
+            const { output: lipoOut, code: lipoCode } = await captureCombined([
+                "lipo",
+                "-info",
+                singboxPath,
+            ]);
+            if (lipoCode !== 0) {
+                failMsg(state, `lipo failed: ${lipoOut.trim()}`);
             } else {
-                failMsg(state, `sing-box is not universal: ${lipoOut.trim()}`);
+                const parsed = parseLipoInfo(lipoOut);
+                if (parsed.universal) {
+                    step("sing-box: universal (arm64 + x86_64) ✓");
+                } else {
+                    failMsg(state, `sing-box is not universal: ${lipoOut.trim()}`);
+                }
             }
         }
     } else {
