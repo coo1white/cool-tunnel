@@ -97,16 +97,15 @@ const MAX_INFLIGHT_REQUESTS: usize = 32;
 /// Engine-wide mutable state. Wrapped in a [`Mutex`] and shared
 /// between the stdin reader and any background tasks.
 ///
-/// **v0.1.7.10 additions** (Ru-A1 / Ru-A3):
 /// - `stopping`: dispatcher sets `true` while holding the lock to
-///   block concurrent `start_proxy` from spawning a second naive
-///   while a stop is in flight (Ru-A3 TOCTOU fix). Cleared after
+///   block concurrent `start_proxy` from spawning a second engine
+///   while a stop is in flight (TOCTOU fix). Cleared after
 ///   `supervisor.stop().await` returns.
 /// - `emitted_stopped`: at-most-once gate so the natural-death
 ///   path in `monitor_loop` and the user-stop path in the
 ///   dispatcher don't both emit `StateChanged{false}` for the
-///   same transition (Ru-A1 single-emitter discipline). Reset
-///   to `false` on every successful `start_proxy`.
+///   same transition (single-emitter discipline). Reset to
+///   `false` on every successful `start_proxy`.
 #[derive(Default)]
 struct EngineState {
     supervisor: Option<ProxySupervisor>,

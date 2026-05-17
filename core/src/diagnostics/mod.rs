@@ -197,12 +197,3 @@ fn ms_to_u64(ms: f64) -> u64 {
         rounded as u64
     }
 }
-
-// The v2.x test `smart_and_global_target_lists_are_non_empty` was
-// removed in v3.0.0 — the SMART_TARGETS / GLOBAL_TARGETS constants
-// are both `&'static [&'static str]` aliases for the same compile-
-// time-non-empty LATENCY_TARGETS slice, so the assertions were
-// tautologies that clippy correctly flagged as "this expression
-// always evaluates to false" under -D warnings. If a future split
-// reintroduces divergent target lists, add the test back as a
-// regression guard with the divergent shapes.
