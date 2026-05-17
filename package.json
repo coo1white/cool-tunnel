@@ -2,7 +2,7 @@
   "name": "cool-tunnel-tools",
   "version": "0.0.0",
   "private": true,
-  "description": "TypeScript+Bun re-implementation of the complex Cool Tunnel maintenance scripts (cut_release, fetch_naive). The other six scripts under scripts/ stay POSIX shell. See scripts/README-bun.md.",
+  "description": "TypeScript+Bun port of the Cool Tunnel maintenance scripts: audit, cut_release, fetch_singbox-core, package_release, preflight, security_check, try_question_ratchet. The .sh shims under scripts/ forward into the Bun ports.",
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
