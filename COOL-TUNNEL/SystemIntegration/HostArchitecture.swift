@@ -3,11 +3,11 @@
 // See LICENSE for full terms.
 // SystemIntegration/HostArchitecture.swift
 //
-// Tells the rest of the app which CPU it is running on. The naive binary
-// must contain a Mach-O slice for this architecture or the proxy will
-// fail with "Bad CPU type in executable" at spawn time. Knowing the host
-// arch up front lets the resolver and Settings UI surface that mismatch
-// before the user hits the "Start" button.
+// Tells the rest of the app which CPU it is running on. The sing-box
+// binary must contain a Mach-O slice for this architecture or the proxy
+// will fail with "Bad CPU type in executable" at spawn time. Knowing the
+// host arch up front lets the resolver and Settings UI surface that
+// mismatch before the user hits the "Start" button.
 
 import Darwin
 import Foundation

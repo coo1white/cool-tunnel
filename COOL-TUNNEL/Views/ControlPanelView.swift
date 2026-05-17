@@ -191,7 +191,7 @@ public struct ControlPanelView: View {
     private var debugHandshakeButton: some View {
         IconBarButton(
             systemImage: "network.badge.shield.half.filled",
-            help: "Run a temporary reference-naive handshake probe and log first-byte hex evidence.",
+            help: "Run a temporary reference-proxy handshake probe and log first-byte hex evidence.",
             accessibilityLabel: "Debug handshake",
             isEnabled: state.selectedProfileCanRequestStart
         ) {
@@ -210,7 +210,7 @@ public struct ControlPanelView: View {
             Button("Local route (bypasses proxy)") {}
                 .disabled(true)
                 .help(
-                    "Local mode runs naive on 127.0.0.1 without changing the system proxy — there is no proxied path to measure."
+                    "Local mode runs sing-box on 127.0.0.1 without changing the system proxy — there is no proxied path to measure."
                 )
         } label: {
             Image(systemName: "speedometer")

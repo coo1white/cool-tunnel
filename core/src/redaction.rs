@@ -3,11 +3,17 @@
 // See LICENSE for full terms.
 //! Credential redaction for log lines forwarded to the Swift UI.
 //!
-//! `naive` prints its full proxy URL — including userinfo — at
-//! default verbosity, and forwarded lines reach the live log,
-//! support bundles, and screenshots. This module strips userinfo
-//! and other credential-shaped fragments before the line crosses
-//! our boundary.
+//! v3.0.0 surface area:
+//! - `sing-box` prints the resolved outbound block (UUID, Reality
+//!   public_key, short_id) at startup. This module strips those
+//!   before forwarding to the UI.
+//! - Forward-compat with v2.x: legacy `Authorization: Basic …`
+//!   headers and `scheme://user:pass@host` userinfo are still
+//!   redacted so support bundles from mixed-version sessions stay
+//!   safe.
+//!
+//! Patterns are independent — a line carrying both a userinfo URL
+//! and a bare UUID will have both redacted.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -59,6 +65,22 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     if let Cow::Owned(s) = AUTH_HEADER_REGEX.replace_all(&current, "${prefix}***") {
         // Re-run after the JSON pass in case a header-shaped
         // credential coexists with a JSON dump on the same line.
+        current = Cow::Owned(s);
+    }
+    // v3.0.0 Reality / VLESS patterns. The JSON-quoted form runs
+    // first (same rationale as the v2.x password pass) so a value
+    // with embedded punctuation is fully redacted.
+    if let Cow::Owned(s) = REALITY_QUOTED_KV_REGEX.replace_all(&current, "${prefix}***${suffix}") {
+        current = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = REALITY_BARE_KV_REGEX.replace_all(&current, "${prefix}***${suffix}") {
+        current = Cow::Owned(s);
+    }
+    // Bare-UUID pass runs LAST so we don't accidentally clobber the
+    // tail of a quoted Reality `public_key` value (which is base64url
+    // and never matches the UUID shape). The hyphenated form is the
+    // only one sing-box emits and the only one VLESS accepts.
+    if let Cow::Owned(s) = UUID_REGEX.replace_all(&current, "<uuid-redacted>") {
         current = Cow::Owned(s);
     }
     current
@@ -163,6 +185,70 @@ static QUERY_STRING_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         r"(?i)(?P<prefix>[?&](?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|session|auth|password|secret)=)[^&\s#]+",
     )
     .expect("query-string credential redaction regex must compile")
+});
+
+/// Bare-UUID matcher. RFC 4122 hyphenated, lowercase or uppercase.
+/// sing-box emits the VLESS user_id verbatim in the startup
+/// "outbound resolved" log line; redacting at this layer keeps
+/// support bundles safe even if the higher-level JSON KV passes
+/// miss a future field name.
+///
+/// Replacement string is a literal `<uuid-redacted>` rather than
+/// `***` so the post-redaction line still looks structurally like
+/// a UUID would have lived there — easier to spot in support
+/// bundles than a generic asterisk run.
+#[allow(clippy::expect_used)]
+static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+        .expect("UUID redaction regex must compile")
+});
+
+/// Strict-JSON-quoted-value matcher for Reality fields:
+/// `"public_key": "<base64url>"` and `"short_id": "<hex>"`. Same
+/// strategy as `JSON_KV_QUOTED_REGEX` so embedded punctuation in a
+/// future short_id formatting doesn't leak past the comma.
+///
+/// Also covers a future `"uuid": "<value>"` field name so a
+/// rendered config blob can't smuggle an unredacted UUID past the
+/// bare-UUID matcher below (the bare matcher catches the value
+/// already, but the quoted matcher additionally hides the field
+/// name's existence by replacing the value with `***` rather than
+/// the longer `<uuid-redacted>` literal).
+#[allow(clippy::expect_used)]
+static REALITY_QUOTED_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        (?P<prefix>
+            "(?:public[_-]?key|short[_-]?id|uuid|reality[_-]?private[_-]?key)"
+            \s* : \s*
+            "
+        )
+        (?:[^"\\]|\\.)*
+        (?P<suffix>")
+        "#,
+    )
+    .expect("Reality JSON KV redaction regex must compile")
+});
+
+/// Bare-token `key=value` / `key: value` matcher for Reality fields.
+/// Covers `public_key`, `short_id`, `uuid`, `reality_private_key`.
+/// Value class mirrors `JSON_KV_CRED_REGEX` (terminates at
+/// `&`/`#`/comma/quote) so URL-shaped contexts don't bleed past
+/// the intended segment.
+#[allow(clippy::expect_used)]
+static REALITY_BARE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        (?P<prefix>
+            "?(?:public[_-]?key|short[_-]?id|uuid|reality[_-]?private[_-]?key)"?
+            \s* [:=] \s*
+            "?
+        )
+        [^"\s,&\x23}\r\n]+
+        (?P<suffix>"?)
+        "#,
+    )
+    .expect("Reality bare KV redaction regex must compile")
 });
 
 #[cfg(test)]
@@ -317,6 +403,101 @@ mod tests {
         let _ = COOKIE_HEADER_REGEX.replace_all("", "");
         let _ = JSON_KV_QUOTED_REGEX.replace_all("", "");
         let _ = JSON_KV_CRED_REGEX.replace_all("", "");
+        let _ = QUERY_STRING_CRED_REGEX.replace_all("", "");
+        let _ = UUID_REGEX.replace_all("", "");
+        let _ = REALITY_QUOTED_KV_REGEX.replace_all("", "");
+        let _ = REALITY_BARE_KV_REGEX.replace_all("", "");
+    }
+
+    // MARK: - v3.0.0 Reality / UUID patterns
+
+    #[test]
+    fn redacts_bare_uuid() {
+        let line = "outbound resolved uuid=11111111-2222-3333-4444-555555555555 ok";
+        let out = redact(line);
+        assert!(
+            !out.contains("11111111-2222-3333-4444-555555555555"),
+            "uuid leaked: {out}"
+        );
+        // The bare-KV regex catches the value first and replaces
+        // with `***`; the bare-UUID matcher would otherwise replace
+        // with `<uuid-redacted>`. Either is acceptable — we only
+        // assert nothing leaks.
+    }
+
+    #[test]
+    fn redacts_quoted_uuid_in_json() {
+        let line = r#"{"users":[{"uuid":"11111111-2222-3333-4444-555555555555","name":"alice"}]}"#;
+        let out = redact(line);
+        assert!(
+            !out.contains("11111111-2222-3333-4444-555555555555"),
+            "uuid leaked: {out}"
+        );
+        assert!(out.contains(r#""uuid":"***""#), "shape wrong: {out}");
+        assert!(
+            out.contains(r#""name":"alice""#),
+            "non-cred field clobbered: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_quoted_reality_public_key() {
+        let line = r#"{"reality":{"public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"01ab"}}"#;
+        let out = redact(line);
+        assert!(
+            !out.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "public_key leaked: {out}"
+        );
+        assert!(!out.contains("01ab"), "short_id leaked: {out}");
+        assert!(
+            out.contains(r#""public_key":"***""#),
+            "public_key shape wrong: {out}"
+        );
+        assert!(
+            out.contains(r#""short_id":"***""#),
+            "short_id shape wrong: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_bare_reality_kv() {
+        let line = "config public_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA short_id=01ab";
+        let out = redact(line);
+        assert!(
+            !out.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "public_key leaked: {out}"
+        );
+        assert!(!out.contains("01ab"), "short_id leaked: {out}");
+    }
+
+    /// Non-credential plain text containing only hex but not the
+    /// UUID shape (wrong dash positions) must pass through.
+    #[test]
+    fn does_not_match_non_uuid_hex_string() {
+        let line = "see also commit abc12345 for the fix";
+        let out = redact(line);
+        assert_eq!(out, line);
+    }
+
+    #[test]
+    fn redacts_uuid_inside_log_sentence() {
+        let line =
+            "[info] vless-out connecting with uuid 11111111-2222-3333-4444-555555555555 to host";
+        let out = redact(line);
+        assert!(
+            !out.contains("11111111-2222-3333-4444-555555555555"),
+            "uuid leaked: {out}"
+        );
+    }
+
+    /// Two UUIDs on one line each redact independently.
+    #[test]
+    fn redacts_two_uuids_independently() {
+        let line =
+            "old=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee new=11111111-2222-3333-4444-555555555555";
+        let out = redact(line);
+        assert!(!out.contains("aaaaaaaa-bbbb"), "old uuid leaked: {out}");
+        assert!(!out.contains("11111111-2222"), "new uuid leaked: {out}");
     }
 
     /// Strict-JSON quoted value with embedded space must be

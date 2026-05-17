@@ -5,7 +5,7 @@
 //
 // **Phase 2.4 (v0.2):** licensed-third-party-software disclosure
 // pane, opened from Settings → About → Acknowledgements…. The
-// upstream licenses (BSD-3-Clause for NaiveProxy; MIT/Apache-2.0
+// upstream licenses (GPL-3.0-or-later for sing-box; MIT/Apache-2.0
 // for the Rust crate graph) require us to surface attribution
 // and license text in our shipped product. Pre-2.4 the only
 // place this lived was the repo's NOTICE file — invisible to
@@ -65,7 +65,7 @@ public struct AcknowledgementsView: View {
             Text(
                 "Cool Tunnel itself is distributed under the GNU Affero General Public License, Version 3 (AGPL-3.0-only). "
                     + "Copyright © 2026 coolwhite LLC. The bundled and linked components below ship under their own "
-                    + "upstream licences (BSD-3-Clause, MIT, Apache-2.0, MPL-2.0, ISC) — all AGPL-3.0-compatible."
+                    + "upstream licences (GPL-3.0-or-later, MIT, Apache-2.0, MPL-2.0, ISC) — all AGPL-3.0-compatible."
             )
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -98,13 +98,13 @@ public struct AcknowledgementsView: View {
 
     fileprivate static let entries: [Acknowledgement] = [
         Acknowledgement(
-            id: "naiveproxy",
-            name: "NaiveProxy",
-            copyright: "Copyright klzgrad and contributors",
-            license: "BSD 3-Clause License",
+            id: "sing-box",
+            name: "sing-box",
+            copyright: "Copyright SagerNet and contributors",
+            license: "GPL-3.0-or-later",
             summary:
-                "The bundled `naive` Mach-O binary is built unmodified from upstream release tags pinned in COOL-TUNNEL/naive.upstream.json. NaiveProxy provides the HTTP/2-based censorship-resistant proxy transport at the core of the tunnel.",
-            url: URL(string: "https://github.com/klzgrad/naiveproxy")!
+                "The bundled `sing-box` Mach-O binary is downloaded unmodified from upstream release tags pinned in COOL-TUNNEL/singbox-core.upstream.json. sing-box provides the VLESS+Reality transport at the core of the v3.0.0 tunnel.",
+            url: URL(string: "https://github.com/SagerNet/sing-box")!
         ),
         Acknowledgement(
             id: "rust-crates",

@@ -56,7 +56,7 @@ pub fn classify(
     let anomaly = if let Some(line) = exposed_listen {
         Some(DetectedAnomaly {
             reason: AnomalyReason::ListeningOutsideLoopback,
-            detail: format!("naive is listening outside loopback: {line}"),
+            detail: format!("sing-box is listening outside loopback: {line}"),
         })
     } else if established > MAX_ESTABLISHED {
         Some(DetectedAnomaly {

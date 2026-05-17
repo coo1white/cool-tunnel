@@ -20,6 +20,14 @@
 //     custom blue card — the system renders it in muted text
 //     under the form, exactly where Apple-shipped settings put
 //     contextual help.
+//
+// **v3.0.0 (sub-phase F):** the credential input row changed
+// shape: instead of a "Password" SecureField (basic-auth) the
+// form now shows a "UUID" SecureField (VLESS user_id) and three
+// Reality rows (public_key / dest_host / short_id). Hand entry
+// works but the subscription-URL Import button stays the primary
+// flow — operators rarely type a 32-byte base64url public key
+// by hand.
 
 import AppKit
 import SwiftUI
@@ -103,7 +111,7 @@ public struct ConnectionFormView: View {
                         // above — `Text(verbatim:)` skips the
                         // `LocalizedStringKey` markdown interpolation.
                         let message =
-                            "“\(displayName(for: profile))” and its saved password "
+                            "“\(displayName(for: profile))” and its saved credential "
                             + "will be removed permanently. This can't be undone."
                         Text(verbatim: message)
                     }
@@ -162,7 +170,9 @@ public struct ConnectionFormView: View {
                         .foregroundStyle(.red)
                         .font(.callout)
                 } else {
-                    Text("Paste the subscription URL from your server panel to auto-fill credentials.")
+                    Text(
+                        "Paste the subscription URL from your server panel to auto-fill the VLESS UUID and Reality handshake parameters."
+                    )
                 }
             }
 
@@ -171,13 +181,13 @@ public struct ConnectionFormView: View {
                     TextField(
                         "Server",
                         text: binding(for: \.server, of: profile),
-                        prompt: Text("naive.example.com")
+                        prompt: Text("proxy.example.com")
                     )
                     .textContentType(.URL)
                     .autocorrectionDisabled()
                     // **v2.0.30 (Defensive Input Logic — "Good
                     // Deed"):** auto-strip a scheme prefix
-                    // (`https://`, `naive+https://`, …) and any
+                    // (`https://`, `vless://`, …) and any
                     // trailing path on paste. The runloop tick that
                     // immediately follows the binding update fires
                     // this `.onChange`; if the normaliser changes
@@ -210,12 +220,22 @@ public struct ConnectionFormView: View {
                     .textContentType(.username)
                     .autocorrectionDisabled()
 
+                    // **v3.0.0 (sub-phase F):** v2.x Password row
+                    // becomes a UUID row. The UUID is the VLESS
+                    // user_id — the actual auth credential the
+                    // server's `singbox-core` config matches on.
+                    // SecureField stays (not because the UUID
+                    // looks meaningful to an over-the-shoulder
+                    // viewer, but because we still want it
+                    // dot-masked alongside the Reality public_key
+                    // for parity).
                     SecureField(
-                        "Password",
-                        text: binding(for: \.password, of: profile),
-                        prompt: Text("Required")
+                        "VLESS UUID",
+                        text: binding(for: \.uuid, of: profile),
+                        prompt: Text("e.g. 11111111-2222-3333-4444-555555555555")
                     )
                     .textContentType(.password)
+                    .autocorrectionDisabled()
 
                     TextField(
                         "Local port",
@@ -232,7 +252,45 @@ public struct ConnectionFormView: View {
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("naive runs on 127.0.0.1 at the local port; the system proxy points there.")
+                    Text("sing-box runs on 127.0.0.1 at the local port; the system proxy points there.")
+                }
+
+                // **v3.0.0 (sub-phase F):** Reality handshake
+                // parameters in their own section. Hand-typing
+                // these is rare in practice — the operator pastes
+                // a subscription URL and the Import button fills
+                // them in — but exposing the rows means a user
+                // who can't reach the panel UI still has an
+                // escape hatch.
+                Section {
+                    SecureField(
+                        "Reality public_key",
+                        text: realityBinding(for: \.publicKey, of: profile),
+                        prompt: Text("base64url X25519 public key")
+                    )
+                    .textContentType(.password)
+                    .autocorrectionDisabled()
+
+                    TextField(
+                        "Reality dest_host",
+                        text: realityBinding(for: \.destHost, of: profile),
+                        prompt: Text("www.microsoft.com")
+                    )
+                    .textContentType(.URL)
+                    .autocorrectionDisabled()
+
+                    TextField(
+                        "Reality short_id",
+                        text: realityBinding(for: \.shortId, of: profile),
+                        prompt: Text("(leave empty for default)")
+                    )
+                    .autocorrectionDisabled()
+                } header: {
+                    Text("Reality")
+                } footer: {
+                    Text(
+                        "Reality lets the VLESS handshake mimic a real visit to the cover site. The public_key + dest_host come from the server operator; short_id may be empty for the default no-challenge mode."
+                    )
                 }
             }
         }
@@ -243,7 +301,7 @@ public struct ConnectionFormView: View {
 
     private var firstRunFooter: some View {
         Label(
-            "First time? Replace the template values below with your NaiveProxy server, username, and password. Local port can stay at 1080.",
+            "First time? Paste your Cool Tunnel server subscription URL above — the Import button fills in the VLESS UUID and Reality parameters automatically. Local port can stay at 1080.",
             systemImage: "lightbulb"
         )
         .labelStyle(.titleAndIcon)
@@ -254,10 +312,11 @@ public struct ConnectionFormView: View {
     /// placeholder values from `Profile.default` — i.e. the user
     /// hasn't customised it yet.
     private func isPlaceholderProfile(_ profile: Profile) -> Bool {
-        profile.server == "naive.example.com"
+        profile.server == "proxy.example.com"
             || profile.server.isEmpty
             || profile.username.isEmpty
-            || profile.password.isEmpty
+            || profile.uuid.isEmpty
+            || profile.reality.publicKey.isEmpty
     }
 
     // MARK: - Bindings
@@ -281,6 +340,29 @@ public struct ConnectionFormView: View {
             set: { newValue in
                 guard var current = orchestrator.selectedProfile else { return }
                 current[keyPath: keyPath] = newValue
+                orchestrator.selectedProfile = current
+            }
+        )
+    }
+
+    /// Reality-nested binding helper. Reality lives at
+    /// `Profile.reality.<keypath>`, which can't be expressed as
+    /// a single `WritableKeyPath<Profile, String>` without
+    /// teaching the binding pair to compose. Inline the
+    /// composition here so the form's three Reality rows read
+    /// the same shape as the top-level fields.
+    private func realityBinding(
+        for keyPath: WritableKeyPath<ProfileReality, String>,
+        of profile: Profile
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                orchestrator.selectedProfile?.reality[keyPath: keyPath]
+                    ?? profile.reality[keyPath: keyPath]
+            },
+            set: { newValue in
+                guard var current = orchestrator.selectedProfile else { return }
+                current.reality[keyPath: keyPath] = newValue
                 orchestrator.selectedProfile = current
             }
         )
@@ -330,7 +412,13 @@ public struct ConnectionFormView: View {
         // `serverValidation` is pure on `server`, so the other
         // field values don't matter here.
         let probe = Profile(
-            id: "_probe", server: server, username: "", password: "", localPort: "")
+            id: "_probe",
+            server: server,
+            username: "",
+            uuid: "",
+            reality: .empty,
+            localPort: ""
+        )
         switch probe.serverValidation {
         case .valid, .empty:
             return nil
@@ -355,7 +443,7 @@ public struct ConnectionFormView: View {
             return "Local port must be a number (e.g. 1080)."
         }
         if value < 1024 {
-            return "Local port must be ≥ 1024 — `naive` can't bind below that without root."
+            return "Local port must be ≥ 1024 — `sing-box` can't bind below that without root."
         }
         return nil
     }

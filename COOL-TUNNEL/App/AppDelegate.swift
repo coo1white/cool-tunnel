@@ -42,12 +42,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `NSWorkspace.didWakeNotification` so the orchestrator
     /// can probe engine health after the system returns from
     /// sleep. Without this, a Mac that sleeps for >30 minutes
-    /// often has its TCP keepalives dropped — `naive` is alive
-    /// but every browser request stalls because the upstream
-    /// connection is dead, and the UI keeps showing "Active"
-    /// with no recovery hint. The orchestrator surfaces a
-    /// clear `lastError` (rendered in `HeaderView` per
-    /// v0.1.7.17 UX-F#1) so the user knows to restart the mode.
+    /// often has its TCP keepalives dropped — `sing-box` is
+    /// alive but every browser request stalls because the
+    /// upstream connection is dead, and the UI keeps showing
+    /// "Active" with no recovery hint. The orchestrator
+    /// surfaces a clear `lastError` (rendered in `HeaderView`
+    /// per v0.1.7.17 UX-F#1) so the user knows to restart the
+    /// mode.
     private func installSleepWakeHandlers() {
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -120,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // run shutdown — the MainActor IS the main thread, so the
         // task could never run and the 500ms wait always elapsed
         // with the engine still alive (system proxy left enabled,
-        // naive child PID lingering until the kernel reaped it).
+        // sing-box child PID lingering until the kernel reaped it).
         //
         // The correct AppKit dance is `.terminateLater` + a real
         // async task that calls `NSApp.reply(toApplicationShouldTerminate:)`

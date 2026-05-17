@@ -17,7 +17,7 @@
 //                              four near-identical copies.
 //   - `SummaryRow`           — fixed-label-column metadata row
 //                              (label · value). Hoisted out of
-//                              SettingsView's naive + rust sections.
+//                              SettingsView's sing-box + rust sections.
 //
 // All three are layout-stable: dimensions are derived from intrinsic
 // content of fixed-shape inputs, and decorative borders / fills are
@@ -193,7 +193,7 @@ public struct VerdictPill: View {
 // MARK: - Summary row
 
 /// Two-column "label · value" row with a fixed-width label gutter
-/// on the leading edge. Used by the naive + rust diagnostic
+/// on the leading edge. Used by the sing-box + rust diagnostic
 /// sections to render Path / Architectures / Version / Host slice
 /// rows in a consistent grid.
 ///

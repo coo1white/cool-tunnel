@@ -19,6 +19,12 @@
 // The end-to-end auto-sync restart (stopQuiet + re-import +
 // start) needs the SubscriptionClient + CoreClient harness and
 // is exercised through TunnelOrchestratorTests.
+//
+// **v3.0.0 (sub-phase F):** Profile construction uses the new
+// `uuid` + `reality` shape. Codable round-trip tests still
+// exercise the same persistence contract (the
+// `subscriptionURL` field's Codable handling is the load-bearing
+// surface), they just carry different bytes in the secret slot.
 
 import XCTest
 
@@ -31,9 +37,14 @@ final class CredentialAutoSyncTests: XCTestCase {
     func testProfileSubscriptionURLRoundTripsThroughJSON() throws {
         let original = Profile(
             id: "test",
-            server: "naive.example.com",
+            server: "proxy.example.com",
             username: "alice",
-            password: "test-password-do-not-use",
+            uuid: "11111111-2222-3333-4444-555555555555",
+            reality: ProfileReality(
+                publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                destHost: "www.microsoft.com",
+                shortId: "01ab"
+            ),
             localPort: "1080",
             subscriptionURL: "https://panel.example.com/api/v1/subscription/abc123"
         )
@@ -51,13 +62,24 @@ final class CredentialAutoSyncTests: XCTestCase {
     /// those legacy blobs and assign `nil`, otherwise the first
     /// app launch after upgrading wipes the user's profile list
     /// with a JSON-decode failure.
+    ///
+    /// **v3.0.0 (sub-phase F):** the legacy JSON below uses the
+    /// v3.0.0 shape (`uuid` + `reality`) — a v2.x blob carrying
+    /// `password` won't decode here, and the user goes through the
+    /// `Pers-F#10` corrupt-blob backup path (which sub-phase G
+    /// will add an explicit regression test for).
     func testProfileDecodesLegacyJSONWithoutSubscriptionURL() throws {
         let legacyJSON = """
             {
               "id": "default",
-              "server": "naive.example.com",
+              "server": "proxy.example.com",
               "username": "alice",
-              "password": "test-password-do-not-use",
+              "uuid": "11111111-2222-3333-4444-555555555555",
+              "reality": {
+                "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "dest_host": "www.microsoft.com",
+                "short_id": "01ab"
+              },
               "localPort": "1080"
             }
             """
@@ -69,8 +91,7 @@ final class CredentialAutoSyncTests: XCTestCase {
 
     /// The default-init parameter places `subscriptionURL: nil`
     /// at the end, so existing call sites that constructed
-    /// Profiles via the five-argument signature compile
-    /// unchanged.
+    /// Profiles without it compile unchanged.
     func testProfileDefaultStillHasNoSubscriptionURL() {
         XCTAssertNil(Profile.default.subscriptionURL)
     }
@@ -78,7 +99,9 @@ final class CredentialAutoSyncTests: XCTestCase {
     // MARK: - isProxyAuthFailureLine — positive cases
 
     /// Chromium-style `ERR_PROXY_AUTH_REQUESTED` is the canonical
-    /// signal NaiveProxy emits when upstream returns 407.
+    /// signal NaiveProxy emits when upstream returns 407 — kept
+    /// in the v3.0.0 matcher for support transcripts handed
+    /// across the upgrade window.
     func testDetectsErrProxyAuthRequested() {
         XCTAssertTrue(
             TunnelOrchestrator.isProxyAuthFailureLine(
@@ -137,6 +160,38 @@ final class CredentialAutoSyncTests: XCTestCase {
         XCTAssertTrue(
             TunnelOrchestrator.isProxyAuthFailureLine(
                 "Proxy Authentication Required"))
+    }
+
+    // MARK: - VLESS+Reality auth chips (v3.0.0 sub-phase F)
+
+    /// sing-box surfaces a failed Reality handshake with the
+    /// `reality handshake failed` chip — typically a Reality
+    /// public_key mismatch between client and server. Auto-sync
+    /// fires because re-fetching the subscription URL is the
+    /// right next operator step.
+    func testDetectsRealityHandshakeFailure() {
+        XCTAssertTrue(
+            TunnelOrchestrator.isProxyAuthFailureLine(
+                "[ERROR] reality handshake failed: invalid auth"))
+    }
+
+    /// `unknown vless user` fires when the VLESS UUID doesn't
+    /// match any account on the server. Same auto-sync flow.
+    func testDetectsUnknownVlessUser() {
+        XCTAssertTrue(
+            TunnelOrchestrator.isProxyAuthFailureLine(
+                "outbound rejected: unknown vless user 11111111-…"))
+    }
+
+    /// `vless user not found` is the alternate wording some
+    /// sing-box upstream tags use; cover it explicitly.
+    func testDetectsVlessUserNotFound() {
+        XCTAssertTrue(
+            TunnelOrchestrator.isProxyAuthFailureLine(
+                "[error] vless: user not found"))
+        XCTAssertTrue(
+            TunnelOrchestrator.isProxyAuthFailureLine(
+                "vless user not found in users table"))
     }
 
     // MARK: - isProxyAuthFailureLine — negative cases

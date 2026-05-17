@@ -19,22 +19,22 @@
 //     1. core/Cargo.toml `version = "<X>"` matches argv[1].
 //     2. COOL-TUNNEL.xcodeproj's MARKETING_VERSION matches argv[1].
 //        Both Debug and Release configurations must agree.
-//     3. Bundled `naive` matches the committed pin (fetch_naive.ts).
-//        Drift here is a release blocker — re-pinning is an explicit,
-//        audited operation.
+//     3. Bundled `sing-box` matches the committed pin
+//        (fetch_singbox-core.ts). Drift here is a release blocker —
+//        re-pinning is an explicit, audited operation.
 //     4. scripts/audit.sh --strict — cargo fmt / clippy / test, swift
-//        format lint, xcodebuild test, naive arch guard, schema sync.
+//        format lint, xcodebuild test, sing-box arch guard, schema sync.
 //
 //   BUILD
 //     5. cargo clean inside core/.
 //     6. cargo update -p cool-tunnel-core (refreshes Cargo.lock).
 //     7. xcodebuild Release. Output captured to dist/build-${V}.log.
 //     8. Smoke checks: bundled cool-tunnel-core --version matches V;
-//        bundled naive sha256 matches naive.upstream.json.
+//        bundled sing-box sha256 matches singbox-core.upstream.json.
 //
 //   PRE-PACKAGE
 //     8b. scripts/security_check.sh against the built .app — secret
-//         scan, code-sign on every embedded Mach-O, NaiveProxy SHA
+//         scan, code-sign on every embedded Mach-O, sing-box SHA
 //         pin cross-check, Info.plist version assertion.
 //
 //   PACKAGE
@@ -47,7 +47,7 @@
 // Exit codes (preserved from the legacy shell script for muscle memory):
 //   0  success
 //   1  bad arguments / version mismatch (pre-flight 1, 2)
-//   2  fetch_naive failed (pre-flight 3)
+//   2  fetch_singbox-core failed (pre-flight 3)
 //   3  cargo clean failed (build 5)
 //   4  Release build / smoke check failed (build 7, 8)
 //   5  package_release failed (package 9)
@@ -160,17 +160,18 @@ async function preflightMarketingVersion(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// PRE-FLIGHT 3: bundled naive matches the committed pin
+// PRE-FLIGHT 3: bundled sing-box matches the committed pin
 // ---------------------------------------------------------------------------
 
-async function preflightNaivePin(): Promise<void> {
-    step(`Verifying bundled naive matches the committed upstream pin…`);
-    const code = await run(["bun", join(REPO_ROOT, "scripts", "fetch_naive.ts")], {
-        cwd: REPO_ROOT,
-    });
+async function preflightSingboxCorePin(): Promise<void> {
+    step(`Verifying bundled sing-box matches the committed upstream pin…`);
+    const code = await run(
+        ["bun", join(REPO_ROOT, "scripts", "fetch_singbox-core.ts")],
+        { cwd: REPO_ROOT },
+    );
     if (code !== 0) {
         die(
-            `fetch_naive pin verification failed — refusing to cut a release whose bundled naive does not match naive.upstream.json. Roll the pin explicitly with: bun scripts/fetch_naive.ts --repin`,
+            `fetch_singbox-core pin verification failed — refusing to cut a release whose bundled sing-box does not match singbox-core.upstream.json. Roll the pin explicitly with: bun scripts/fetch_singbox-core.ts --repin`,
             2,
         );
     }
@@ -182,7 +183,7 @@ async function preflightNaivePin(): Promise<void> {
 
 async function preflightAudit(): Promise<void> {
     step(
-        `Running scripts/audit.sh --strict (cargo fmt/clippy/test, swift fmt lint, xcodebuild test, naive arch, schema)…`,
+        `Running scripts/audit.sh --strict (cargo fmt/clippy/test, swift fmt lint, xcodebuild test, sing-box arch, schema)…`,
     );
     const code = await run(
         ["bash", join(REPO_ROOT, "scripts", "audit.sh"), "--strict"],
@@ -222,7 +223,7 @@ async function buildXcodeRelease(): Promise<string> {
     step(`Building Cool Tunnel ${VERSION} (Release, universal arm64+x86_64)…`);
     // **v2.0.22 (round-4 fallout):** explicit `ARCHS` +
     // `ONLY_ACTIVE_ARCH=NO` so the .app's main Mach-O is universal,
-    // matching the bundled engine + naive binaries which are
+    // matching the bundled engine + sing-box binaries which are
     // already universal via `lipo`.
     const distDir = join(REPO_ROOT, "dist");
     await mkdir(distDir, { recursive: true });
@@ -321,28 +322,33 @@ async function smokeCheckBundledBinaries(app: string): Promise<void> {
     }
     step(`Bundled cool-tunnel-core: ${bundledVersion} ✓`);
 
-    // Smoke 2: bundled naive sha matches the committed pin.
-    const manifestPath = join(app, "Contents", "Resources", "naive.upstream.json");
+    // Smoke 2: bundled sing-box sha matches the committed pin.
+    const manifestPath = join(
+        app,
+        "Contents",
+        "Resources",
+        "singbox-core.upstream.json",
+    );
     const manifest = (await Bun.file(manifestPath).json()) as {
         merged_universal_sha256?: string;
     };
     const expected = manifest.merged_universal_sha256;
     if (!expected) {
         die(
-            `bundled naive.upstream.json has no merged_universal_sha256 field`,
+            `bundled singbox-core.upstream.json has no merged_universal_sha256 field`,
             4,
         );
     }
-    const naivePath = join(app, "Contents", "Resources", "naive");
-    const shasum = await captureStdout(["shasum", "-a", "256", naivePath]);
+    const singboxPath = join(app, "Contents", "Resources", "sing-box");
+    const shasum = await captureStdout(["shasum", "-a", "256", singboxPath]);
     const actual = shasum.split(/\s+/)[0];
     if (actual !== expected) {
         die(
-            `bundled naive sha256 (${actual}) does not match naive.upstream.json (${expected})`,
+            `bundled sing-box sha256 (${actual}) does not match singbox-core.upstream.json (${expected})`,
             4,
         );
     }
-    step(`Bundled naive verified against upstream pin ✓`);
+    step(`Bundled sing-box verified against upstream pin ✓`);
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +396,7 @@ async function main(): Promise<void> {
 
     await preflightCargoVersion();
     await preflightMarketingVersion();
-    await preflightNaivePin();
+    await preflightSingboxCorePin();
     await preflightAudit();
 
     await buildCargoClean();

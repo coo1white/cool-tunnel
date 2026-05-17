@@ -2,6 +2,13 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 // COOL-TUNNELTests/MockCredentialStore.swift
+//
+// **v3.0.0 (sub-phase F):** mirrors the renamed `CredentialStore`
+// surface (`uuid` / `setUUID` / `deleteUUID`). Internal storage shape
+// is unchanged — the mock just holds a `[String: String]` map. Test
+// helpers (`failReadsWith` etc.) keep their names because they
+// describe failure-injection semantics, not the stored value's
+// semantic.
 
 import Foundation
 
@@ -30,7 +37,7 @@ public final class MockCredentialStore: CredentialStore, @unchecked Sendable {
 
     // MARK: - Test-only API
 
-    /// Configure the next (and subsequent, until cleared) `password`
+    /// Configure the next (and subsequent, until cleared) `uuid`
     /// call to throw the given error.
     public func failReadsWith(_ error: InjectedError?) {
         lock.lock()
@@ -53,10 +60,10 @@ public final class MockCredentialStore: CredentialStore, @unchecked Sendable {
     /// Direct write that bypasses the configured `writeError`. Useful
     /// for seeding a "legacy" backend with a value before the
     /// migrating wrapper reads it.
-    public func seed(password: String, forProfileID id: String) {
+    public func seed(uuid: String, forProfileID id: String) {
         lock.lock()
         defer { lock.unlock() }
-        storage[id] = password
+        storage[id] = uuid
     }
 
     public func snapshot() -> [String: String] {
@@ -67,7 +74,7 @@ public final class MockCredentialStore: CredentialStore, @unchecked Sendable {
 
     // MARK: - CredentialStore conformance
 
-    public func password(forProfileID id: String) throws -> String {
+    public func uuid(forProfileID id: String) throws -> String {
         lock.lock()
         defer { lock.unlock() }
         if let injected = readError {
@@ -76,20 +83,20 @@ public final class MockCredentialStore: CredentialStore, @unchecked Sendable {
         return storage[id] ?? ""
     }
 
-    public func setPassword(_ password: String, forProfileID id: String) throws {
+    public func setUUID(_ uuid: String, forProfileID id: String) throws {
         lock.lock()
         defer { lock.unlock() }
         if let injected = writeError {
             throw injected
         }
-        if password.isEmpty {
+        if uuid.isEmpty {
             storage.removeValue(forKey: id)
         } else {
-            storage[id] = password
+            storage[id] = uuid
         }
     }
 
-    public func deletePassword(forProfileID id: String) throws {
+    public func deleteUUID(forProfileID id: String) throws {
         lock.lock()
         defer { lock.unlock() }
         if let injected = deleteError {

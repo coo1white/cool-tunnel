@@ -4,7 +4,7 @@
 // COOL-TUNNELTests/LipoOutputParserTests.swift
 //
 // Pure-parser coverage for the `lipo -info` output handler shared
-// by `NaiveBinaryResolver` and `RustCoreResolver`. Both resolvers
+// by `SingboxBinaryResolver` and `RustCoreResolver`. Both resolvers
 // previously embedded the same colon-split + tokenize + known-arch
 // filter logic near-verbatim; pulling the parser out closed a
 // duplicated-helper smell AND opened a unit-testable surface that
@@ -28,13 +28,13 @@ final class LipoOutputParserTests: XCTestCase {
     /// `lipo -info <path>` on an arm64-only binary emits:
     ///   `Non-fat file: <path> is architecture: arm64`
     func testParsesNonFatArm64() {
-        let out = "Non-fat file: /usr/bin/naive is architecture: arm64"
+        let out = "Non-fat file: /usr/bin/sing-box is architecture: arm64"
         XCTAssertEqual(LipoOutputParser.parse(out), ["arm64"])
     }
 
     /// Pair to the above for x86_64-only thin binaries.
     func testParsesNonFatX8664() {
-        let out = "Non-fat file: /usr/bin/naive is architecture: x86_64"
+        let out = "Non-fat file: /usr/bin/sing-box is architecture: x86_64"
         XCTAssertEqual(LipoOutputParser.parse(out), ["x86_64"])
     }
 
@@ -63,7 +63,7 @@ final class LipoOutputParserTests: XCTestCase {
     ///   `Architectures in the fat file: <path> are: x86_64 arm64`
     func testParsesFatUniversalArm64AndX8664() {
         let out =
-            "Architectures in the fat file: /Applications/Cool\\ Tunnel.app/Contents/Resources/naive are: x86_64 arm64"
+            "Architectures in the fat file: /Applications/Cool\\ Tunnel.app/Contents/Resources/sing-box are: x86_64 arm64"
         XCTAssertEqual(LipoOutputParser.parse(out), ["x86_64", "arm64"])
     }
 

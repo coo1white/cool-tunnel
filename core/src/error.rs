@@ -27,9 +27,13 @@ pub enum CoreError {
     #[error("proxy is not running")]
     NotRunning,
 
-    /// Spawning the bundled `naive` binary failed.
-    #[error("failed to spawn naive binary: {0}")]
+    /// Spawning the bundled `sing-box` binary failed.
+    #[error("failed to spawn sing-box binary: {0}")]
     Spawn(#[source] std::io::Error),
+
+    /// Rendering the sing-box config JSON failed.
+    #[error("failed to render sing-box config: {0}")]
+    ConfigRender(#[source] serde_json::Error),
 
     /// Reading or writing on stdio failed.
     #[error("stdio error: {0}")]
@@ -37,5 +41,5 @@ pub enum CoreError {
 
     /// Encoding or decoding a wire-format frame failed.
     #[error("protocol error: {0}")]
-    Protocol(#[from] serde_json::Error),
+    Protocol(#[source] serde_json::Error),
 }

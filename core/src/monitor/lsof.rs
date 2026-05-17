@@ -7,8 +7,9 @@
 //! established connections, established connections with both endpoints on
 //! `127.0.0.1` (local clients), and established connections that leave
 //! loopback (remote). It also flags any LISTEN line whose address is not
-//! `127.0.0.1:port` or `[::1]:port` — that would mean `naive` is exposing
-//! itself outside loopback, which the activity monitor treats as critical.
+//! `127.0.0.1:port` or `[::1]:port` — that would mean `sing-box` is
+//! exposing itself outside loopback, which the activity monitor treats as
+//! critical.
 
 use crate::domain::Port;
 
@@ -16,9 +17,9 @@ use super::heuristics::{classify, TrafficSnapshot};
 
 /// Parses `lsof -iTCP` stdout, scoped to a known listener port.
 ///
-/// `port` is the local SOCKS listener port (the one in [`crate::config::NaiveConfig::listen`]);
-/// the parser uses it to detect the listener line and to recognise inbound
-/// local-client connections.
+/// `port` is the local SOCKS listener port (the one emitted by
+/// [`crate::config::SingboxConfig`]); the parser uses it to detect the
+/// listener line and to recognise inbound local-client connections.
 #[must_use]
 pub fn parse(output: &str, port: Port) -> TrafficSnapshot {
     let local_listen_marker = format!("127.0.0.1:{port}");

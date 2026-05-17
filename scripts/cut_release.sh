@@ -8,7 +8,7 @@
 #
 # Forwards every argument; preserves the child's exit code so the
 # documented exit-code contract (0 success / 1 version mismatch /
-# 2 fetch_naive / 3 cargo clean / 4 build / 5 package / 6 audit /
+# 2 fetch_singbox-core / 3 cargo clean / 4 build / 5 package / 6 audit /
 # 7 security_check) is unchanged.
 #
 # Bun is required. Install with `brew install bun` or

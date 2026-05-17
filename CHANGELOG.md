@@ -6,8 +6,84 @@ the fourth digit are pre-release polish on the same line.
 
 The pre-release `v0.1.5.x` series soaked from May 2 to May 3, 2026.
 **v0.1.6** was the first stable release on the original line.
-The **v2.0.x** series is the current Long-Term Servicing Channel
-line — see [SUPPORT.md](./SUPPORT.md) for the support contract.
+The **v2.0.x** series soaked through mid-May 2026.
+The **v3.0.0** cut pivots the wire protocol from NaiveProxy to
+sing-box (VLESS + Reality); see SUPPORT.md for the v2 → v3 upgrade
+contract.
+
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Removed
+
+### Security
+
+---
+
+## [3.0.0] — UNRELEASED — Pivot from naive to sing-box (VLESS + Reality); coordinated v0.4.0 server release
+
+The v1.x and v2.x series rode klzgrad/naiveproxy as the proxy
+binary on both sides of the tunnel. The cool-tunnel-server side
+hit a wall in v0.3.0 — `naive --listen` does not accept https://;
+naive is a client-only binary, and v0.3.0 had been built on the
+wrong premise. The fix is structural:
+
+  v3.0.0 swaps the proxy protocol from NaiveProxy (HTTPS-CONNECT
+  basic_auth) to **sing-box VLESS + Reality**, mirroring the
+  cool-tunnel-server v0.4.0 cut. Both ends are now driven by the
+  shared `singbox-core` Bun-TS package; the macOS app embeds the
+  same compiled binary the server container does, pinned in
+  `singbox-core/singbox.upstream.json` upstream. Wire-format drift
+  is structurally impossible — both sides rebuild against the same
+  upstream tag.
+
+### Why VLESS + Reality
+
+Reality preserves the "looks like a vanilla HTTPS request to a
+real CDN" cover-site property that drew this project to NaiveProxy
+originally. The TLS handshake at :443 LOOKS like microsoft.com (or
+whichever destination the operator picks); Reality's cryptography
+establishes a covert channel for authorized clients under that
+cover. From a passive observer's point of view, the connection is
+indistinguishable from real microsoft.com traffic. NaiveProxy +
+forwardproxy carried the same property; the rewrite preserves it.
+
+### Breaking changes (vs. v2.0.x)
+
+- **Subscription manifest schema** bumps `version: 1 → 2`. The
+  per-profile body carries `uuid` + a `reality: { public_key,
+  dest_host, short_id }` block instead of `password`. Top-level
+  `server_naive_pin` renamed to `server_singbox_pin`. v2.x clients
+  that fetch a v3 manifest will refuse to import; the cool-tunnel-
+  server v0.4.0 emits v=2 only. Run the v0.4.0 server in parallel
+  with v2.x clients on the v=1 schema until every client is
+  upgraded, then cut the v3.0.0 release.
+- **macOS app marketing version** jumps 2.0.59 → 3.0.0.
+- **Bundle structure** — the `bin/naive*` binaries are removed
+  from the .app, replaced by `bin/singbox-core` (the Bun-compiled
+  multi-platform binary mirrored from the server's
+  `singbox-core/` package).
+
+### Internal scope
+
+- Replace `scripts/fetch_naive.ts` with `scripts/fetch_singbox-core.ts`
+  (binary install path; downloads the same Bun-compiled artifact
+  the server bundles, plus the upstream sing-box binary it pins).
+- Rewrite the Rust client core to spawn `singbox-core supervise`
+  instead of `naive`; drop naive-specific config generation,
+  PAC routing tailored to NaiveProxy, and the redaction patterns
+  that targeted basic-auth credentials.
+- Rename the Swift `Naive*` classes (`NaiveBinaryResolver`,
+  `NaiveUpdater`, `NaiveLauncher` …) to `Singbox*`.
+- Rewire `TunnelOrchestrator` to drive the singbox-core supervise
+  loop instead of naive's launch flow.
+- Update `SubscriptionClient` parser for the v=2 manifest shape.
+- Update the .entitlements + Info.plist references.
+
+---
 
 ## [2.0.59] — 2026-05-16 — Code Streamline Wave: Updater Consolidation + Bun-Port Sweep + Resolver Refactors
 

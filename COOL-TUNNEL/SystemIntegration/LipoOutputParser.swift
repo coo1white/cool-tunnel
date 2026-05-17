@@ -4,7 +4,7 @@
 // SystemIntegration/LipoOutputParser.swift
 //
 // Pure parser for `lipo -info` output, extracted from
-// `NaiveBinaryResolver` and `RustCoreResolver` where the same
+// `SingboxBinaryResolver` and `RustCoreResolver` where the same
 // colon-split + tokenize + known-arch filter logic was duplicated
 // near-verbatim. Both resolvers now delegate the parse step here so:
 //

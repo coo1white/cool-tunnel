@@ -142,6 +142,11 @@ extension Notification.Name {
     /// view-local @State without lifting the flag up to the
     /// orchestrator (which would mix transient UI state into the
     /// engine façade).
+    ///
+    /// The `.naive.` namespace is preserved verbatim — this string
+    /// is the in-process notification key, paired with the
+    /// `PRODUCT_BUNDLE_IDENTIFIER` (`space.coolwhite.naive`)
+    /// persistence anchor.
     static let openCoolTunnelSettings = Notification.Name(
         "space.coolwhite.naive.openSettings"
     )

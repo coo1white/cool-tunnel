@@ -2,14 +2,36 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// Codable mirror of `cool_tunnel_server::ct-protocol::subscription`
+// Codable mirror of cool-tunnel-server's v=2 subscription manifest
 // — the JSON shape served at
 // `GET https://<panel-domain>/api/v1/subscription/<token>`.
+//
+// v3.0.0 pivots the wire protocol from the v2.x NaiveProxy
+// basic-auth shape to sing-box VLESS+Reality. The manifest shape
+// evolves accordingly:
+//
+//   - `version` bumps `1 → 2`.
+//   - `profiles[*].password` (cleartext basic-auth password) is
+//     replaced by `profiles[*].uuid` (the VLESS user_id — the
+//     credential, like an API key).
+//   - Each profile gains a `reality: { public_key, dest_host,
+//     short_id }` block carrying the Reality handshake params the
+//     client plugs into its sing-box vless outbound.
+//   - The v=1 top-level `server_naive_pin` is renamed to
+//     `server_singbox_pin` with a single `upstream_tag` field; the
+//     client compares against its own embedded
+//     singbox-core.upstream.json for cross-end binary-identity
+//     confirmation.
+//
+// The v=1 manifest shape is incompatible — v2.x clients fetching a
+// v=2 manifest fail at decode time (the `password` field is missing).
+// The cool-tunnel-server v0.4.0 release co-ordinates the cut: it
+// emits v=2 only, so operators upgrade the server first, then roll
+// out v3.0.0 clients.
 //
 // Trust model: TLS authenticates the panel domain. The manifest's
 // HMAC `signature` is computed with the panel-only `APP_KEY` and
 // is not client-verifiable; it exists for server-side auditing.
-//
 // The panel returns cover-site HTML at HTTP 200 for every error
 // path (bad token, expired, rate-limited, missing APP_KEY,
 // malformed JSON). Reading `Content-Type` and attempting JSON
@@ -21,8 +43,14 @@
 import Foundation
 
 /// One-shot manifest the panel returns for a subscription URL.
-public struct SubscriptionManifestV1: Sendable, Codable, Hashable {
-    /// Always `1` for this struct. Bump means new manifest version.
+///
+/// The type is named `SubscriptionManifestV2` to distinguish it
+/// from the (now removed) v=1 mirror; the on-the-wire `version`
+/// field is `2`.
+public struct SubscriptionManifestV2: Sendable, Codable, Hashable {
+    /// Always `2` for this struct. The cool-tunnel-server v0.4.0
+    /// release emits v=2 only; v=1 manifests from older servers
+    /// fail at the version check below.
     public let version: UInt32
     /// Server domain (display only — match against the URL the user
     /// pasted to detect a hijacked panel returning a foreign server).
@@ -30,15 +58,24 @@ public struct SubscriptionManifestV1: Sendable, Codable, Hashable {
     /// One or more profiles this subscription resolves to. Clients
     /// usually pick the first; the rest are operator-defined
     /// alternates.
-    public let profiles: [SubscriptionProfileV1]
+    public let profiles: [SubscriptionProfileV2]
     /// Server capabilities the operator has opted into.
-    public let capabilities: ServerCapabilitiesV1
+    public let capabilities: ServerCapabilitiesV2
     /// Unix timestamp the manifest was issued.
     public let issuedAt: UInt64
     /// Unix timestamp after which clients must re-fetch.
     public let expiresAt: UInt64
     /// Free-form operator note; rendered in the UI when present.
     public let note: String?
+    /// Cross-end binary-identity confirmation. Carries the sing-box
+    /// upstream tag the panel container was built against; the
+    /// client compares it to the tag pinned in its own embedded
+    /// `singbox.upstream.json`. Mismatch is a soft-warn (the
+    /// release pipeline aims to keep both ends pinned to the same
+    /// tag, but a server that auto-bumped to a newer sing-box and
+    /// a client that hasn't yet released still talks fine if the
+    /// VLESS+Reality wire is stable across the tag delta).
+    public let serverSingboxPin: ServerSingboxPinV2?
     /// HMAC-SHA-256 of the canonical body, hex-encoded. Not
     /// client-verifiable — the panel signs with `APP_KEY` which
     /// the client doesn't hold.
@@ -48,34 +85,82 @@ public struct SubscriptionManifestV1: Sendable, Codable, Hashable {
         case version, server, profiles, capabilities, note, signature
         case issuedAt = "issued_at"
         case expiresAt = "expires_at"
+        case serverSingboxPin = "server_singbox_pin"
     }
 }
 
-/// One profile entry inside a [`SubscriptionManifestV1`]. Mirrors
-/// `cool_tunnel_server::ct-protocol::profile::ProfileV1`.
-public struct SubscriptionProfileV1: Sendable, Codable, Hashable {
+/// One profile entry inside a [`SubscriptionManifestV2`].
+public struct SubscriptionProfileV2: Sendable, Codable, Hashable {
     /// Upstream proxy hostname.
     public let host: String
     /// Upstream proxy port (typically 443 for the standard
     /// SNI-fronted topology).
     public let port: UInt16
-    /// `NaiveProxy` basic-auth username.
+    /// Display username — VLESS uses it as the per-user `name`
+    /// field for log readability; the credential is the `uuid`
+    /// below.
     public let username: String
-    /// `NaiveProxy` basic-auth password (cleartext).
-    public let password: String
+    /// VLESS user_id (RFC 4122 UUID). This IS the credential —
+    /// like an API key — that the panel rotates per `Regenerate
+    /// UUID` action. v2.x basic-auth `password` is gone.
+    public let uuid: String
+    /// Per-profile Reality handshake parameters. Required in v=2:
+    /// the client cannot plug the credential into its sing-box
+    /// vless outbound without the matching public_key + dest_host
+    /// + short_id.
+    public let reality: RealityV2
     /// Free-form label the operator picked. Optional.
     public let label: String?
 }
 
-/// Server-side feature flags the operator opted into. Mirrors
-/// `cool_tunnel_server::ct-protocol::subscription::ServerCapabilitiesV1`.
-public struct ServerCapabilitiesV1: Sendable, Codable, Hashable {
+/// Reality handshake parameters carried per-profile.
+public struct RealityV2: Sendable, Codable, Hashable {
+    /// X25519 public key (base64url, 32 bytes). The client plugs
+    /// this into its sing-box vless outbound's
+    /// `tls.reality.public_key` field; cool-tunnel-server's
+    /// `ServerConfig.reality_private_key` is the matching half.
+    public let publicKey: String
+    /// Cover-site SNI the client uses on its `tls.server_name`
+    /// (and the server's vless inbound forwards to). Typical
+    /// operator pick: `www.microsoft.com`, `www.apple.com`,
+    /// `www.cloudflare.com`.
+    public let destHost: String
+    /// short_id the client sends inside the Reality handshake.
+    /// Empty string is the conventional "no short_id challenge"
+    /// value; the server accepts it when the operator hasn't
+    /// configured any explicit short_ids.
+    public let shortId: String
+
+    private enum CodingKeys: String, CodingKey {
+        case publicKey = "public_key"
+        case destHost = "dest_host"
+        case shortId = "short_id"
+    }
+}
+
+/// Cross-end pin block (top-level on the manifest).
+public struct ServerSingboxPinV2: Sendable, Codable, Hashable {
+    /// Pinned upstream sing-box release tag (e.g. `v1.13.12`).
+    /// Sourced from cool-tunnel-server's
+    /// `singbox-core/singbox.upstream.json::upstream_tag` via the
+    /// bundled `singbox-core` binary's `version --json` output.
+    public let upstreamTag: String
+
+    private enum CodingKeys: String, CodingKey {
+        case upstreamTag = "upstream_tag"
+    }
+}
+
+/// Server-side feature flags the operator opted into.
+public struct ServerCapabilitiesV2: Sendable, Codable, Hashable {
     /// Anti-tracking features the server is enforcing. Empty array
     /// means none — surface a warning in the UI before the user
     /// connects.
     public let antiTracking: [AntiTrackingFeature]
-    /// Always `false` from a real deployment (NaiveProxy is
-    /// HTTP/2-only). A `true` value is a strong counterfeit signal.
+    /// Always `false` from a real deployment (the v0.4.0 sing-box
+    /// VLESS+Reality stack runs over TCP only; no QUIC listener
+    /// wired). A `true` value is a strong counterfeit signal — the
+    /// validator below treats it as a hard reject.
     public let http3: Bool
     /// Stable identifier for the cover site currently active.
     public let fakeSiteSlug: String?
@@ -90,9 +175,9 @@ public struct ServerCapabilitiesV1: Sendable, Codable, Hashable {
 /// One anti-tracking feature flag.
 ///
 /// Custom `Decodable` (not the auto-derived raw-value init) so a
-/// future flag this v1 client doesn't know decodes into
+/// future flag this v=2 client doesn't know decodes into
 /// [`unknown`] rather than failing the entire array decode and
-/// bricking every v1 client on a server-side rollout.
+/// bricking every v=2 client on a server-side rollout.
 public enum AntiTrackingFeature: Sendable, Codable, Hashable {
     case hideIp
     case hideVia
@@ -131,8 +216,18 @@ public enum AntiTrackingFeature: Sendable, Codable, Hashable {
 
 // MARK: - Validation
 
-extension SubscriptionManifestV1 {
-    /// Maximum manifest age the client accepts (7 days).
+extension SubscriptionManifestV2 {
+    /// The manifest schema version this client speaks. Bumped from
+    /// `1` (v2.x clients on NaiveProxy basic-auth) to `2` for the
+    /// v3.0.0 VLESS+Reality cut.
+    public static let supportedVersion: UInt32 = 2
+
+    /// Maximum manifest age the client accepts (7 days). Matches
+    /// the cool-tunnel-server-side
+    /// `MANIFEST_TTL_SECONDS = 60*60*24*7` constant and the
+    /// `ct-protocol::SubscriptionManifestV1::FRESHNESS_WINDOW_SECONDS`
+    /// spec value. (Server-side, v0.4.0 clamped the previously-30-day
+    /// emitted expiry down to 7 days to match this gate.)
     public static let maxAge: TimeInterval = 7 * 24 * 60 * 60
 
     /// Acceptable forward clock-skew on `issued_at`. Beyond this,
@@ -193,19 +288,21 @@ extension SubscriptionManifestV1 {
 
     /// Returns the first profile, or `nil` on an empty profile
     /// list (which a real panel won't produce).
-    public var primaryProfile: SubscriptionProfileV1? {
+    public var primaryProfile: SubscriptionProfileV2? {
         profiles.first
     }
 
     /// Validates the manifest against the schema-version,
     /// profile-cardinality, blocked-host, capability-counterfeit,
-    /// issued-at, forward-skew, expiry-ordering, validity-window,
-    /// expiry, and freshness rules. Throws
-    /// [`SubscriptionValidationError`] describing the first
-    /// violated rule. `now` is injected for testability.
+    /// reality-completeness, issued-at, forward-skew,
+    /// expiry-ordering, validity-window, expiry, and freshness
+    /// rules. Throws [`SubscriptionValidationError`] describing
+    /// the first violated rule. `now` is injected for testability.
     public func validate(now: Date = Date()) throws {
-        if version != 1 {
-            throw SubscriptionValidationError.unsupportedVersion(got: version, expected: 1)
+        if version != Self.supportedVersion {
+            throw SubscriptionValidationError.unsupportedVersion(
+                got: version, expected: Self.supportedVersion
+            )
         }
         if profiles.isEmpty {
             throw SubscriptionValidationError.noProfiles
@@ -218,6 +315,15 @@ extension SubscriptionManifestV1 {
         for profile in profiles {
             if Self.isBlockedHost(profile.host) {
                 throw SubscriptionValidationError.blockedHost(profile.host)
+            }
+            if profile.uuid.trimmingCharacters(in: .whitespaces).isEmpty {
+                throw SubscriptionValidationError.missingUuid(host: profile.host)
+            }
+            if profile.reality.publicKey.trimmingCharacters(in: .whitespaces).isEmpty {
+                throw SubscriptionValidationError.missingRealityPublicKey(host: profile.host)
+            }
+            if profile.reality.destHost.trimmingCharacters(in: .whitespaces).isEmpty {
+                throw SubscriptionValidationError.missingRealityDestHost(host: profile.host)
             }
         }
         if capabilities.http3 {
@@ -270,14 +376,14 @@ extension SubscriptionManifestV1 {
 /// into `SubscriptionImportError` for the UI; conforms to
 /// `LocalizedError` so any direct render path also reads cleanly.
 public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
-    /// Manifest's `version` field is not `1`.
+    /// Manifest's `version` field is not `2`.
     case unsupportedVersion(got: UInt32, expected: UInt32)
     /// Empty `profiles` array.
     case noProfiles
-    /// Profile count exceeds [`SubscriptionManifestV1.maxProfiles`].
+    /// Profile count exceeds [`SubscriptionManifestV2.maxProfiles`].
     case tooManyProfiles(got: Int, max: Int)
     /// `capabilities.http3 == true` (strong counterfeit signal —
-    /// real naive is HTTP/2-only).
+    /// real v0.4.0 sing-box VLESS+Reality is TCP-only).
     case counterfeitCapabilities
     /// `issued_at` is `0` or future-dated beyond clock-skew.
     case invalidIssuedAt
@@ -292,6 +398,17 @@ public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
     /// Profile's `host` is loopback / link-local / private (SSRF
     /// risk). Carries the rejected host string for diagnostics.
     case blockedHost(String)
+    /// Profile's `uuid` is empty — server-side configuration error
+    /// (the panel's regenerate-UUID flow should always populate it).
+    case missingUuid(host: String)
+    /// Profile's `reality.public_key` is empty — the cool-tunnel-
+    /// server operator hasn't run reality-keygen and persisted the
+    /// keypair to ServerConfig. The client cannot complete the
+    /// VLESS+Reality handshake without it.
+    case missingRealityPublicKey(host: String)
+    /// Profile's `reality.dest_host` is empty — same operator-side
+    /// fix as missingRealityPublicKey.
+    case missingRealityDestHost(host: String)
 
     public var errorDescription: String? {
         switch self {
@@ -318,28 +435,27 @@ public enum SubscriptionValidationError: LocalizedError, Sendable, Equatable {
             return "Subscription manifest is \(days) days old."
         case .blockedHost(let host):
             return "Subscription manifest points at a blocked host (\(host))."
+        case .missingUuid(let host):
+            return "Subscription profile for \(host) is missing its VLESS UUID."
+        case .missingRealityPublicKey(let host):
+            return
+                "Subscription profile for \(host) is missing its Reality public key — the server operator must run reality-keygen first."
+        case .missingRealityDestHost(let host):
+            return "Subscription profile for \(host) is missing its Reality dest_host."
         }
     }
 }
 
 // MARK: - Conversion to local Profile
-
-extension SubscriptionManifestV1 {
-    /// Builds a local [`Profile`] from the primary subscription
-    /// profile. `localPort` is per-machine UI state, not server-
-    /// issued. `id` defaults to the upstream `host:port` for a
-    /// stable identifier across imports.
-    ///
-    /// Returns `nil` when [`primaryProfile`] is absent.
-    public func toLocalProfile(localPort: String, id: String? = nil) -> Profile? {
-        guard let p = primaryProfile else { return nil }
-        let profileID = id ?? "\(p.host):\(p.port)"
-        return Profile(
-            id: profileID,
-            server: "\(p.host):\(p.port)",
-            username: p.username,
-            password: p.password,
-            localPort: localPort
-        )
-    }
-}
+//
+// **v3.0.0 (sub-phase F):** the rewire landed — the local
+// `Profile` model in Protocol.swift now carries `uuid` and a
+// `reality { publicKey, destHost, shortId }` block, matching the
+// manifest's `SubscriptionProfileV2` shape one-to-one.
+// `TunnelOrchestrator.importFromSubscriptionURL(_:)` constructs
+// the local Profile inline (the rename touches one call site
+// only). A dedicated `toLocalProfile()` helper isn't pulled into
+// the manifest type because the conversion needs orchestrator
+// context (existing profile id, localPort, subscriptionURL) that
+// the manifest itself doesn't carry — keeping the inline shape
+// in the orchestrator avoids a wider API change here.

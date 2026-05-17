@@ -12,14 +12,15 @@
 // launch (hot-swapping the long-lived JSON-over-stdio engine
 // mid-session is out of scope).
 //
-// Why a separate updater (vs reusing NaiveUpdater): the naive
-// updater downloads upstream tarballs and lipo-merges arm64 +
-// x86_64 itself. The Rust core ships a pre-merged universal
-// asset alongside the .dmg / .pkg / .zip, plus a SHA-256
-// manifest to pin against. The shared mechanics (download with
-// trust gate, atomic install, ad-hoc sign, subprocess helper,
-// tag-vs-binary comparison, GitHub API fetch, lastInstalledTag
-// self-heal) live in `BinaryUpdater.swift` since v2.0.51.
+// Why a separate updater (vs reusing SingboxUpdater): the
+// sing-box updater downloads upstream tarballs and lipo-merges
+// arm64 + x86_64 itself. The Rust core ships a pre-merged
+// universal asset alongside the .dmg / .pkg / .zip, plus a
+// SHA-256 manifest to pin against. The shared mechanics (download
+// with trust gate, atomic install, ad-hoc sign, subprocess
+// helper, tag-vs-binary comparison, GitHub API fetch,
+// lastInstalledTag self-heal) live in `BinaryUpdater.swift` since
+// v2.0.51.
 
 import Foundation
 import Observation
@@ -32,7 +33,7 @@ private let rustCoreUpdaterLogger = Logger.cooltunnel("RustCoreUpdater")
 final class RustCoreUpdater {
 
     /// `SettingsView` literal-matches every case below. Shape
-    /// mirrors `NaiveUpdater.State` minus `.extracting / .merging`
+    /// mirrors `SingboxUpdater.State` minus `.extracting / .merging`
     /// (no lipo step) and renames `.resolvingTag` → `.resolvingRelease`.
     enum State: Sendable, Equatable {
         case idle
@@ -147,8 +148,8 @@ final class RustCoreUpdater {
 
             state = .installing
             // Rust-core lands without the execute bit (lipo'd
-            // naive is already 0755 from lipo's output) — chmod
-            // before ad-hoc signing.
+            // sing-box is already 0755 from lipo's output) —
+            // chmod before ad-hoc signing.
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o755],
                 ofItemAtPath: downloaded.path)

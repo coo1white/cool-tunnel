@@ -5,12 +5,12 @@
 //
 // Wrapper around `SecStaticCodeCheckValidity` for tampering detection on
 // every binary the app spawns: the bundled `cool-tunnel-core` engine and
-// any user-supplied `naive` Mach-O.
+// any user-supplied `sing-box` Mach-O.
 //
 // Validation here means: the binary has an intact code signature. Tampering
 // (replacing the file, modifying its bytes, stripping the signature) makes
 // the call fail. We deliberately do *not* require a specific identity so a
-// user can drop in their own `naive` build, but the binary must be signed.
+// user can drop in their own `sing-box` build, but the binary must be signed.
 
 import Foundation
 import Security

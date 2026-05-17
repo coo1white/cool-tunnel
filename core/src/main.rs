@@ -17,7 +17,7 @@
 //!   * **Client mode** (default, no flags): long-lived JSON-over-stdio
 //!     engine spawned by the macOS app. Reads `Request` frames on
 //!     stdin, writes `Outbound` frames (response / error / event)
-//!     on stdout, supervises the bundled `naive` subprocess.
+//!     on stdout, supervises the bundled `sing-box` subprocess.
 //!     Implementation: [`client_mode::run`].
 //!
 //!   * **Server mode** (`--mode server [--listen ADDR]`): HTTP API
@@ -196,8 +196,8 @@ fn print_help() {
     println!("    server    HTTP/1.1 + JSON API for the Cool Tunnel admin");
     println!("              UI (Filament/PHP). Default listen address:");
     println!("              {}", server_mode::DEFAULT_LISTEN);
-    println!("              Endpoints: /health /version /naive/validate");
-    println!("                         /naive/config /naive/pac");
+    println!("              Endpoints: /health /version /singbox/validate");
+    println!("                         /singbox/config");
     println!();
     println!("FLAGS:");
     println!("    --version, -V       Print version and exit");

@@ -6,8 +6,8 @@
 // Shared trust boundary for the three Cool Tunnel updaters that
 // pull from GitHub releases:
 //
-//   - AppUpdater         → coo1white/cool-tunnel (the .app itself)
-//   - NaiveUpdater       → klzgrad/naiveproxy     (the bundled `naive`)
+//   - AppUpdater         → coo1white/cool-tunnel  (the .app itself)
+//   - SingboxUpdater     → SagerNet/sing-box      (the bundled `sing-box`)
 //   - RustCoreUpdater    → coo1white/cool-tunnel  (the engine binary)
 //
 // Without these helpers, each updater previously relied on
@@ -69,7 +69,7 @@ struct UntrustedGitHubHostError: Error, Sendable {
 /// Thrown by `GitHubRedirectGuard.download` when the response
 /// body exceeds the per-call `maxBytes` cap. **ARCH-F#2 / SEC
 /// (v0.1.7.15):** previously only `AppUpdater.download` had a
-/// size cap; NaiveUpdater + RustCoreUpdater inherited none, so
+/// size cap; SingboxUpdater + RustCoreUpdater inherited none, so
 /// a confused-deputy or attacker-shaped API response that
 /// pointed at a 4 GB file at a trusted GitHub host would happily
 /// fill the user's disk. Sharing the cap as a default on the
@@ -118,7 +118,7 @@ func isTrustedGitHubURL(_ url: URL) -> Bool {
 /// would defeat SHA pinning by substituting the verification
 /// root-of-trust.
 ///
-/// NaiveUpdater + RustCoreUpdater don't currently SHA-pin
+/// SingboxUpdater + RustCoreUpdater don't currently SHA-pin
 /// (deferred to v0.2.0 per `AppUpdater.swift` Sw#C4 comment) but
 /// they STILL need the redirect guard — without it, a CDN
 /// takeover for `objects.githubusercontent.com` could substitute
@@ -165,7 +165,7 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
     }
 
     /// Shared host-validated, redirect-guarded download.
-    /// NaiveUpdater + RustCoreUpdater both call this; AppUpdater
+    /// SingboxUpdater + RustCoreUpdater both call this; AppUpdater
     /// has its own inline variant because it needs different
     /// per-asset caps (.sha256 1 MB, .zip 100 MB) within a
     /// single pipeline run.
@@ -185,7 +185,7 @@ final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Se
     ///   - `CocoaError` — file-move failure
     ///
     /// **ARCH-F#2 (v0.1.7.15):** added the `maxBytes` cap so
-    /// NaiveUpdater + RustCoreUpdater inherit defense-in-depth
+    /// SingboxUpdater + RustCoreUpdater inherit defense-in-depth
     /// against a confused-deputy / attacker-shaped API response
     /// that pointed at an oversized file. Default 100 MB
     /// matches AppUpdater's existing .zip cap.

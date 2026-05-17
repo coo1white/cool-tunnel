@@ -2,8 +2,16 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// Fetches a `SubscriptionManifestV1` from the panel's
+// Fetches a `SubscriptionManifestV2` from the panel's
 // `GET /api/v1/subscription/<token>` endpoint over HTTPS.
+//
+// v3.0.0 — the manifest schema version bumps `1 → 2` to carry the
+// VLESS+Reality wire shape (`uuid` + `reality { public_key,
+// dest_host, short_id }` per profile, plus `server_singbox_pin`
+// at the top level). The URL path stays `/api/v1/subscription/` —
+// the `v1` there is the URL-routing version, not the manifest
+// schema version. The cool-tunnel-server v0.4.0 release emits v=2
+// only; pre-v0.4.0 servers emit v=1 which fails this decoder.
 //
 // Trust anchor: TLS to the panel domain. The HMAC signature is
 // computed with the server-only `APP_KEY` and is not client-
@@ -27,8 +35,9 @@ import os
 public enum SubscriptionClientError: LocalizedError, Sendable, Equatable {
     /// The URL string couldn't be parsed.
     case malformedURL(String)
-    /// Scheme wasn't `https` — the manifest carries a cleartext
-    /// password; shipping over `http` defeats the trust model.
+    /// Scheme wasn't `https` — the manifest carries the VLESS
+    /// UUID + Reality keypair; shipping over `http` defeats the
+    /// trust model.
     case nonHTTPSURL(String)
     /// Transport failure. `URLError` collapsed to a string for
     /// `Sendable + Equatable` (the SDK's `URLError` isn't
@@ -72,7 +81,7 @@ public enum SubscriptionClientError: LocalizedError, Sendable, Equatable {
     }
 }
 
-/// Fetches and decodes [`SubscriptionManifestV1`] from a panel URL.
+/// Fetches and decodes [`SubscriptionManifestV2`] from a panel URL.
 public actor SubscriptionClient {
 
     /// Per-fetch deadline. Matches the engine pre-flight defaults
@@ -112,7 +121,7 @@ public actor SubscriptionClient {
     public func fetch(
         from urlString: String,
         now: Date = Date()
-    ) async throws -> SubscriptionManifestV1 {
+    ) async throws -> SubscriptionManifestV2 {
         let url = try Self.parseURL(urlString)
 
         var request = URLRequest(url: url)
@@ -200,9 +209,9 @@ public actor SubscriptionClient {
             throw SubscriptionClientError.transportFailed(redacted)
         }
 
-        let manifest: SubscriptionManifestV1
+        let manifest: SubscriptionManifestV2
         do {
-            manifest = try decoder.decode(SubscriptionManifestV1.self, from: data)
+            manifest = try decoder.decode(SubscriptionManifestV2.self, from: data)
         } catch {
             // Cover-site HTML doesn't decode as the manifest
             // schema — translate to a friendlier error than the

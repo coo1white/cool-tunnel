@@ -4,7 +4,7 @@
 // COOL-TUNNELTests/GitHubTrustTests.swift
 //
 // Fail-closed coverage for the shared GitHub trust boundary the
-// three updaters lean on (`AppUpdater`, `NaiveUpdater`,
+// three updaters lean on (`AppUpdater`, `SingboxUpdater`,
 // `RustCoreUpdater`). Pins:
 //
 //   - `isTrustedGitHubURL(_:)` accepts ONLY https + the explicit

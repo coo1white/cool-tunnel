@@ -16,14 +16,14 @@
 //      Fix: drain both stdout and stderr concurrently *while*
 //      the child runs.
 //
-//   2. No timeout. A wedged subprocess (`naive --version`
+//   2. No timeout. A wedged subprocess (`sing-box version`
 //      hanging in a stuck DNS resolver, `lipo` blocked on a
 //      slow disk, `codesign` paused on a kernel-level signal
 //      block) parks the calling Task forever. Fix: race
 //      `waitUntilExit` against a `Task.sleep`; on expiry,
 //      escalate `terminate()` → `interrupt()` → SIGKILL.
 //
-// Used by FirewallProbe, NaiveBinaryResolver, RustCoreResolver.
+// Used by FirewallProbe, SingboxBinaryResolver, RustCoreResolver.
 // Updater-side helpers retain their bespoke flows for now since
 // they're user-initiated and easier to recover from.
 
@@ -158,7 +158,7 @@ public enum Subprocess {
                     // SIGTERM → 250ms → SIGINT → 250ms → SIGKILL.
                     // SIGINT is not an escalation past SIGTERM —
                     // any child that traps SIGTERM almost always
-                    // also traps SIGINT (`naive` does both for
+                    // also traps SIGINT (`sing-box` does both for
                     // graceful shutdown). The middle step wasted
                     // time on no escalation; now SIGTERM gets a
                     // longer 1s grace before SIGKILL takes over.

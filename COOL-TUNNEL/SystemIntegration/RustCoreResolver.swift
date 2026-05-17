@@ -3,19 +3,19 @@
 // See LICENSE for full terms.
 // SystemIntegration/RustCoreResolver.swift
 //
-// Mirror of `NaiveBinaryResolver`, but for the Rust engine
-// (`cool-tunnel-core`) instead of the upstream `naive` binary.
+// Mirror of `SingboxBinaryResolver`, but for the Rust engine
+// (`cool-tunnel-core`) instead of the upstream `sing-box` binary.
 //
-// Architectural intent (per the v0.2.0 cross-platform diagram):
+// Architectural intent (per the v3.0.0 cross-platform diagram):
 //
-//     Server     UI: Filament (PHP)        Glue: ct-server-core (Rust) + shared ct-protocol     Engine: forwardproxy@naive Caddy plugin
-//     macOS      UI: SwiftUI               Glue: cool-tunnel-core  (Rust) + shared ct-protocol  Engine: bundled naive Mach-O
-//     Future…    UI: Kotlin/Swift/C++/GTK  Glue: same ct-protocol + per-platform core           Engine: platform-built naive
+//     Server     UI: Filament (PHP)        Glue: ct-server-core (Rust) + shared ct-protocol     Engine: bundled sing-box
+//     macOS      UI: SwiftUI               Glue: cool-tunnel-core  (Rust) + shared ct-protocol  Engine: bundled sing-box Mach-O
+//     Future…    UI: Kotlin/Swift/C++/GTK  Glue: same ct-protocol + per-platform core           Engine: platform-built sing-box
 //
 // The "Glue" cell is what this resolver inspects. On macOS today it
 // is the Rust binary we build at `core/` and bundle inside the
 // .app's Resources directory. The user can override that path from
-// Settings → Rust Core → Choose…/Update — same UX as the naive
+// Settings → Rust Core → Choose…/Update — same UX as the sing-box
 // resolver — and the resolver verifies it the same way: lipo for
 // architectures, `--version` for liveness, codesign for integrity.
 
@@ -66,14 +66,15 @@ public struct RustCoreDescriptor: Sendable, Equatable {
     }
 }
 
-/// Errors the resolver surfaces. Distinct from `NaiveResolverError`
-/// so the UI can show a precise message ("Rust core" vs "naive
-/// binary") without runtime introspection.
+/// Errors the resolver surfaces. Distinct from
+/// `SingboxResolverError` so the UI can show a precise message
+/// ("Rust core" vs "sing-box binary") without runtime
+/// introspection.
 ///
 /// **Conforms to `LocalizedError`** and uses
 /// `url.lastPathComponent` (filename) instead of `url.path`
 /// (absolute path with macOS username) — same discipline as
-/// `NaiveResolverError`.
+/// `SingboxResolverError`.
 public enum RustCoreResolverError: LocalizedError, Sendable, Equatable {
     case fileNotFound(URL)
     case notAMachO(URL)
@@ -97,7 +98,7 @@ public enum RustCoreResolverError: LocalizedError, Sendable, Equatable {
 }
 
 /// Stateless façade that finds, inspects, and validates the active
-/// `cool-tunnel-core` binary. Mirrors `NaiveBinaryResolver` so
+/// `cool-tunnel-core` binary. Mirrors `SingboxBinaryResolver` so
 /// SettingsView can reuse the same verdict-rendering helpers
 /// without per-binary special-casing.
 public struct RustCoreResolver: Sendable {

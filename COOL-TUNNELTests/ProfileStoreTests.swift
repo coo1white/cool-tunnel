@@ -7,6 +7,11 @@
 // v2.0.38 and v2.0.39. Each test names the specific failure mode
 // the fix guards against so a future regression has a clear
 // signal in the test log.
+//
+// **v3.0.0 (sub-phase F):** call sites rename to the new
+// `uuid` / `setUUID` / `deleteUUID` API. Test names use
+// "credential" / "uuid" interchangeably for the secret — the
+// regression semantics carry forward from v2.x verbatim.
 
 import XCTest
 
@@ -39,18 +44,19 @@ final class ProfileStoreTests: XCTestCase {
     /// Encodes a profile blob the way `ProfileStore.persistStripped`
     /// would, so `loadProfiles` reads it back via the same path a
     /// real-app launch would take. Used by the H2 migration tests
-    /// to plant a "legacy plaintext password" in UserDefaults.
+    /// to plant a "legacy plaintext credential" in UserDefaults.
     private func plantRawProfilesBlob(_ profiles: [Profile], in defaults: UserDefaults) throws {
         let data = try JSONEncoder().encode(profiles)
         defaults.set(data, forKey: "profiles")
     }
 
-    private func legacyProfile(id: String = "p1", password: String) -> Profile {
+    private func legacyProfile(id: String = "p1", uuid: String) -> Profile {
         Profile(
             id: id,
             server: "proxy.example.com",
             username: "user",
-            password: password,
+            uuid: uuid,
+            reality: .empty,
             localPort: "1080"
         )
     }
@@ -58,43 +64,43 @@ final class ProfileStoreTests: XCTestCase {
     // MARK: - H2 regression — migration write failure must not strip
 
     /// The fix: when the credential-store migration write fails,
-    /// `loadProfiles` keeps the legacy password in UserDefaults
-    /// instead of stripping it. Pre-fix, the password was lost from
-    /// both backends after one failed launch.
-    func testLoadKeepsLegacyPasswordWhenCredentialMigrationFails() throws {
+    /// `loadProfiles` keeps the legacy credential in UserDefaults
+    /// instead of stripping it. Pre-fix, the credential was lost
+    /// from both backends after one failed launch.
+    func testLoadKeepsLegacyCredentialWhenCredentialMigrationFails() throws {
         let (store, defaults, credentials) = makeStore()
 
-        // Plant a profile with a legacy plaintext password.
-        try plantRawProfilesBlob([legacyProfile(password: "hunter2")], in: defaults)
+        // Plant a profile with a legacy plaintext credential.
+        try plantRawProfilesBlob([legacyProfile(uuid: "hunter2")], in: defaults)
 
         // Make the credential store reject the promotion write.
         credentials.failWritesWith(.backendLocked)
 
         let loaded = store.loadProfiles()
 
-        // The in-memory profile still carries the password so the
+        // The in-memory profile still carries the credential so the
         // caller can use it.
         XCTAssertEqual(loaded.count, 1)
-        XCTAssertEqual(loaded.first?.password, "hunter2")
+        XCTAssertEqual(loaded.first?.uuid, "hunter2")
 
         // And — the part that broke before H2 — the UserDefaults blob
-        // still contains the legacy password. Decode it back to assert.
+        // still contains the legacy credential. Decode it back to assert.
         guard let raw = defaults.data(forKey: "profiles") else {
             return XCTFail("profiles key disappeared")
         }
         let persisted = try JSONDecoder().decode([Profile].self, from: raw)
         XCTAssertEqual(
-            persisted.first?.password, "hunter2",
-            "legacy password must persist in UserDefaults when migration fails")
+            persisted.first?.uuid, "hunter2",
+            "legacy credential must persist in UserDefaults when migration fails")
     }
 
     /// The successful-migration counterpart: when the credential
-    /// store write succeeds, the password DOES get stripped from
+    /// store write succeeds, the credential DOES get stripped from
     /// UserDefaults. Otherwise we'd leave the plaintext sitting in
     /// .plist forever.
-    func testLoadStripsLegacyPasswordOnSuccessfulMigration() throws {
+    func testLoadStripsLegacyCredentialOnSuccessfulMigration() throws {
         let (store, defaults, credentials) = makeStore()
-        try plantRawProfilesBlob([legacyProfile(password: "hunter2")], in: defaults)
+        try plantRawProfilesBlob([legacyProfile(uuid: "hunter2")], in: defaults)
 
         // No injected error — write succeeds.
         let loaded = store.loadProfiles()
@@ -102,28 +108,28 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(loaded.count, 1)
         XCTAssertEqual(
             credentials.snapshot()["p1"], "hunter2",
-            "credential store should hold the promoted password")
+            "credential store should hold the promoted UUID")
 
         guard let raw = defaults.data(forKey: "profiles") else {
             return XCTFail("profiles key disappeared")
         }
         let persisted = try JSONDecoder().decode([Profile].self, from: raw)
         XCTAssertEqual(
-            persisted.first?.password, "",
-            "successful migration must strip the legacy password from UserDefaults")
+            persisted.first?.uuid, "",
+            "successful migration must strip the legacy credential from UserDefaults")
     }
 
     // MARK: - H2 regression — save() write failure must not strip
 
-    func testSavePreservesPasswordOnCredentialWriteFailure() throws {
+    func testSavePreservesCredentialOnCredentialWriteFailure() throws {
         let (store, defaults, credentials) = makeStore()
-        let profile = legacyProfile(password: "newpwd")
+        let profile = legacyProfile(uuid: "newpwd")
 
         // Configure the credential store to fail.
         credentials.failWritesWith(.backendLocked)
         store.save(profiles: [profile])
 
-        // The UserDefaults blob must STILL carry the password, because
+        // The UserDefaults blob must STILL carry the credential, because
         // the credential store didn't accept it and we'd otherwise have
         // nowhere to recover it from.
         guard let raw = defaults.data(forKey: "profiles") else {
@@ -131,13 +137,13 @@ final class ProfileStoreTests: XCTestCase {
         }
         let persisted = try JSONDecoder().decode([Profile].self, from: raw)
         XCTAssertEqual(
-            persisted.first?.password, "newpwd",
-            "credential-write failure must not strip the password from UserDefaults")
+            persisted.first?.uuid, "newpwd",
+            "credential-write failure must not strip the credential from UserDefaults")
     }
 
-    func testSaveStripsPasswordWhenCredentialWriteSucceeds() throws {
+    func testSaveStripsCredentialWhenCredentialWriteSucceeds() throws {
         let (store, defaults, credentials) = makeStore()
-        let profile = legacyProfile(password: "newpwd")
+        let profile = legacyProfile(uuid: "newpwd")
         store.save(profiles: [profile])
 
         XCTAssertEqual(credentials.snapshot()["p1"], "newpwd")
@@ -145,21 +151,21 @@ final class ProfileStoreTests: XCTestCase {
             return XCTFail("profiles key disappeared")
         }
         let persisted = try JSONDecoder().decode([Profile].self, from: raw)
-        XCTAssertEqual(persisted.first?.password, "")
+        XCTAssertEqual(persisted.first?.uuid, "")
     }
 
-    // MARK: - H3 regression — password() must throw, not collapse to ""
+    // MARK: - H3 regression — uuid() must throw, not collapse to ""
 
-    /// The fix: `password(forProfileID:)` propagates the
+    /// The fix: `uuid(forProfileID:)` propagates the
     /// `CredentialStore` error instead of returning `""`. Pre-fix the
     /// orchestrator couldn't tell "keychain locked" from "no
-    /// password set" and prompted the user to re-enter a password
+    /// credential set" and prompted the user to re-enter a credential
     /// that was already there.
-    func testPasswordReadPropagatesBackendError() throws {
+    func testCredentialReadPropagatesBackendError() throws {
         let (store, _, credentials) = makeStore()
         credentials.failReadsWith(.backendLocked)
 
-        XCTAssertThrowsError(try store.password(forProfileID: "p1")) { error in
+        XCTAssertThrowsError(try store.uuid(forProfileID: "p1")) { error in
             guard let injected = error as? MockCredentialStore.InjectedError else {
                 return XCTFail("expected InjectedError, got \(type(of: error)): \(error)")
             }
@@ -168,17 +174,17 @@ final class ProfileStoreTests: XCTestCase {
     }
 
     /// Item-not-found is NOT an error per the `CredentialStore`
-    /// contract — the backend returns `""`, and `password()` faithfully
+    /// contract — the backend returns `""`, and `uuid()` faithfully
     /// returns it without throwing. The orchestrator's empty-string
-    /// branch covers "user never set a password."
-    func testPasswordReadReturnsEmptyWhenNotStored() throws {
+    /// branch covers "user never set a credential."
+    func testCredentialReadReturnsEmptyWhenNotStored() throws {
         let (store, _, _) = makeStore()
-        XCTAssertEqual(try store.password(forProfileID: "p-never-set"), "")
+        XCTAssertEqual(try store.uuid(forProfileID: "p-never-set"), "")
     }
 
-    // MARK: - M1 regression — deletePassword swallows backend failure
+    // MARK: - M1 regression — deleteUUID swallows backend failure
 
-    /// M1: `ProfileStore.deletePassword(forProfileID:)` is the
+    /// M1: `ProfileStore.deleteUUID(forProfileID:)` is the
     /// `void`-returning public API the orchestrator calls when the
     /// user removes a profile. The credential-store delete is
     /// best-effort — a backend failure must NOT propagate (the
@@ -186,27 +192,27 @@ final class ProfileStoreTests: XCTestCase {
     /// list, so throwing here would split the UI from the persisted
     /// state). The M1 sweep added the `do/catch + Logger.warning`
     /// shape; this test pins that the no-throw contract holds.
-    func testDeletePasswordSwallowsCredentialStoreFailure() throws {
+    func testDeleteCredentialSwallowsCredentialStoreFailure() throws {
         let (store, _, credentials) = makeStore()
-        try credentials.setPassword("v", forProfileID: "p1")
+        try credentials.setUUID("v", forProfileID: "p1")
         credentials.failDeletesWith(.backendIO("read-only fs"))
 
         // Must not throw — the H2/M1 contract for the void-returning
         // delete API. The os_log warning is emitted as a side effect;
         // we assert the observable behavior (no throw, void return).
-        XCTAssertNoThrow(store.deletePassword(forProfileID: "p1"))
+        XCTAssertNoThrow(store.deleteUUID(forProfileID: "p1"))
     }
 
     /// Sanity: when the credential store accepts the delete, the
     /// entry actually goes away. Locks in the happy path against a
     /// regression where the do/catch shape might accidentally swallow
     /// the successful call.
-    func testDeletePasswordRemovesEntryOnSuccess() throws {
+    func testDeleteCredentialRemovesEntryOnSuccess() throws {
         let (store, _, credentials) = makeStore()
-        try credentials.setPassword("v", forProfileID: "p1")
+        try credentials.setUUID("v", forProfileID: "p1")
         XCTAssertEqual(credentials.snapshot()["p1"], "v", "precondition: seeded")
 
-        store.deletePassword(forProfileID: "p1")
+        store.deleteUUID(forProfileID: "p1")
         XCTAssertNil(credentials.snapshot()["p1"], "credential entry must be gone")
     }
 }

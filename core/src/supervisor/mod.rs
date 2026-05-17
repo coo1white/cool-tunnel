@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
-//! Lifecycle management of the `naive` child process.
+//! Lifecycle management of the `sing-box` child process.
 //!
-//! [`ProxySupervisor`] owns one running `naive` instance. Spawning installs
-//! a background task that streams the child's stdout and stderr lines as
-//! [`crate::protocol::Event::LogLine`] events and emits a final
-//! [`crate::protocol::Event::StateChanged`] when the process exits — whether
-//! it died on its own or was killed via [`ProxySupervisor::stop`].
+//! [`ProxySupervisor`] owns one running `sing-box` instance. Spawning
+//! installs a background task that streams the child's stdout and
+//! stderr lines as [`crate::protocol::Event::LogLine`] events. Natural-
+//! death detection runs in `client_mode::monitor_loop` so it can gate
+//! the at-most-once `StateChanged { running: false }` emission.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -22,13 +22,13 @@ use crate::protocol::{Event, LogSource};
 use crate::redaction::redact;
 
 /// Maximum bytes retained for one child-process log line before
-/// forwarding it to Swift. A hostile or broken `naive` build can
+/// forwarding it to Swift. A hostile or broken `sing-box` build can
 /// otherwise write a newline-free blob and make `BufReadExt::lines`
 /// allocate until EOF. 16 KiB is far above legitimate diagnostic
 /// lines and keeps the UI/export buffer bounded.
 const MAX_CHILD_LOG_LINE_BYTES: usize = 16 * 1024;
 
-/// Handle to a running `naive` child.
+/// Handle to a running `sing-box` child.
 ///
 /// Drop the handle (or call [`Self::stop`]) to terminate the child.
 #[derive(Debug)]
@@ -39,7 +39,7 @@ pub struct ProxySupervisor {
 }
 
 impl ProxySupervisor {
-    /// Spawns `naive` with the given config and starts streaming its output.
+    /// Spawns `sing-box run -c <config>` and starts streaming its output.
     ///
     /// `events` is the engine-wide outbound event channel. The supervisor
     /// keeps a clone for each background task; closing every clone allows
@@ -49,13 +49,6 @@ impl ProxySupervisor {
     ///
     /// Returns [`CoreError::Spawn`] when the child process cannot be created
     /// or its stdio handles cannot be captured.
-    // `async fn` retained even though the body no longer awaits
-    // (the `events.send(StateChanged{true}).await` moved to the
-    // dispatcher in v0.1.7.5 to fix the Ru#C4 ordering quirk).
-    // Callers spawn this with `.await`; converting to sync would
-    // ripple through `start_proxy`'s control flow without
-    // benefit. A future codesign-verification step (deferred from
-    // the Sw#C4 audit) would re-introduce real awaits here.
     #[allow(clippy::unused_async)]
     pub async fn spawn(
         binary_path: &Path,
@@ -63,7 +56,13 @@ impl ProxySupervisor {
         events: mpsc::Sender<Event>,
     ) -> Result<Self, CoreError> {
         let mut command = Command::new(binary_path);
+        // sing-box uses subcommand-based CLI: `sing-box run -c
+        // <config>`. The Swift caller passes only the config path
+        // and binary path; assembling the argv lives here so the
+        // protocol stays agnostic.
         command
+            .arg("run")
+            .arg("-c")
             .arg(config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -74,29 +73,24 @@ impl ProxySupervisor {
 
         let pid = child.id().ok_or_else(|| {
             CoreError::Spawn(std::io::Error::other(
-                "naive child exited before reporting a PID",
+                "sing-box child exited before reporting a PID",
             ))
         })?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| CoreError::Spawn(std::io::Error::other("naive stdout was not piped")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| CoreError::Spawn(std::io::Error::other("naive stderr was not piped")))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            CoreError::Spawn(std::io::Error::other("sing-box stdout was not piped"))
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            CoreError::Spawn(std::io::Error::other("sing-box stderr was not piped"))
+        })?;
 
         tokio::spawn(read_lines(stdout, LogSource::Stdout, events.clone()));
         tokio::spawn(read_lines(stderr, LogSource::Stderr, events.clone()));
 
-        // The `StateChanged { running: true }` event used to be
-        // emitted here, before `spawn` returned — which meant the
-        // event raced ahead of the `Started { pid }` response on
-        // its way to Swift (audit Ru#C4). v0.1.7.5 moves the
-        // emission to the dispatcher, AFTER the response writes,
-        // so the wire ordering is now guaranteed: response always
-        // precedes its event. See `client_mode::handle_request`.
+        // `StateChanged { running: true }` is emitted by the
+        // dispatcher AFTER the `Started { pid }` response writes,
+        // so the wire ordering is `response → event` (Ru#C4).
+        // See `client_mode::handle_request`.
 
         let (kill_tx, kill_rx) = oneshot::channel();
         let monitor = tokio::spawn(monitor_lifecycle(child, kill_rx, events));
@@ -209,10 +203,11 @@ where
                 if truncated {
                     line.push_str("... [truncated]");
                 }
-                // Redact `scheme://user:pass@host` patterns before any
-                // forwarding. `naive` prints its proxy URL with userinfo
-                // at startup; without this filter those credentials reach
-                // the UI log buffer.
+                // Redact userinfo + bare-UUID + Reality public_key /
+                // short_id patterns before any forwarding. sing-box
+                // prints the resolved outbound block (with UUID and
+                // Reality keys) at startup; without this filter those
+                // secrets reach the UI log buffer.
                 let redacted = redact(&line).into_owned();
                 if events
                     .send(Event::LogLine {

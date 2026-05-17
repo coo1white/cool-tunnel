@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use cool_tunnel_core::config::{generate_pac, NaiveConfig};
+use cool_tunnel_core::config::SingboxConfig;
 use cool_tunnel_core::diagnostics::{run_debug_handshake, run_diagnostics, run_latency};
 use cool_tunnel_core::domain::Profile;
 use cool_tunnel_core::monitor;
@@ -424,19 +424,12 @@ async fn dispatch(
             };
             Ok(ResponsePayload::Validation(report))
         }
-        RequestKind::GenerateNaiveConfig { profile } => {
-            let config = NaiveConfig::from_profile(&profile);
+        RequestKind::GenerateSingboxConfig { profile } => {
+            let config = SingboxConfig::from_profile(&profile);
             let json = config
                 .to_pretty_json()
-                .map_err(|err| ErrorPayload::new("serialization", err.to_string()))?;
-            Ok(ResponsePayload::NaiveConfig { json })
-        }
-        RequestKind::GeneratePac {
-            direct_domains,
-            port,
-        } => {
-            let js = generate_pac(&direct_domains, port);
-            Ok(ResponsePayload::Pac { js })
+                .map_err(|err| ErrorPayload::new("config_render_failed", err.to_string()))?;
+            Ok(ResponsePayload::SingboxConfig { json })
         }
         RequestKind::StartProxy {
             binary_path,
@@ -504,18 +497,18 @@ async fn dispatch(
             Ok(ResponsePayload::Latency(report))
         }
         RequestKind::Shutdown => Ok(ResponsePayload::Ack),
-        // **UX-F#7 (v2.0.15):** liveness probe used by the Swift
-        // orchestrator's no-restart hot-swap path. Reads
+        // Liveness probe used by the Swift orchestrator's
+        // no-restart hot-swap path. Reads
         // `EngineState.supervisor` under the lock — `Some(_)`
-        // means naive is currently being supervised (alive);
+        // means sing-box is currently being supervised (alive);
         // `None` means it died, was stopped, or was never
         // started. `supervisor.pid()` is surfaced for diagnostic
         // logging on the Swift side; the routing decision uses
         // only `running`.
-        RequestKind::ProbeNaiveLive => {
+        RequestKind::ProbeSingboxLive => {
             let guard = state.lock().await;
             let pid = guard.supervisor.as_ref().map(ProxySupervisor::pid);
-            Ok(ResponsePayload::NaiveLiveness {
+            Ok(ResponsePayload::SingboxLiveness {
                 running: guard.supervisor.is_some(),
                 pid,
             })

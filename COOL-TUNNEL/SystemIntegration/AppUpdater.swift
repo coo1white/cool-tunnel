@@ -1386,6 +1386,14 @@ final class AppUpdater {
     /// plist, which an attacker who substituted the running app
     /// could rewrite. Must match `PRODUCT_BUNDLE_IDENTIFIER` in
     /// `project.pbxproj`; update both in lock-step.
+    ///
+    /// **v3.0.0:** the `.naive` segment is preserved verbatim —
+    /// this string is the persistence anchor for every existing
+    /// installation. Renaming it would orphan v2.x users'
+    /// auto-update path (the mdfind/canonical-bundle-id check
+    /// would see the new build as "not a Cool Tunnel install" and
+    /// refuse to update). See KeychainStore's same-named comment
+    /// for the parallel persistence-tied identifier rationale.
     nonisolated fileprivate static let canonicalBundleID = "space.coolwhite.naive"
 }
 

@@ -4,8 +4,8 @@
 // Persistence/SettingsStore.swift
 //
 // Settings unrelated to a specific profile: the direct-domain list, an
-// optional override path for the bundled `naive` binary, and the user's
-// preference about confirmation dialogs.
+// optional override path for the bundled `sing-box` binary, and the
+// user's preference about confirmation dialogs.
 
 import Foundation
 import SwiftUI
@@ -44,7 +44,23 @@ public enum AppearanceMode: String, Sendable, Codable, CaseIterable, Equatable {
 /// Persisted user settings.
 public struct AppSettings: Sendable, Codable, Equatable {
     public var directDomains: [String]
-    public var customNaiveBinaryPath: String
+    /// Optional override for the bundled `sing-box` binary the
+    /// orchestrator spawns. Empty = use the bundled binary inside
+    /// `Cool Tunnel.app/Contents/Resources/`. Populated by the
+    /// Settings → sing-box → Update flow once `SingboxUpdater`
+    /// finishes installing the downloaded binary into Application
+    /// Support; takes effect on the next start.
+    ///
+    /// **v3.0.0:** renamed from `customNaiveBinaryPath`. The
+    /// underlying UserDefaults key stays
+    /// `"customNaiveBinaryPath"` so an upgrade from v2.x picks up
+    /// the previously-configured override path without forcing a
+    /// re-Choose round-trip. (Whether the v2.x override is still
+    /// useful in v3.0.0 is a different question — pointing at a
+    /// stale `naive` Mach-O will fail at spawn time with a clear
+    /// resolver error, prompting the user to pick a sing-box
+    /// binary or Reset back to the bundled one.)
+    public var customSingboxBinaryPath: String
     /// Optional override for the `cool-tunnel-core` binary the
     /// orchestrator spawns at boot. Empty = use the bundled engine
     /// inside `Cool Tunnel.app/Contents/Resources/`. Populated by
@@ -61,13 +77,13 @@ public struct AppSettings: Sendable, Codable, Equatable {
 
     public init(
         directDomains: [String],
-        customNaiveBinaryPath: String,
+        customSingboxBinaryPath: String,
         customRustCorePath: String = "",
         skipProxyConfirmations: Bool,
         appearanceMode: AppearanceMode = .system
     ) {
         self.directDomains = directDomains
-        self.customNaiveBinaryPath = customNaiveBinaryPath
+        self.customSingboxBinaryPath = customSingboxBinaryPath
         self.customRustCorePath = customRustCorePath
         self.skipProxyConfirmations = skipProxyConfirmations
         self.appearanceMode = appearanceMode
@@ -77,7 +93,7 @@ public struct AppSettings: Sendable, Codable, Equatable {
     /// defaults.
     public static let `default` = AppSettings(
         directDomains: defaultDirectDomains,
-        customNaiveBinaryPath: "",
+        customSingboxBinaryPath: "",
         customRustCorePath: "",
         skipProxyConfirmations: false,
         appearanceMode: .system
@@ -107,6 +123,16 @@ public struct SettingsStore: @unchecked Sendable {
 
     private enum Keys {
         static let directDomains = "directDomains"
+        // **v3.0.0 (sub-phase E):** the Swift identifier renamed
+        // to `customSingboxBinaryPath` (the bundled binary changed
+        // from naive → sing-box), but the UserDefaults storage key
+        // stays `"customNaiveBinaryPath"` so an upgrade from v2.x
+        // picks up the previously-configured override path
+        // transparently. The value semantics carry forward
+        // unchanged: empty string = use the bundled default; a
+        // non-empty path = use that file (the resolver will surface
+        // a typed error if the file at that path is no longer a
+        // valid Mach-O for the current sing-box era).
         static let customBinary = "customNaiveBinaryPath"
         static let customRustCore = "customRustCorePath"
         static let skipConfirmations = "skipProxyConfirmations"
@@ -134,7 +160,7 @@ public struct SettingsStore: @unchecked Sendable {
             .flatMap(AppearanceMode.init(rawValue:)) ?? .system
         return AppSettings(
             directDomains: direct,
-            customNaiveBinaryPath: custom,
+            customSingboxBinaryPath: custom,
             customRustCorePath: rust,
             skipProxyConfirmations: skip,
             appearanceMode: appearance
@@ -143,7 +169,7 @@ public struct SettingsStore: @unchecked Sendable {
 
     public func save(_ settings: AppSettings) {
         defaults.set(settings.directDomains, forKey: Keys.directDomains)
-        defaults.set(settings.customNaiveBinaryPath, forKey: Keys.customBinary)
+        defaults.set(settings.customSingboxBinaryPath, forKey: Keys.customBinary)
         defaults.set(settings.customRustCorePath, forKey: Keys.customRustCore)
         defaults.set(settings.skipProxyConfirmations, forKey: Keys.skipConfirmations)
         defaults.set(settings.appearanceMode.rawValue, forKey: Keys.appearanceMode)

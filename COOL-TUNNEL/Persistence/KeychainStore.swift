@@ -3,13 +3,16 @@
 // See LICENSE for full terms.
 // Persistence/KeychainStore.swift
 //
-// Stores per-profile passwords in the macOS login Keychain. Replaces the
-// previous behaviour of serialising passwords as plaintext inside the
-// `profiles` JSON blob in `UserDefaults` (which is world-readable for the
-// user account, captured by Time Machine, and trivially leakable).
+// Stores per-profile VLESS UUIDs in the macOS login Keychain. v3.0.0
+// successor to the v2.x NaiveProxy-password store; the storage shape
+// (one generic-password keychain item per profile) is unchanged, but
+// the service identifier renames so a v2.x in-place upgrade does NOT
+// resurrect a stored basic-auth password as a v3.0.0 VLESS UUID
+// (those are categorically different credentials; surfacing the v2.x
+// bytes to sing-box would fail the UUID parse with a confusing error).
 //
 // Each profile id maps to a single generic-password keychain item:
-//   service: "space.coolwhite.naive.proxy-credentials"
+//   service: "space.coolwhite.naive.vless-credentials"
 //   account: profile.id
 //   accessibility: WhenUnlocked
 
@@ -25,7 +28,7 @@ public enum KeychainError: LocalizedError, Sendable, Equatable {
     /// `SecItemAdd` / `SecItemUpdate` failed.
     case write(OSStatus)
     /// `SecItemCopyMatching` failed with an unexpected status (other than
-    /// `errSecItemNotFound`, which is treated as "no password yet").
+    /// `errSecItemNotFound`, which is treated as "no credential yet").
     case read(OSStatus)
     /// `SecItemDelete` failed with an unexpected status.
     case delete(OSStatus)
@@ -42,13 +45,34 @@ public enum KeychainError: LocalizedError, Sendable, Equatable {
     }
 }
 
-/// Per-profile password storage backed by the macOS Keychain.
+/// Per-profile credential storage backed by the macOS Keychain.
+///
+/// **v3.0.0 (sub-phase F):** stores VLESS UUIDs (the v3.0.0 sing-box
+/// per-account credential). The v2.x service identifier
+/// (`…proxy-credentials`) is intentionally NOT migrated forward:
+/// a v2.x basic-auth password is the wrong shape for a VLESS user_id
+/// and surfacing it would fail the engine's `Uuid::parse` with a
+/// confusing "uuid must be an RFC 4122 hyphenated UUID" error. The
+/// in-place upgrade path is "the keychain has no UUID; force the
+/// user through the subscription URL re-import flow", which is the
+/// same path a fresh install takes.
 public struct KeychainStore: Sendable {
 
     /// Default service identifier used to namespace this app's keychain
     /// items. Bundle id plus a stable suffix so multiple credential kinds
     /// can share the keychain in the future without collision.
-    public static let defaultService = "space.coolwhite.naive.proxy-credentials"
+    ///
+    /// **v3.0.0 (sub-phase F):** renamed from `…proxy-credentials`
+    /// to `…vless-credentials`. The `.naive.` segment is retained
+    /// because it matches the `PRODUCT_BUNDLE_IDENTIFIER`
+    /// (`space.coolwhite.naive`) which is the cross-version
+    /// persistence anchor — changing the bundle id would break
+    /// every other in-place upgrade surface (UserDefaults,
+    /// preferences, code-signing identity). Only the trailing
+    /// credential-kind segment changed, so the keychain partitions
+    /// cleanly between v2.x basic-auth passwords (untouched and
+    /// orphaned after upgrade) and v3.0.0 VLESS UUIDs.
+    public static let defaultService = "space.coolwhite.naive.vless-credentials"
 
     private let service: String
 
@@ -56,16 +80,16 @@ public struct KeychainStore: Sendable {
         self.service = service
     }
 
-    /// Writes (or updates) the password associated with a profile id.
+    /// Writes (or updates) the UUID associated with a profile id.
     ///
-    /// Empty passwords are deleted rather than stored — there is no point
-    /// in keeping a sentinel "no password" item.
-    public func setPassword(_ password: String, forProfileID id: String) throws {
-        if password.isEmpty {
-            try deletePassword(forProfileID: id)
+    /// Empty UUIDs are deleted rather than stored — there is no point
+    /// in keeping a sentinel "no credential" item.
+    public func setUUID(_ uuid: String, forProfileID id: String) throws {
+        if uuid.isEmpty {
+            try deleteUUID(forProfileID: id)
             return
         }
-        let data = Data(password.utf8)
+        let data = Data(uuid.utf8)
 
         let lookup: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -94,9 +118,9 @@ public struct KeychainStore: Sendable {
         }
     }
 
-    /// Returns the password associated with a profile id, or an empty string
+    /// Returns the UUID associated with a profile id, or an empty string
     /// when none is stored. Throws on unexpected keychain errors.
-    public func password(forProfileID id: String) throws -> String {
+    public func uuid(forProfileID id: String) throws -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -109,9 +133,9 @@ public struct KeychainStore: Sendable {
         switch status {
         case errSecSuccess:
             guard let data = item as? Data,
-                let password = String(data: data, encoding: .utf8)
+                let uuid = String(data: data, encoding: .utf8)
             else { throw KeychainError.malformedItem }
-            return password
+            return uuid
         case errSecItemNotFound:
             return ""
         default:
@@ -119,9 +143,9 @@ public struct KeychainStore: Sendable {
         }
     }
 
-    /// Removes the password associated with a profile id. No-op when none
+    /// Removes the UUID associated with a profile id. No-op when none
     /// is stored.
-    public func deletePassword(forProfileID id: String) throws {
+    public func deleteUUID(forProfileID id: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
