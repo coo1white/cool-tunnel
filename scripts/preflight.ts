@@ -218,9 +218,9 @@ async function main(): Promise<void> {
 
     // --- Shell floor ------------------------------------------------------
 
-    // Expand the glob in this process so shellcheck receives explicit
-    // file args. **post-v2.0.51:** `bin/ct` (brew-style maintenance
-    // CLI) is also linted so a future edit can't silently regress.
+    // Expand the glob in this process so shellcheck receives
+    // explicit file args. `bin/ct` (brew-style maintenance CLI) is
+    // also linted so a future edit can't silently regress.
     const shellFiles: string[] = [];
     const scriptsGlob = new Glob("*.sh");
     for await (const match of scriptsGlob.scan({

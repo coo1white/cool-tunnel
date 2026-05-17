@@ -5,7 +5,7 @@
 //
 // scripts/cut_release.ts — TypeScript+Bun port of cut_release.sh.
 //
-// **Synthetic CI Gate** (originally v2.0.18-pre). Cool Tunnel ships
+// **Synthetic CI Gate.** Cool Tunnel ships
 // without a paid Apple Developer account, which means no Xcode Cloud,
 // no notarisation, no automated CI. This script substitutes for all
 // three: every check the project would otherwise gate behind a cloud
@@ -221,10 +221,9 @@ async function buildCargoUpdate(): Promise<void> {
 
 async function buildXcodeRelease(): Promise<string> {
     step(`Building Cool Tunnel ${VERSION} (Release, universal arm64+x86_64)…`);
-    // **v2.0.22 (round-4 fallout):** explicit `ARCHS` +
-    // `ONLY_ACTIVE_ARCH=NO` so the .app's main Mach-O is universal,
-    // matching the bundled engine + sing-box binaries which are
-    // already universal via `lipo`.
+    // Explicit `ARCHS` + `ONLY_ACTIVE_ARCH=NO` so the .app's main
+    // Mach-O is universal, matching the bundled engine + sing-box
+    // binaries which are already universal via `lipo`.
     const distDir = join(REPO_ROOT, "dist");
     await mkdir(distDir, { recursive: true });
     const logPath = join(distDir, `build-${VERSION}.log`);

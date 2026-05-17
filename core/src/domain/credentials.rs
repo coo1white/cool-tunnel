@@ -464,9 +464,9 @@ impl RealityShortId {
         if trimmed.len() > REALITY_SHORT_ID_MAX_LEN {
             return Err(InvalidCredentials::MalformedRealityShortId);
         }
-        // `usize::is_multiple_of` is Rust 1.84+; the crate's
-        // `rust-toolchain.toml` pins 1.80. Stay portable with the
-        // explicit modulo form.
+        // `usize::is_multiple_of` is Rust 1.84+; the crate's MSRV
+        // (`rust-version` in Cargo.toml) is 1.80. Stay portable
+        // with the explicit modulo form.
         if trimmed.len() % 2 != 0 {
             return Err(InvalidCredentials::MalformedRealityShortId);
         }
