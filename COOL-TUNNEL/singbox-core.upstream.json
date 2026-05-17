@@ -2,6 +2,6 @@
   "upstream_tag": "v1.13.12",
   "arm64_tarball_sha256": "43eef86f0ea4a79c3696974f397a963c46a457ee46d1ffac9aa913944a5fc986",
   "x64_tarball_sha256": "f3275316451bf1983bc059599c69c8ed0232d53a619d15cfd535f95cc9a4477a",
-  "merged_universal_sha256": "PENDING-FIRST-LIPO-MERGE",
-  "fetched_at": "2026-05-17T00:00:00Z"
+  "merged_universal_sha256": "255e2a5081f5ac803c693aa18258e3405a4ef3086822f327e97723b2b282e4f0",
+  "fetched_at": "2026-05-17T03:33:42Z"
 }

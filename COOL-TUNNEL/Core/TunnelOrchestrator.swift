@@ -251,7 +251,8 @@ public final class TunnelOrchestrator {
             do {
                 self.activeSingboxDescriptor = try await self.singboxResolver.resolve(settings: self.settings)
             } catch let error as SingboxResolverError {
-                self.recordError("sing-box binary unusable: \(error.localizedDescription)", layer: .localKernel)
+                self.recordError(
+                    "sing-box binary unusable: \(error.localizedDescription)", layer: .localKernel)
                 self.activeSingboxDescriptor = nil
             } catch {
                 self.recordError(

@@ -57,6 +57,31 @@ missing_docs = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# v3.0.0 grandfathered pedantic relaxations. Each one is a
+# stylistic preference that the v3 sing-box pivot pushed past
+# the local-iteration-budget without yielding actionable
+# behaviour gains:
+#
+#   doc_markdown — many of our doc-comments name protocol surface
+#     (`Naive`, `VLESS`, `Reality`, `SOCKS`, `UUID`, `DoH`,
+#     `JSON`, `TLS`) where adding backticks per identifier
+#     across every doc line hurts readability more than it helps.
+#   module_name_repetitions — the domain layer's value types
+#     (`domain::profile::Profile`, `domain::server::ServerAddress`)
+#     legitimately echo their module name; renaming would harm
+#     callers more than it would help.
+#   too_many_lines — the diagnostics SOCKS5 walker
+#     (`debug_handshake.rs::probe_handshake`) is a state-machine
+#     that doesn't decompose without losing the linear story.
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+# `s.clone_into(&mut dest)` vs `dest = s.to_owned()` is a
+# clarity-vs-efficiency style call. We use the assignment form in
+# tests + setters where it reads naturally; the extra allocation
+# cost on the rare branch (re-reuse of the dest buffer) doesn't
+# warrant a re-spelling.
+assigning_clones = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

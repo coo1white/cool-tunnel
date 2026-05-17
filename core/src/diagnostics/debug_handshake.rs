@@ -311,13 +311,15 @@ async fn drive_local_socks_connect_inner(
     // ---- SOCKS5 CONNECT request: VER=5, CMD=1 (CONNECT), RSV=0,
     //      ATYP=3 (domain), DST.LEN, DST.HOST, DST.PORT (BE u16).
     let host_bytes = target_host.as_bytes();
-    if host_bytes.len() > u8::MAX as usize {
+    // SOCKS5 ATYP=3 (domain) limits the host length to a single byte;
+    // u8::try_from rejects > 255 (clippy::cast_possible_truncation).
+    let Ok(host_len) = u8::try_from(host_bytes.len()) else {
         trace.error = Some("SOCKS5 target host exceeds 255 bytes".to_owned());
         return trace;
-    }
+    };
     let mut request = Vec::with_capacity(7 + host_bytes.len());
     request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03]);
-    request.push(host_bytes.len() as u8);
+    request.push(host_len);
     request.extend_from_slice(host_bytes);
     request.extend_from_slice(&target_port.to_be_bytes());
     if let Err(err) = stream.write_all(&request).await {
