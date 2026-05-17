@@ -112,11 +112,10 @@ enum Cli {
     Client,
     Server {
         listen: SocketAddr,
-        /// **v0.1.7.11 (SM-9):** explicit acknowledgement that
-        /// the operator has put a reverse proxy with auth in
-        /// front of this binary. Required before `run()` will
-        /// bind a non-loopback address. Default `false` preserves
-        /// the documented loopback-only deployment posture.
+        /// Explicit operator acknowledgement that a reverse proxy
+        /// with auth fronts this binary. Required before `run()`
+        /// will bind a non-loopback address. Default `false`
+        /// preserves the loopback-only deployment posture.
         allow_public: bool,
     },
 }

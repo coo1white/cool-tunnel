@@ -1,11 +1,13 @@
 # Support policy
 
 Cool Tunnel ships on a **Long-Term Servicing Channel (LTSC)** model. The
-current line is **v2.0.x** (started 2026-05). Public surface — UI flows,
-`cool-tunnel-core` CLI flags, the JSON-over-stdio engine protocol, and
-file paths under `~/Library/Application Support/COOL-TUNNEL/` — does
-not break inside an LTSC line. Security fixes and upstream NaiveProxy
-updates land for **at least 18 months** from the line's initial release.
+current line is **v3.0.x** (sing-box / VLESS + Reality, started 2026-05).
+The preceding **v2.0.x** line (NaiveProxy basic-auth) reached EOL with
+the v3.0.0 cut. Public surface — UI flows, `cool-tunnel-core` CLI flags,
+the JSON-over-stdio engine protocol, and file paths under
+`~/Library/Application Support/COOL-TUNNEL/` — does not break inside an
+LTSC line. Security fixes and upstream sing-box updates land for
+**at least 18 months** from the line's initial release.
 
 ## Supported
 
@@ -35,7 +37,7 @@ These **never** ship inside an LTSC line; they bump the line:
 6. Bump the pinned Rust toolchain.
 7. Change the first line of `--version` (the macOS app's `RustCoreResolver` greps it).
 
-Hotfixes — wording, performance, NaiveProxy upstream bumps without
+Hotfixes — wording, performance, sing-box upstream bumps without
 protocol change — ship in-line and are documented in
 [CHANGELOG.md](./CHANGELOG.md).
 
@@ -53,6 +55,6 @@ so a binary can be matched back to a commit.
 
 ## End of life
 
-When the v2.0.x line ends, this file is updated to point at the next
-active LTSC line and a final patch on the old line surfaces the upgrade
+When the current LTSC line ends, this file is updated to point at the
+next active line and a final patch on the old line surfaces the upgrade
 hint in the GitHub release page. No silent abandonment.

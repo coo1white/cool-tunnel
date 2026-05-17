@@ -47,17 +47,13 @@ pub fn parse(output: &str, port: Port) -> TrafficSnapshot {
             if line.contains(local_client_marker.as_str()) {
                 local_clients = local_clients.saturating_add(1);
             }
-            // **Sup-F#6 (v0.1.7.17):** endpoint-aware loopback
-            // exclusion. The previous v0.1.7.16 fix used
-            // `line.contains("127.0.0.1")` — which matches on
-            // EITHER endpoint. A connection from
-            // `127.0.0.1:54321 -> 1.2.3.4:443` (a local client
-            // talking to a real remote) substring-matches the
-            // loopback literal anywhere on the line and gets
-            // misclassified as "not remote", masking a genuine
-            // outbound flow that the security monitor should be
-            // catching. Now: parse the destination side of `->`
-            // and only exclude when it ALSO is loopback.
+            // Endpoint-aware loopback exclusion: parse the destination
+            // side of `->` and only exclude when it ALSO is loopback.
+            // A bare `line.contains("127.0.0.1")` matches on either
+            // endpoint and would misclassify
+            // `127.0.0.1:54321 -> 1.2.3.4:443` (a local client talking
+            // to a real remote) as not-remote, masking a genuine
+            // outbound flow the security monitor should be catching.
             if let Some((local_side, remote_side)) = line.split_once("->") {
                 let local_is_loopback =
                     local_side.contains("127.0.0.1") || local_side.contains("[::1]");
