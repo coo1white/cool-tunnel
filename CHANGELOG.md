@@ -23,7 +23,7 @@ contract.
 
 ---
 
-## [3.0.0] — UNRELEASED — Pivot from naive to sing-box (VLESS + Reality); coordinated v0.4.0 server release
+## [3.0.0] — 2026-05-17 — Pivot from naive to sing-box (VLESS + Reality); coordinated v0.4.0 server release
 
 The v1.x and v2.x series rode klzgrad/naiveproxy as the proxy
 binary on both sides of the tunnel. The cool-tunnel-server side
