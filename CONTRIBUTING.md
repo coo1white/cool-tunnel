@@ -54,12 +54,12 @@ When you change `ProfileStore` / `MigratingCredentialStore` / `KeychainStore` / 
 
 `fileSystemSynchronizedGroups` auto-picks-up any new `*.swift` under `COOL-TUNNELTests/` — no project-file edit needed.
 
-### NaiveProxy pin verification
+### sing-box pin verification
 
-`COOL-TUNNEL/naive.upstream.json` is authoritative for the bundled `naive` binary (upstream tag + per-artifact SHA-256). `scripts/fetch_naive.sh` modes: default verifies the bundled binary's SHA matches the manifest (no network, runs in `cut_release.sh` + PR-time `naive-pin` job); `--check-only` re-downloads at the pinned tag and verifies SHAs (daily `naive-pin-audit.yml`); `--repin [TAG]` is operator-explicit, requires `CT_REPIN_CONFIRM=1`, lands as a single audited commit.
+`COOL-TUNNEL/singbox-core.upstream.json` is authoritative for the bundled `sing-box` binary (upstream tag + per-artifact SHA-256). `scripts/fetch_singbox-core.sh` modes: default verifies the bundled binary's SHA matches the manifest (no network, runs in `cut_release.sh` + PR-time `singbox-core-pin` job); `--check-only` re-downloads at the pinned tag and verifies SHAs (daily `singbox-core-pin-audit.yml`); `--repin [TAG]` is operator-explicit, requires `CT_REPIN_CONFIRM=1`, lands as a single audited commit.
 
 Never let `cut_release.sh` "auto-pin" — that path was the H1 supply-chain finding.
 
 ### Other gates
 
-`cargo fmt --check`, `cargo clippy --pedantic -D warnings`, `cargo test`, `cargo deny check`; `xcrun swift-format lint -r --strict` on `COOL-TUNNEL/` + `COOL-TUNNELTests/`; `shellcheck` on every `scripts/*.sh`; Bun argv-parser tests for `cut_release.ts` / `fetch_naive.ts`.
+`cargo fmt --check`, `cargo clippy --pedantic -D warnings`, `cargo test`, `cargo deny check`; `xcrun swift-format lint -r --strict` on `COOL-TUNNEL/` + `COOL-TUNNELTests/`; `shellcheck` on every `scripts/*.sh`; Bun argv-parser tests for `cut_release.ts` / `fetch_singbox-core.ts`.

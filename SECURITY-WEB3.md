@@ -65,7 +65,7 @@ If your threat model includes "future review of the Application Support director
 If your threat model includes "Cool Tunnel itself cannot have been compromised to silently exfiltrate my activity":
 
 - AGPL-3.0-only source, reviewable end-to-end.
-- Daily upstream `naive` SHA pin audit (`.github/workflows/naive-pin-audit.yml`) detects upstream tag rewrites within 24 h.
+- Daily upstream `sing-box` SHA pin audit (`.github/workflows/singbox-core-pin-audit.yml`) detects upstream tag rewrites within 24 h.
 - Bundled `cool-tunnel-core` Rust binary forbids `unsafe` code (`#![forbid(unsafe_code)]`).
 - No analytics, no telemetry endpoint, no identity service — verified by code search, pinned by absence of any outbound URLs to non-canary, non-GitHub hosts in production code paths.
 - Rust core's protocol surface is JSON-over-stdio with a strict message-version handshake; protocol drift fails at startup, not silently.
