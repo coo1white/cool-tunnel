@@ -1,6 +1,6 @@
 [package]
 name = "cool-tunnel-core"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Cross-platform Rust engine for Cool Tunnel — JSON-over-stdio client and HTTP server modes"

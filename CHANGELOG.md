@@ -23,6 +23,18 @@ contract.
 
 ---
 
+## [3.0.1] — 2026-05-18 — Hotfix: bundled sing-box Settings test
+
+- Fixed the Settings → sing-box diagnostic so the bundled upstream
+  binary no longer shows a false NG verdict for `--version`.
+  SagerNet/sing-box reports its version through the `version`
+  subcommand (`sing-box version X.Y.Z`), while `cool-tunnel-core`
+  continues to use `--version`.
+- Added regression coverage for `BinaryInspector`'s per-binary
+  version argv selection.
+
+---
+
 ## [3.0.0] — 2026-05-17 — Pivot from naive to sing-box (VLESS + Reality); coordinated v0.4.0 server release
 
 The v1.x and v2.x series rode klzgrad/naiveproxy as the proxy
