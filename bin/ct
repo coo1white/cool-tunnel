@@ -196,7 +196,7 @@ Usage: ct release VERSION
 
         1. Verify VERSION matches core/Cargo.toml and the two
            MARKETING_VERSION lines in COOL-TUNNEL.xcodeproj/.
-        2. Refresh the bundled NaiveProxy binary's SHA pin.
+        2. Refresh the bundled sing-box binary's SHA pin.
         3. Run cargo fmt, clippy, tests, cargo-deny, ShellCheck,
            Swift format, and security_check.sh.
         4. Rebuild the Rust core + Swift app in Release mode
