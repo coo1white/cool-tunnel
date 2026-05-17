@@ -3,8 +3,7 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/fetch_singbox-core.ts — TypeScript+Bun port of the legacy
-// fetch_naive flow, adapted for the v3.0.0 sing-box pivot.
+// scripts/fetch_singbox-core.ts — sing-box upstream pin enforcement.
 //
 // Authoritative pin enforcement for the bundled sing-box binary.
 //

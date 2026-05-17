@@ -57,9 +57,9 @@ const MAX_TIMEOUT_SECS: u64 = 30;
 
 /// Default TCP port assumed when the profile's
 /// [`crate::domain::ServerAddress`] carries no explicit port. Matches
-/// the cool-tunnel-server topology — sing-box terminates `NaiveProxy`
-/// on `:443/tcp` for SNI-fronted compatibility with normal HTTPS
-/// traffic.
+/// the cool-tunnel-server topology — sing-box terminates VLESS+Reality
+/// on `:443/tcp`, with Reality providing SNI cover so the traffic
+/// looks like normal HTTPS on the wire.
 const DEFAULT_TCP_PORT: u16 = 443;
 
 /// Runs the pre-flight probe and returns a structured report.
