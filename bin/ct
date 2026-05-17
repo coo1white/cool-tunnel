@@ -243,34 +243,35 @@ HELP
     "${CT_SCRIPTS_DIR}/package_release.sh" "$@"
 }
 
-cmd_naive() {
+cmd_singbox() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         cat <<'HELP'
-Usage: ct naive [--check-only | --repin TAG]
+Usage: ct singbox [--check-only | --repin TAG]
 
     Without arguments:
-        Verify the bundled `naive` binary's SHA matches the pin
-        in COOL-TUNNEL/naive.upstream.json. No network access.
-        This is the form run by cut_release.sh and PR-time CI.
+        Verify the bundled `sing-box` binary's SHA matches the pin
+        in COOL-TUNNEL/singbox-core.upstream.json. No network
+        access. This is the form run by cut_release.sh and PR-time
+        CI.
 
     --check-only
         Re-download the upstream tarballs at the pinned tag and
         verify every SHA still reproduces. Network. Run daily by
-        the naive-pin-audit.yml workflow.
+        the singbox-core-pin-audit.yml workflow.
 
     --repin TAG
         Operator-explicit rollover. REQUIRES `CT_REPIN_CONFIRM=1`
         in the environment. Re-downloads at the new tag,
-        re-computes SHAs, rewrites naive.upstream.json, and
+        re-computes SHAs, rewrites singbox-core.upstream.json, and
         replaces the bundled binary. Must land as a single audited
         commit. Refuses to do anything without the confirmation
         env var so a typo'd flag can't silently roll the pin.
 
-Source: scripts/fetch_naive.sh
+Source: scripts/fetch_singbox-core.sh
 HELP
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/fetch_naive.sh" "$@"
+    "${CT_SCRIPTS_DIR}/fetch_singbox-core.sh" "$@"
 }
 
 cmd_security() {
@@ -334,7 +335,7 @@ Available commands:
     security     Scan the tree for embedded secrets
 
   Maintainer
-    naive        Verify or roll the bundled NaiveProxy pin
+    singbox      Verify or roll the bundled sing-box pin
 
   Discovery
     version      Print the current project version
@@ -344,7 +345,7 @@ Available commands:
 Each subcommand also accepts --help / -h for its own usage:
 
     ct release --help
-    ct naive --help
+    ct singbox --help
 
 Source paths: every subcommand wraps a script under scripts/*.sh —
 running the underlying script directly still works.
@@ -363,8 +364,8 @@ Usage:
 
 Quick start:
     ct doctor              # is my checkout healthy?
-    ct release 2.0.52      # cut a release
-    ct naive               # verify the bundled NaiveProxy pin
+    ct release 3.0.0       # cut a release
+    ct singbox             # verify the bundled sing-box pin
     ct help release        # full usage for one verb
 
 Run `ct commands` for the full list.
@@ -386,7 +387,7 @@ HELP
         ratchet)   cmd_ratchet --help ;;
         release)   cmd_release --help ;;
         package)   cmd_package --help ;;
-        naive)     cmd_naive --help ;;
+        singbox)   cmd_singbox --help ;;
         security)  cmd_security --help ;;
         version)   cmd_version --help ;;
         commands)  cmd_commands ;;
@@ -430,7 +431,7 @@ case "$1" in
     ratchet)   shift; cmd_ratchet "$@" ;;
     release)   shift; cmd_release "$@" ;;
     package)   shift; cmd_package "$@" ;;
-    naive)     shift; cmd_naive "$@" ;;
+    singbox)   shift; cmd_singbox "$@" ;;
     security)  shift; cmd_security "$@" ;;
     version)   shift; cmd_version "$@" ;;
     commands)  shift; cmd_commands ;;
