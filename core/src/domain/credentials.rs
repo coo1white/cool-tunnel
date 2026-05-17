@@ -598,7 +598,7 @@ fn decode_base64url(input: &str) -> Option<Vec<u8>> {
         pad += 1;
     }
     let core = &bytes[..bytes.len() - pad];
-    if core.iter().any(|&b| b == b'=') {
+    if core.contains(&b'=') {
         return None;
     }
     let len = core.len();
