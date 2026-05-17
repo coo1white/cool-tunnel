@@ -325,8 +325,8 @@ impl RealityPublicKey {
         if trimmed.is_empty() {
             return Err(InvalidCredentials::EmptyRealityPublicKey);
         }
-        let decoded = decode_base64url(trimmed)
-            .ok_or(InvalidCredentials::MalformedRealityPublicKey)?;
+        let decoded =
+            decode_base64url(trimmed).ok_or(InvalidCredentials::MalformedRealityPublicKey)?;
         if decoded.len() != REALITY_PUBLIC_KEY_DECODED_LEN {
             return Err(InvalidCredentials::MalformedRealityPublicKey);
         }
@@ -709,10 +709,7 @@ mod tests {
 
     #[test]
     fn uuid_rejects_wrong_length() {
-        assert_eq!(
-            Uuid::parse("1234"),
-            Err(InvalidCredentials::MalformedUuid)
-        );
+        assert_eq!(Uuid::parse("1234"), Err(InvalidCredentials::MalformedUuid));
     }
 
     #[test]

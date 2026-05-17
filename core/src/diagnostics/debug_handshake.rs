@@ -149,8 +149,8 @@ impl DebugSingboxConfig {
         let canonical_json = canonical
             .to_pretty_json()
             .map_err(DebugHandshakeError::ConfigRender)?;
-        let mut value: serde_json::Value = serde_json::from_str(&canonical_json)
-            .map_err(DebugHandshakeError::ConfigRender)?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&canonical_json).map_err(DebugHandshakeError::ConfigRender)?;
         // Swap inbounds[0].listen_port to the ephemeral port.
         if let Some(port_field) = value
             .get_mut("inbounds")
@@ -159,8 +159,8 @@ impl DebugSingboxConfig {
         {
             *port_field = serde_json::Value::from(listen_port);
         }
-        let body = serde_json::to_string_pretty(&value)
-            .map_err(DebugHandshakeError::ConfigRender)?;
+        let body =
+            serde_json::to_string_pretty(&value).map_err(DebugHandshakeError::ConfigRender)?;
 
         for attempt in 0_u8..16 {
             let path = debug_config_path(attempt);
@@ -360,7 +360,9 @@ async fn drive_local_socks_connect_inner(
         0x03 => {
             let mut len_byte = [0_u8; 1];
             if let Err(err) = stream.read_exact(&mut len_byte).await {
-                trace.error = Some(format!("failed to read SOCKS5 reply ATYP=domain len: {err}"));
+                trace.error = Some(format!(
+                    "failed to read SOCKS5 reply ATYP=domain len: {err}"
+                ));
                 return trace;
             }
             append_capture(&mut trace.received, &len_byte);
@@ -555,9 +557,7 @@ mod tests {
 
     #[test]
     fn sanitize_lines_redacts_uuid() {
-        let lines = sanitize_lines(
-            b"vless-out using uuid 11111111-2222-3333-4444-555555555555\n",
-        );
+        let lines = sanitize_lines(b"vless-out using uuid 11111111-2222-3333-4444-555555555555\n");
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].contains("11111111-2222-3333-4444-555555555555"));
     }

@@ -70,9 +70,7 @@ pub fn redact(line: &str) -> Cow<'_, str> {
     // v3.0.0 Reality / VLESS patterns. The JSON-quoted form runs
     // first (same rationale as the v2.x password pass) so a value
     // with embedded punctuation is fully redacted.
-    if let Cow::Owned(s) =
-        REALITY_QUOTED_KV_REGEX.replace_all(&current, "${prefix}***${suffix}")
-    {
+    if let Cow::Owned(s) = REALITY_QUOTED_KV_REGEX.replace_all(&current, "${prefix}***${suffix}") {
         current = Cow::Owned(s);
     }
     if let Cow::Owned(s) = REALITY_BARE_KV_REGEX.replace_all(&current, "${prefix}***${suffix}") {
@@ -201,10 +199,8 @@ static QUERY_STRING_CRED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// bundles than a generic asterisk run.
 #[allow(clippy::expect_used)]
 static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
-    )
-    .expect("UUID redaction regex must compile")
+    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+        .expect("UUID redaction regex must compile")
 });
 
 /// Strict-JSON-quoted-value matcher for Reality fields:
@@ -497,7 +493,8 @@ mod tests {
     /// Two UUIDs on one line each redact independently.
     #[test]
     fn redacts_two_uuids_independently() {
-        let line = "old=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee new=11111111-2222-3333-4444-555555555555";
+        let line =
+            "old=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee new=11111111-2222-3333-4444-555555555555";
         let out = redact(line);
         assert!(!out.contains("aaaaaaaa-bbbb"), "old uuid leaked: {out}");
         assert!(!out.contains("11111111-2222"), "new uuid leaked: {out}");

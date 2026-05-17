@@ -6,9 +6,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::credentials::{
-    Credentials, InvalidCredentials, RawReality, Reality, Username, Uuid,
-};
+use super::credentials::{Credentials, InvalidCredentials, RawReality, Reality, Username, Uuid};
 use super::port::{InvalidPort, Port};
 use super::server::{InvalidServer, ServerAddress};
 

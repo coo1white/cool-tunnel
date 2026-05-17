@@ -217,8 +217,7 @@ mod tests {
                 Username::parse("u").unwrap(),
                 Uuid::parse("11111111-2222-3333-4444-555555555555").unwrap(),
                 Reality::new(
-                    RealityPublicKey::parse("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                        .unwrap(),
+                    RealityPublicKey::parse("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap(),
                     RealityDestHost::parse("www.microsoft.com").unwrap(),
                     RealityShortId::parse("").unwrap(),
                 ),

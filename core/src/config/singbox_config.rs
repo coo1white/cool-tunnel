@@ -334,10 +334,7 @@ mod tests {
     #[test]
     fn split_server_defaults_to_443() {
         let server = ServerAddress::parse("vless.example.com").unwrap();
-        assert_eq!(
-            split_server(&server),
-            ("vless.example.com".to_owned(), 443)
-        );
+        assert_eq!(split_server(&server), ("vless.example.com".to_owned(), 443));
     }
 
     #[test]
