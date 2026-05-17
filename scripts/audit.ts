@@ -5,7 +5,7 @@
 //
 // scripts/audit.ts — TypeScript+Bun port of audit.sh.
 //
-// **Synthetic CI Gate, audit subset (v2.0.18-pre).**
+// **Synthetic CI Gate, audit subset.**
 //
 // Runs every static check the project has wired up. Designed to be
 // called both standalone (`bash scripts/audit.sh`) and from
