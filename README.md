@@ -14,7 +14,7 @@
 
 ## What it is
 
-A macOS app that routes your traffic through a server you own. SwiftUI client, Rust supervisor, bundled NaiveProxy data plane. Non-custodial — you supply the server and credentials. See [SECURITY.md](./SECURITY.md) for the threat model.
+A macOS app that routes your traffic through a server you own. SwiftUI client, Rust supervisor, bundled sing-box data plane (VLESS + Reality). Non-custodial — you supply the server and credentials. See [SECURITY.md](./SECURITY.md) for the threat model.
 
 ---
 
@@ -36,7 +36,7 @@ A macOS app that routes your traffic through a server you own. SwiftUI client, R
 
 ## Server setup
 
-Full guide: [NaiveProxy_Server_Setup.md](./NaiveProxy_Server_Setup.md). At the end the installer prints `server=`, `user=`, `password=` — paste those into the Mac app.
+The server side lives in a separate repo: [coo1white/cool-tunnel-server](https://github.com/coo1white/cool-tunnel-server) (v0.4.0+ pairs with the v3.0.0 client). It deploys a sing-box endpoint with VLESS + Reality and prints the `server=`, `username=`, `uuid=` triple you paste into the Mac app.
 
 ---
 

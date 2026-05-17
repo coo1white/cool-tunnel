@@ -1,6 +1,6 @@
 # Disclaimer
 
-COOL TUNNEL is a free, open-source macOS client that wraps the upstream [NaiveProxy](https://github.com/klzgrad/naiveproxy) protocol. Provided **as-is**, for educational and research purposes only.
+COOL TUNNEL is a free, open-source macOS client that wraps the upstream [sing-box](https://github.com/SagerNet/sing-box) data plane (VLESS + Reality). Provided **as-is**, for educational and research purposes only.
 
 ## Intended use
 
@@ -28,7 +28,7 @@ By downloading, building, installing, or running COOL TUNNEL you acknowledge and
 
 1. **Compliance with local law is solely your responsibility.** The authors neither endorse nor encourage any illegal activity, including but not limited to unauthorised circumvention of network restrictions imposed by law, your employer, your school, or any service whose terms of use you have accepted.
 2. **You will not use this software to violate the terms of service of any network you do not own or operate.**
-3. **You will configure the upstream server (the `naive` endpoint) yourself.** COOL TUNNEL ships no preconfigured server, no embedded credentials, and no directory of public servers. The application cannot connect anywhere until you provide your own server address and credentials.
+3. **You will configure the upstream server (the sing-box endpoint) yourself.** COOL TUNNEL ships no preconfigured server, no embedded credentials, and no directory of public servers. The application cannot connect anywhere until you provide your own server address and credentials.
 4. **You assume all risk** arising from running this software on your own hardware or any hardware you have permission to use.
 
 ## No warranty
@@ -46,11 +46,11 @@ In no event shall the authors, contributors, or copyright holders be liable for 
 
 ## No data collection
 
-COOL TUNNEL does not collect, transmit, or analyse any user data. No telemetry, no analytics, no remote configuration. Credentials are stored on the user's device in `~/Library/Application Support/COOL-TUNNEL/credentials.json` (POSIX mode 0600, parent directory mode 0700) — no Keychain entries, no `UserDefaults` password storage. The application does not contact any remote service except the NaiveProxy server you configure yourself, plus `api.github.com` / `objects.githubusercontent.com` when you click the in-app Update buttons in Settings.
+COOL TUNNEL does not collect, transmit, or analyse any user data. No telemetry, no analytics, no remote configuration. Credentials are stored on the user's device in `~/Library/Application Support/COOL-TUNNEL/credentials.json` (POSIX mode 0600, parent directory mode 0700) — no Keychain entries, no `UserDefaults` password storage. The application does not contact any remote service except the sing-box server you configure yourself, plus `api.github.com` / `objects.githubusercontent.com` when you click the in-app Update buttons in Settings.
 
 ## Bundled components
 
-COOL TUNNEL bundles a precompiled `naive` Mach-O binary built from [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy), distributed under BSD-3-Clause. Users redistributing COOL TUNNEL must comply with that license in addition to AGPL-3.0. The [NOTICE](./NOTICE) file lists every bundled component and its licence — keep it intact in any redistribution.
+COOL TUNNEL bundles a precompiled `sing-box` Mach-O binary built from [SagerNet/sing-box](https://github.com/SagerNet/sing-box), distributed under GPL-3.0. Users redistributing COOL TUNNEL must comply with that license in addition to AGPL-3.0. The [NOTICE](./NOTICE) file lists every bundled component and its licence — keep it intact in any redistribution.
 
 ## Reporting security issues
 

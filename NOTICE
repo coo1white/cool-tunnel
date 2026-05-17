@@ -17,11 +17,11 @@ The full licence text is in the LICENSE file at the repo root.
 
 This product bundles the following third-party software:
 
-* NaiveProxy (https://github.com/klzgrad/naiveproxy)
-  Copyright klzgrad and contributors
-  Licensed under the BSD 3-Clause License.
-  The bundled `naive` Mach-O binary is built unmodified from upstream
-  release tags pinned in COOL-TUNNEL/naive.upstream.json.
+* sing-box (https://github.com/SagerNet/sing-box)
+  Copyright SagerNet and contributors
+  Licensed under the GPL-3.0 License.
+  The bundled `sing-box` Mach-O binary is built unmodified from
+  upstream release tags pinned in COOL-TUNNEL/singbox-core.upstream.json.
 
 * Rust crates (see core/Cargo.toml and core/Cargo.lock for the full
   dependency graph): tokio, axum, tower, serde, serde_json, tracing,
@@ -37,12 +37,14 @@ This product bundles the following third-party software:
 
 AGPL-3.0 + bundled-component compatibility
 
-NaiveProxy (BSD-3) and the linked Rust crate set (MIT, Apache-2.0,
-BSD-3, ISC, MPL-2.0) are all AGPL-3.0-compatible. The combined work
-distributed by coolwhite LLC is therefore licensable under
-AGPL-3.0-only in its entirety. Apple SDK headers and SF Symbols are
-used by reference, not redistributed in source form, so their
-proprietary terms do not propagate to this distribution.
+sing-box (GPL-3.0) and the linked Rust crate set (MIT, Apache-2.0,
+BSD-3, ISC, MPL-2.0) are all AGPL-3.0-compatible — GPL-3.0 is in
+the same family as AGPL-3.0 with explicit cross-compatibility
+under GPL §13. The combined work distributed by coolwhite LLC is
+therefore licensable under AGPL-3.0-only in its entirety. Apple
+SDK headers and SF Symbols are used by reference, not redistributed
+in source form, so their proprietary terms do not propagate to
+this distribution.
 
 The licence change to AGPL-3.0 applies prospectively from the first
 release tagged after this commit; releases tagged on or before

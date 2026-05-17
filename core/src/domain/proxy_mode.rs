@@ -36,13 +36,6 @@ impl ProxyMode {
     }
 }
 
-// `ProxyMode::title()` and `ProxyTestMode::title()` were removed
-// in v2.0.22 — both were orphan UI helpers in a wire-only
-// `Deserialize`/`Serialize` enum; the Swift mirror at
-// `COOL-TUNNEL/Core/Protocol.swift` carries its own UI strings,
-// and no Rust caller ever read them. Reintroduce only if a
-// CLI/server-mode UI surface lands here.
-
 /// Mode for diagnostic latency tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

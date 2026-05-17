@@ -237,14 +237,12 @@ async fn monitor_lifecycle(
     kill_rx: oneshot::Receiver<()>,
     _events: mpsc::Sender<Event>,
 ) {
-    // **v0.1.7.10 (Ru-A1):** monitor_lifecycle no longer emits
-    // `StateChanged { running: false }`. The single emitter
-    // for natural-death is now `client_mode::monitor_loop`,
-    // gated by an at-most-once flag in `EngineState` so it
-    // never duplicates with the dispatcher's user-stop emit.
-    // monitor_lifecycle's job is now pure cleanup: drain on
-    // either `kill_rx` or natural exit, kill_on_drop reaps the
-    // child if we were aborted mid-flight.
+    // monitor_lifecycle does NOT emit `StateChanged { running: false }`.
+    // The single emitter for natural-death is `client_mode::monitor_loop`,
+    // gated by an at-most-once flag in `EngineState` so it never
+    // duplicates with the dispatcher's user-stop emit. This function's
+    // job is pure cleanup: drain on either `kill_rx` or natural exit;
+    // kill_on_drop reaps the child if we were aborted mid-flight.
     tokio::select! {
         _ = kill_rx => {
             let _ = child.kill().await;
@@ -291,14 +289,11 @@ mod tests {
         let _h = tokio::spawn(monitor_lifecycle(child, kx_rx, tx.clone()));
         drop(tx); // close the original sender so receivers see end-of-stream when tasks finish
 
-        // **v0.1.7.10:** monitor_lifecycle no longer emits
-        // `StateChanged { running: false }` (Ru-A1 single-emitter
-        // discipline). The natural-death emission moved to
-        // `client_mode::monitor_loop` which gates on the engine
-        // state's at-most-once flag. So this test now just
-        // asserts the log line was streamed and the lifecycle
-        // task drained — no state-change event is expected from
-        // the supervisor itself.
+        // monitor_lifecycle does not emit `StateChanged { running: false }`
+        // — the natural-death emission lives in `client_mode::monitor_loop`,
+        // gated by the engine state's at-most-once flag. So this test
+        // asserts only the log-line streaming and lifecycle-task drain;
+        // no state-change event is expected from the supervisor itself.
         let mut saw_log_line = false;
         while let Some(evt) = timeout(Duration::from_secs(2), rx.recv()).await.unwrap() {
             if let Event::LogLine { line, .. } = evt {

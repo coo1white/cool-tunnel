@@ -56,13 +56,10 @@ pub async fn run_probe(opts: &ProbeOptions) -> std::io::Result<LatencySample> {
         cmd.arg("-x").arg(format!("socks5h://127.0.0.1:{port}"));
     }
 
-    // **L1 (v2.0.38):** `--` separates flags from positional args so a
-    // URL beginning with `-` (no caller passes one today, but a future
-    // caller surfacing user-set probe targets would) cannot be
-    // interpreted by curl as an additional flag. Costs one argv slot
-    // and eliminates the class of bugs forever. Matches the
-    // defense-in-depth pattern documented at
-    // `core/src/diagnostics/mod.rs:140`.
+    // `--` separates flags from positional args so a URL beginning
+    // with `-` (no caller passes one today, but a future caller
+    // surfacing user-set probe targets would) cannot be interpreted
+    // by curl as an additional flag.
     cmd.arg("-w").arg(WRITE_OUT_FORMAT).arg("--").arg(&opts.url);
     // Reap the curl child if the diagnostic Task is cancelled
     // — without this, every cancelled probe leaks a curl process
