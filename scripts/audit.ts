@@ -388,7 +388,7 @@ async function main(): Promise<void> {
         root,
         "tests",
         "fixtures",
-        "subscription_manifest_v1.json",
+        "subscription_manifest_v2.json",
     );
     const decoderDir = join(root, "COOL-TUNNEL", "Core");
     if (
@@ -403,11 +403,18 @@ async function main(): Promise<void> {
             const abs = join(decoderDir, match);
             swiftSources.set(match, await readFile(abs, "utf8"));
         }
+        // v3.0.0: the v=2 subscription manifest carries `uuid`
+        // (replaces v=1's `password`) plus a `reality` block. The
+        // probe asserts the JSON fixture and Swift decoder agree
+        // on the v=2 shape; passing v=1 fields here would silently
+        // re-introduce the v2.x basic-auth wire and let a v=2
+        // server's UUID get stuffed into Profile.password.
         const missing = checkSchemaFields(fixtureJson, swiftSources, [
             "profiles",
             "host",
             "username",
-            "password",
+            "uuid",
+            "reality",
         ]);
         if (missing.length > 0) {
             for (const m of missing) failMsg(state, m);

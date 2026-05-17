@@ -1,13 +1,18 @@
 {
-  "version": 1,
+  "version": 2,
   "server": "proxy.example.com",
   "profiles": [
     {
       "host": "proxy.example.com",
       "port": 443,
       "username": "alice",
-      "password": "redacted-cleartext",
-      "label": "proxy.example.com (alice)"
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "label": "proxy.example.com (alice)",
+      "reality": {
+        "public_key": "TEST-REALITY-PUBLIC-KEY-PLACEHOLDER",
+        "dest_host": "www.microsoft.com",
+        "short_id": ""
+      }
     }
   ],
   "capabilities": {
@@ -18,5 +23,8 @@
   "issued_at": 0,
   "expires_at": 0,
   "note": null,
+  "server_singbox_pin": {
+    "upstream_tag": "v1.13.12"
+  },
   "signature": "0000000000000000000000000000000000000000000000000000000000000000"
 }
