@@ -660,7 +660,21 @@ public struct SettingsView: View {
             return (false, "Code signature is invalid or missing.")
         }
         if descriptor.version == nil {
-            return (false, "Binary did not respond to --version.")
+            // v3.0.0 — `BinaryInspector.runVersion(binaryName:
+            // "sing-box")` shells `sing-box version` (the subcommand)
+            // and rejects output that doesn't match the
+            // `sing-box X.Y.Z` shape. The two ways this returns nil
+            // are observationally identical from here (no output OR
+            // wrong shape), so phrase the message for both — the
+            // common v2.x → v3.0.0 upgrade case is "the path points
+            // at a leftover naive binary which prints `naive
+            // 148...` that the regex correctly rejects." Reset to
+            // the bundled sing-box or click Update to install
+            // SagerNet/sing-box; both end up at the right path.
+            return (
+                false,
+                "Binary's `version` output didn't match the expected `sing-box X.Y.Z` shape. The path may point at a leftover v2.x naive binary — click Reset to use the bundled sing-box, or Update to install the latest upstream."
+            )
         }
         let archDesc =
             descriptor.isUniversal ? "universal" : descriptor.architectures.sorted().joined(separator: ", ")
