@@ -235,7 +235,7 @@ jobs:
       # is SHA-pinned to the v2 release as of 2026-05-14 — same
       # supply-chain discipline we apply to every other third-party
       # Action.
-      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
       # Default mode is verify-only: no network, no lipo, no codesign.
@@ -265,7 +265,7 @@ jobs:
       # CI step lightweight (no Swift toolchain, no Rust toolchain).
       # The .sh is a thin shim over scripts/try_question_ratchet.ts;
       # Bun is the runtime.
-      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
       - name: Enforce try? cap
@@ -290,7 +290,7 @@ jobs:
       # supply-chain discipline as the rest of the workflow's
       # third-party uses (actions/checkout, actions/cache,
       # taiki-e/install-action).
-      - uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5  # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
       - name: bun test scripts/
