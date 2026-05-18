@@ -118,7 +118,7 @@ jobs:
         # since `taiki-e/install-action` runs `cargo install` on the
         # macos-14 runner with the GITHUB_TOKEN still in scope (until
         # the workflow's `permissions: contents: read` strips writes).
-        uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e  # v2
         with:
           tool: cargo-deny
       - name: cargo deny check
