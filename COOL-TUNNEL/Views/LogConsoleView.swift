@@ -34,9 +34,10 @@ import UniformTypeIdentifiers
 import os
 
 /// Live engine log: streams `LogEntry` values from the
-/// orchestrator with auto-scroll, monospaced rendering, and
-/// stderr lines tinted `.red`. Empty state shows a friendly
-/// "waiting for the first log line" placeholder; an empty
+/// orchestrator with auto-scroll and monospaced rendering.
+/// Engine stderr can carry normal INFO traffic, so row text uses
+/// the standard foreground color instead of implying an error.
+/// Empty state shows a friendly "waiting for the first log line" placeholder; an empty
 /// filter shows a dedicated "no matches" state with a
 /// Clear-filter shortcut.
 public struct LogConsoleView: View {
@@ -377,7 +378,7 @@ public struct LogConsoleView: View {
 
             Text(entry.text)
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(entry.source == .stderr ? .red : .primary)
+                .foregroundStyle(.primary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -23,6 +23,20 @@ contract.
 
 ---
 
+## [3.0.2] — 2026-05-19 — Hotfix: sing-box DNS config + calmer live log
+
+- Removed the legacy `dns-out` outbound and DNS route rule from
+  generated sing-box client configs. sing-box 1.13 removed that
+  outbound shape, so Cool Tunnel now lets DNS follow the default
+  VLESS outbound path instead of emitting stale config.
+- Updated the Live log row color so normal sing-box INFO traffic no
+  longer renders as bright red merely because the engine wrote it to
+  stderr.
+- Added regression coverage that generated sing-box configs contain no
+  DNS outbound or DNS route rule.
+
+---
+
 ## [3.0.1] — 2026-05-18 — Hotfix: bundled sing-box Settings test
 
 - Fixed the Settings → sing-box diagnostic so the bundled upstream

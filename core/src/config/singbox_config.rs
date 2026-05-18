@@ -62,13 +62,8 @@ impl SingboxConfig {
                 vless: VlessOutbound::new(server_host, server_port, profile.credentials()),
                 direct: DirectOutbound::new(),
                 block: BlockOutbound::new(),
-                dns: DnsOutbound::new(),
             },
             route: RouteBlock {
-                rules: [RouteRule {
-                    protocol: "dns",
-                    outbound: "dns-out",
-                }],
                 final_outbound: "vless-out",
                 auto_detect_interface: true,
             },
@@ -140,7 +135,6 @@ struct Outbounds {
     vless: VlessOutbound,
     direct: DirectOutbound,
     block: BlockOutbound,
-    dns: DnsOutbound,
 }
 
 impl Serialize for Outbounds {
@@ -149,11 +143,10 @@ impl Serialize for Outbounds {
         S: serde::Serializer,
     {
         use serde::ser::SerializeSeq as _;
-        let mut seq = serializer.serialize_seq(Some(4))?;
+        let mut seq = serializer.serialize_seq(Some(3))?;
         seq.serialize_element(&self.vless)?;
         seq.serialize_element(&self.direct)?;
         seq.serialize_element(&self.block)?;
-        seq.serialize_element(&self.dns)?;
         seq.end()
     }
 }
@@ -274,33 +267,10 @@ impl BlockOutbound {
 }
 
 #[derive(Debug, Serialize)]
-struct DnsOutbound {
-    #[serde(rename = "type")]
-    ty: &'static str,
-    tag: &'static str,
-}
-
-impl DnsOutbound {
-    const fn new() -> Self {
-        Self {
-            ty: "dns",
-            tag: "dns-out",
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
 struct RouteBlock {
-    rules: [RouteRule; 1],
     #[serde(rename = "final")]
     final_outbound: &'static str,
     auto_detect_interface: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct RouteRule {
-    protocol: &'static str,
-    outbound: &'static str,
 }
 
 #[cfg(test)]
@@ -369,7 +339,7 @@ mod tests {
         assert_eq!(inbounds[0]["listen_port"], 1080);
 
         let outbounds = parsed["outbounds"].as_array().unwrap();
-        assert_eq!(outbounds.len(), 4);
+        assert_eq!(outbounds.len(), 3);
         // First outbound: vless.
         assert_eq!(outbounds[0]["type"], "vless");
         assert_eq!(outbounds[0]["tag"], "vless-out");
@@ -385,20 +355,17 @@ mod tests {
         assert_eq!(tls["reality"]["enabled"], true);
         assert_eq!(tls["reality"]["public_key"], VALID_REALITY_PUB);
         assert_eq!(tls["reality"]["short_id"], "01ab");
-        // Following outbounds: direct / block / dns.
+        // Following outbounds: direct / block. The legacy dns outbound
+        // was removed in sing-box 1.13.0, so DNS falls through the
+        // default VLESS outbound instead of using dns-out.
         assert_eq!(outbounds[1]["type"], "direct");
         assert_eq!(outbounds[1]["tag"], "direct");
         assert_eq!(outbounds[2]["type"], "block");
         assert_eq!(outbounds[2]["tag"], "block");
-        assert_eq!(outbounds[3]["type"], "dns");
-        assert_eq!(outbounds[3]["tag"], "dns-out");
 
-        // Route block: one DNS rule, final = vless-out.
+        // Route block: no legacy dns-out rule, final = vless-out.
         let route = &parsed["route"];
-        let rules = route["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0]["protocol"], "dns");
-        assert_eq!(rules[0]["outbound"], "dns-out");
+        assert!(route.get("rules").is_none());
         assert_eq!(route["final"], "vless-out");
         assert_eq!(route["auto_detect_interface"], true);
     }

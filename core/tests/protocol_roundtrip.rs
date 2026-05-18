@@ -98,8 +98,9 @@ async fn generate_singbox_config_returns_pretty_json() {
     let parsed: serde_json::Value = serde_json::from_str(body).expect("body is valid JSON");
 
     // Smoke-check the sing-box client config shape — VLESS+Reality
-    // outbound, SOCKS5 inbound at 127.0.0.1:1080, route block
-    // sending DNS through the dns-out outbound.
+    // outbound, SOCKS5 inbound at 127.0.0.1:1080, and a route block
+    // whose default path is the VLESS outbound. sing-box 1.13 removed
+    // the legacy dns outbound, so generated configs must not emit it.
     assert_eq!(parsed["inbounds"][0]["type"], "socks");
     assert_eq!(parsed["inbounds"][0]["listen"], "127.0.0.1");
     assert_eq!(parsed["inbounds"][0]["listen_port"], 1080);
@@ -108,7 +109,13 @@ async fn generate_singbox_config_returns_pretty_json() {
     assert_eq!(parsed["outbounds"][0]["server_port"], 443);
     assert_eq!(parsed["outbounds"][0]["flow"], "xtls-rprx-vision");
     assert_eq!(parsed["outbounds"][0]["tls"]["reality"]["enabled"], true);
+    assert!(parsed["outbounds"]
+        .as_array()
+        .expect("outbounds array")
+        .iter()
+        .all(|outbound| outbound["type"] != "dns"));
     assert_eq!(parsed["route"]["final"], "vless-out");
+    assert!(parsed["route"].get("rules").is_none());
 
     harness.shutdown().await;
 }
