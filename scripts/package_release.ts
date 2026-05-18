@@ -153,6 +153,17 @@ export function humanBytes(bytes: number): string {
     return `${n.toFixed(1)}${units[i]}`;
 }
 
+/**
+ * hdiutil's implicit sizing for `-srcfolder` can under-allocate the
+ * temporary image it mounts while copying large .app bundles. Size the
+ * image from `du -sk` with a 40% cushion plus 32 MiB for filesystem
+ * metadata and rounding.
+ */
+export function dmgMegabytesForStage(kibibytes: number): number {
+    const payloadMiB = Math.ceil(kibibytes / 1024);
+    return Math.max(64, Math.ceil(payloadMiB * 1.4) + 32);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -278,10 +289,19 @@ async function main(): Promise<void> {
     await mkdir(stage, { recursive: true });
     await cp(app, join(stage, basename(app)), { recursive: true });
     await symlink("/Applications", join(stage, "Applications"));
+    const duOutput = await captureStdout(["du", "-sk", stage]);
+    const stageSizeText = duOutput.trim().split(/\s+/)[0] ?? "";
+    const stageSizeKiB = Number.parseInt(stageSizeText, 10);
+    if (!Number.isFinite(stageSizeKiB) || stageSizeKiB <= 0) {
+        die(`could not determine DMG staging size for ${stage}`, 2);
+    }
+    const dmgSize = `${dmgMegabytesForStage(stageSizeKiB)}m`;
     if (
         (await run([
             "hdiutil",
             "create",
+            "-size",
+            dmgSize,
             "-volname",
             `Cool Tunnel v${version}`,
             "-srcfolder",
