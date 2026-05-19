@@ -906,11 +906,10 @@ public struct SettingsView: View {
             // X)" — past tense suggested the user had already
             // upgraded.
             "Update available: \(release.tag) — you're on \(appVersion.marketingVersion)."
+        case .downloading(let progress) where progress > 0:
+            "Downloading… \(Int(progress * 100))%"
         case .downloading:
-            // `URLSession.shared.download(from:)` does not report
-            // byte-level progress, so the `p` value never moves
-            // off 0.0 — showing it would lie. Honest text instead.
-            "Downloading… (typically a few seconds on broadband)"
+            "Downloading… waiting for GitHub's release CDN"
         case .verifying:
             "Verifying SHA-256…"
         case .extracting:
