@@ -384,7 +384,9 @@ final class AppUpdater {
 
         // Parallel fetches — the manifest fetch typically
         // completes during the .zip's TLS handshake.
-        async let zipDownload: Void = download(release.zipURL, to: zipURL)
+        async let zipDownload: Void = download(release.zipURL, to: zipURL) { progress in
+            await report(.downloading(progress: progress))
+        }
         async let shaDownload: Void = download(release.shaManifestURL, to: shaURL)
         _ = try await zipDownload
         _ = try await shaDownload
@@ -433,13 +435,31 @@ final class AppUpdater {
     /// ~12 MB; 100 MB leaves slack while keeping a confused-deputy
     /// URL from filling the user's disk.
     nonisolated private static let maxDownloadBytes: Int64 = 100 * 1024 * 1024
+    nonisolated private static let downloadStallTimeout: TimeInterval = 45
+    nonisolated private static let downloadResourceTimeout: TimeInterval = 30 * 60
 
-    nonisolated private static func download(_ url: URL, to destination: URL) async throws {
-        let request = URLRequest(url: url)
+    nonisolated private static func download(
+        _ url: URL,
+        to destination: URL,
+        progress: (@Sendable (Double) async -> Void)? = nil
+    ) async throws {
+        var request = URLRequest(url: url)
+        request.setValue("Cool-Tunnel-AppUpdater", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = Self.downloadStallTimeout
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = Self.downloadStallTimeout
+        configuration.timeoutIntervalForResource = Self.downloadResourceTimeout
+        configuration.waitsForConnectivity = true
+        let session = URLSession(configuration: configuration)
+        let delegate = ProgressReportingDownloadDelegate(progress: progress)
+        defer { session.finishTasksAndInvalidate() }
         let (tempURL, response): (URL, URLResponse)
         do {
-            (tempURL, response) = try await URLSession.shared.download(
-                for: request, delegate: GitHubRedirectGuard.shared)
+            (tempURL, response) = try await session.download(for: request, delegate: delegate)
+        } catch let error as URLError where error.code == .timedOut {
+            throw UpdaterError.message(
+                "Download stalled for \(url.lastPathComponent). Check your connection and try again."
+            )
         } catch {
             throw UpdaterError.message(
                 "Download failed for \(url.lastPathComponent). Check your internet connection and try again."
@@ -494,6 +514,9 @@ final class AppUpdater {
         // a pre-existing destination should use
         // `replaceItemAt(_:with:)` (atomic).
         try FileManager.default.moveItem(at: tempURL, to: destination)
+        if let progress {
+            await progress(1.0)
+        }
     }
 
     /// Reads `manifestURL`, finds the line for `zipFilename`,
@@ -1405,3 +1428,51 @@ final class AppUpdater {
 /// `log show --predicate 'subsystem == "space.coolwhite.cooltunnel"
 /// AND category == "AppUpdater"'`.
 private let appUpdaterLogger = Logger.cooltunnel("AppUpdater")
+
+/// Per-download delegate for the app self-updater. It reuses the
+/// same redirect trust boundary as `GitHubRedirectGuard` while
+/// surfacing real byte progress for the user-facing ZIP download.
+private final class ProgressReportingDownloadDelegate: NSObject, URLSessionDownloadDelegate,
+    @unchecked Sendable
+{
+    private let progress: (@Sendable (Double) async -> Void)?
+
+    init(progress: (@Sendable (Double) async -> Void)?) {
+        self.progress = progress
+        super.init()
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        GitHubRedirectGuard.shared.urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: response,
+            newRequest: request,
+            completionHandler: completionHandler
+        )
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard let progress, totalBytesExpectedToWrite > 0 else { return }
+        let value = min(1.0, max(0.0, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+        Task { await progress(value) }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {}
+}
