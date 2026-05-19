@@ -619,7 +619,7 @@ async fn start_proxy(
             tracing::error!(error = %err, "ProxySupervisor::spawn failed");
             ErrorPayload::new(
                 "spawn_failed",
-                "failed to spawn the naive proxy binary; check the engine log for details",
+                "failed to spawn the sing-box proxy binary; check the engine log for details",
             )
         })?;
     let pid = supervisor.pid();

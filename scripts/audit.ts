@@ -3,12 +3,12 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/audit.ts — TypeScript+Bun port of audit.sh.
+// scripts/audit.ts — static audit gate.
 //
 // **Synthetic CI Gate, audit subset.**
 //
 // Runs every static check the project has wired up. Designed to be
-// called both standalone (`bash scripts/audit.sh`) and from
+// called both standalone (`bun scripts/audit.ts`) and from
 // `cut_release.ts` as a release-cut precondition. Without a paid
 // Apple Developer account the project has no cloud CI; this script
 // IS our CI and `cut_release.ts` refuses to ship a build that
@@ -377,7 +377,7 @@ async function main(): Promise<void> {
         }
     } else {
         warn(
-            `no sing-box at ${singboxPath} — bootstrap the pin with CT_REPIN_CONFIRM=1 scripts/fetch_singbox-core.sh --repin`,
+            `no sing-box at ${singboxPath} — bootstrap the pin with CT_REPIN_CONFIRM=1 bun scripts/fetch_singbox-core.ts --repin`,
         );
         if (strict) {
             failMsg(state, "sing-box missing (--strict)");
@@ -433,7 +433,7 @@ async function main(): Promise<void> {
     // --- 8. try? ratchet --------------------------------------------------
     step("try? ratchet");
     if (
-        (await run(["bash", join(root, "scripts", "try_question_ratchet.sh")], {
+        (await run(["bun", join(root, "scripts", "try_question_ratchet.ts")], {
             cwd: root,
         })) !== 0
     ) {

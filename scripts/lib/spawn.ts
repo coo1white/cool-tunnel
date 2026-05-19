@@ -3,12 +3,12 @@
 // See LICENSE for full terms.
 //
 // scripts/lib/spawn.ts — typed wrapper around `Bun.spawn` for the
-// subprocess patterns the legacy bash scripts use:
+// subprocess patterns the maintenance scripts use:
 //
 //   - run a command, inherit stdio (operator sees it in real time)
 //   - run a command, capture stdout (for parsing version strings, etc.)
 //   - run a command, capture stdout AND stderr to a file (for the
-//     xcodebuild log redirect in cut_release.sh)
+//     xcodebuild log redirect in cut_release.ts)
 //
 // Replaces the bash patterns:
 //

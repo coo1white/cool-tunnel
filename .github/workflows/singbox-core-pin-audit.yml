@@ -2,7 +2,7 @@
 #
 # Daily supply-chain audit for the bundled sing-box binary.
 #
-# `scripts/fetch_singbox-core.sh --check-only` re-downloads the
+# `bun scripts/fetch_singbox-core.ts --check-only` re-downloads the
 # upstream tarballs at the **pinned** tag and verifies that the
 # tarball SHAs AND the lipo-merged universal SHA still match the
 # committed pin in COOL-TUNNEL/singbox-core.upstream.json. A failure
@@ -42,13 +42,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           persist-credentials: false
-      # The implementation is TypeScript+Bun under
-      # scripts/fetch_singbox-core.ts; the .sh shim shells out to
-      # bun. SHA-pinned to the v2 release as of 2026-05-14 to
-      # match the supply-chain discipline of every other Action
-      # we use.
+      # The implementation is TypeScript+Bun. SHA-pinned to the v2
+      # release as of 2026-05-14 to match the supply-chain discipline
+      # of every other Action we use.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
-      - name: scripts/fetch_singbox-core.sh --check-only
-        run: bash scripts/fetch_singbox-core.sh --check-only
+      - name: scripts/fetch_singbox-core.ts --check-only
+        run: bun scripts/fetch_singbox-core.ts --check-only

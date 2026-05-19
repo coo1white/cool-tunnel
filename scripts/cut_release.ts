@@ -3,7 +3,7 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/cut_release.ts — TypeScript+Bun port of cut_release.sh.
+// scripts/cut_release.ts — release pipeline.
 //
 // **Synthetic CI Gate.** Cool Tunnel ships
 // without a paid Apple Developer account, which means no Xcode Cloud,
@@ -22,7 +22,7 @@
 //     3. Bundled `sing-box` matches the committed pin
 //        (fetch_singbox-core.ts). Drift here is a release blocker —
 //        re-pinning is an explicit, audited operation.
-//     4. scripts/audit.sh --strict — cargo fmt / clippy / test, swift
+//     4. scripts/audit.ts --strict — cargo fmt / clippy / test, swift
 //        format lint, xcodebuild test, sing-box arch guard, schema sync.
 //
 //   BUILD
@@ -33,12 +33,12 @@
 //        bundled sing-box sha256 matches singbox-core.upstream.json.
 //
 //   PRE-PACKAGE
-//     8b. scripts/security_check.sh against the built .app — secret
+//     8b. scripts/security_check.ts against the built .app — secret
 //         scan, code-sign on every embedded Mach-O, sing-box SHA
 //         pin cross-check, Info.plist version assertion.
 //
 //   PACKAGE
-//     9. scripts/package_release.sh emits .dmg / .pkg / .zip /
+//     9. scripts/package_release.ts emits .dmg / .pkg / .zip /
 //        .sha256 manifest into dist/.
 //
 // Usage:
@@ -183,10 +183,10 @@ async function preflightSingboxCorePin(): Promise<void> {
 
 async function preflightAudit(): Promise<void> {
     step(
-        `Running scripts/audit.sh --strict (cargo fmt/clippy/test, swift fmt lint, xcodebuild test, sing-box arch, schema)…`,
+        `Running scripts/audit.ts --strict (cargo fmt/clippy/test, swift fmt lint, xcodebuild test, sing-box arch, schema)…`,
     );
     const code = await run(
-        ["bash", join(REPO_ROOT, "scripts", "audit.sh"), "--strict"],
+        ["bun", join(REPO_ROOT, "scripts", "audit.ts"), "--strict"],
         { cwd: REPO_ROOT },
     );
     if (code !== 0) {
@@ -355,9 +355,9 @@ async function smokeCheckBundledBinaries(app: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function securityCheck(app: string): Promise<void> {
-    step(`Running scripts/security_check.sh on the freshly-built .app…`);
+    step(`Running scripts/security_check.ts on the freshly-built .app…`);
     const code = await run(
-        ["bash", join(REPO_ROOT, "scripts", "security_check.sh"), app],
+        ["bun", join(REPO_ROOT, "scripts", "security_check.ts"), app],
         {
             cwd: REPO_ROOT,
             env: { EXPECTED_VERSION: VERSION },
@@ -365,7 +365,7 @@ async function securityCheck(app: string): Promise<void> {
     );
     if (code !== 0) {
         die(
-            `security_check.sh failed — see output above; aborting before packaging`,
+            `security_check.ts failed — see output above; aborting before packaging`,
             7,
         );
     }
@@ -378,11 +378,11 @@ async function securityCheck(app: string): Promise<void> {
 async function packageRelease(app: string): Promise<void> {
     step(`Packaging release artefacts…`);
     const code = await run(
-        ["bash", join(REPO_ROOT, "scripts", "package_release.sh"), VERSION, app],
+        ["bun", join(REPO_ROOT, "scripts", "package_release.ts"), VERSION, app],
         { cwd: REPO_ROOT },
     );
     if (code !== 0) {
-        die(`package_release.sh failed`, 5);
+        die(`package_release.ts failed`, 5);
     }
 }
 
@@ -425,4 +425,3 @@ if (IS_ENTRY) {
         }
     });
 }
-

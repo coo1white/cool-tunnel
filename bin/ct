@@ -5,21 +5,17 @@
 #
 # bin/ct — Cool Tunnel maintenance CLI
 #
-# A friendly single-entry-point wrapper around the existing
-# `scripts/*.sh` toolchain. The verbs map onto the actual scripts
+# A friendly single-entry-point wrapper around the Bun maintenance
+# toolchain. The verbs map onto the actual scripts
 # below; running `ct help <verb>` shows the source path so a
 # curious reader can drill straight in.
 #
 # Designed to feel like brew:
-#   - one entry point with subcommands instead of nine script paths
+#   - one entry point with subcommands instead of several script paths
 #   - `==>` blue prefix for major operations, `Error:` red for failure
 #   - `ct help`, `ct help <verb>`, `ct commands` all work
 #   - idempotent: re-running any subcommand converges, never compounds
-#   - no setup: just a Bash script, no Ruby, no plugins, no daemons
-#
-# The existing `scripts/*.sh` paths still work directly — this
-# wrapper sits on top; it doesn't replace them. CI and historical
-# changelog references keep working unchanged.
+#   - no setup beyond the repo toolchain: Bash dispatch + Bun scripts
 
 set -Eeuo pipefail
 
@@ -73,6 +69,13 @@ die() {
     exit 1
 }
 
+run_bun() {
+    if ! command -v bun >/dev/null 2>&1; then
+        die "bun not found in PATH. Install Bun with 'brew install bun' or see https://bun.sh"
+    fi
+    bun "$@"
+}
+
 # ----------------------------------------------------------------------
 # Top-level subcommands
 # ----------------------------------------------------------------------
@@ -80,7 +83,7 @@ die() {
 # Every cmd_* function follows the same shape:
 #
 #   - On `--help` / `-h`: print its own help and exit 0.
-#   - Otherwise: forward to the underlying script with the verb's
+#   - Otherwise: forward to the underlying Bun script with the verb's
 #     conventional arg order. Trust the underlying script's exit
 #     code; `set -e` at the top of `ct` carries the failure out.
 #
@@ -111,13 +114,13 @@ HELP
     fi
     step "doctor: preflight + audit --strict + ratchet"
     local failed=()
-    if ! "${CT_SCRIPTS_DIR}/preflight.sh"; then
+    if ! run_bun "${CT_SCRIPTS_DIR}/preflight.ts"; then
         failed+=("preflight")
     fi
-    if ! "${CT_SCRIPTS_DIR}/audit.sh" --strict; then
+    if ! run_bun "${CT_SCRIPTS_DIR}/audit.ts" --strict; then
         failed+=("audit")
     fi
-    if ! "${CT_SCRIPTS_DIR}/try_question_ratchet.sh"; then
+    if ! run_bun "${CT_SCRIPTS_DIR}/try_question_ratchet.ts"; then
         failed+=("ratchet")
     fi
     if [[ ${#failed[@]} -gt 0 ]]; then
@@ -139,11 +142,11 @@ Usage: ct preflight
 
     No arguments. Exits 0 on green, non-zero on any gate failure.
 
-Source: scripts/preflight.sh
+Source: scripts/preflight.ts
 HELP
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/preflight.sh"
+    run_bun "${CT_SCRIPTS_DIR}/preflight.ts" "$@"
 }
 
 cmd_audit() {
@@ -159,11 +162,11 @@ Usage: ct audit [--strict]
         Promote warnings to failures. Required by the release-cut
         path; recommended for local dev.
 
-Source: scripts/audit.sh
+Source: scripts/audit.ts
 HELP
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/audit.sh" "$@"
+    run_bun "${CT_SCRIPTS_DIR}/audit.ts" "$@"
 }
 
 cmd_ratchet() {
@@ -180,11 +183,11 @@ Usage: ct ratchet
     try? is a failure. Adding new try? without an annotation is
     blocked here, before it ever reaches CI.
 
-Source: scripts/try_question_ratchet.sh
+Source: scripts/try_question_ratchet.ts
 HELP
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/try_question_ratchet.sh"
+    run_bun "${CT_SCRIPTS_DIR}/try_question_ratchet.ts" "$@"
 }
 
 cmd_release() {
@@ -198,7 +201,7 @@ Usage: ct release VERSION
            MARKETING_VERSION lines in COOL-TUNNEL.xcodeproj/.
         2. Refresh the bundled sing-box binary's SHA pin.
         3. Run cargo fmt, clippy, tests, cargo-deny, ShellCheck,
-           Swift format, and security_check.sh.
+           Swift format, and security_check.ts.
         4. Rebuild the Rust core + Swift app in Release mode
            (universal arm64+x86_64).
         5. Package .dmg, .pkg, .zip, the universal core binary,
@@ -215,12 +218,12 @@ Usage: ct release VERSION
             --title "vX.Y.Z — …" --notes-file dist/release-notes-vX.Y.Z.md \
             --latest
 
-Source: scripts/cut_release.sh
+Source: scripts/cut_release.ts
 HELP
         [[ $# -eq 0 ]] && return 2
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/cut_release.sh" "$@"
+    run_bun "${CT_SCRIPTS_DIR}/cut_release.ts" "$@"
 }
 
 cmd_package() {
@@ -235,12 +238,12 @@ Usage: ct package VERSION
 
     VERSION must match the live pbxproj / Cargo.toml version.
 
-Source: scripts/package_release.sh
+Source: scripts/package_release.ts
 HELP
         [[ $# -eq 0 ]] && return 2
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/package_release.sh" "$@"
+    run_bun "${CT_SCRIPTS_DIR}/package_release.ts" "$@"
 }
 
 cmd_singbox() {
@@ -251,7 +254,7 @@ Usage: ct singbox [--check-only | --repin TAG]
     Without arguments:
         Verify the bundled `sing-box` binary's SHA matches the pin
         in COOL-TUNNEL/singbox-core.upstream.json. No network
-        access. This is the form run by cut_release.sh and PR-time
+        access. This is the form run by cut_release.ts and PR-time
         CI.
 
     --check-only
@@ -267,17 +270,17 @@ Usage: ct singbox [--check-only | --repin TAG]
         commit. Refuses to do anything without the confirmation
         env var so a typo'd flag can't silently roll the pin.
 
-Source: scripts/fetch_singbox-core.sh
+Source: scripts/fetch_singbox-core.ts
 HELP
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/fetch_singbox-core.sh" "$@"
+    run_bun "${CT_SCRIPTS_DIR}/fetch_singbox-core.ts" "$@"
 }
 
 cmd_security() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         cat <<'HELP'
-Usage: ct security
+Usage: ct security [APP_PATH]
 
     Run the embedded-secret scanner. Greps the whole tree for
     common credential patterns (AWS keys, OpenAI sk- prefixes,
@@ -291,11 +294,11 @@ Usage: ct security
     the tree. Useful manually after editing config / doc files
     that might accidentally have copy-pasted real credentials.
 
-Source: scripts/security_check.sh
+Source: scripts/security_check.ts
 HELP
         return 0
     fi
-    "${CT_SCRIPTS_DIR}/security_check.sh"
+    run_bun "${CT_SCRIPTS_DIR}/security_check.ts" "$@"
 }
 
 cmd_version() {
@@ -347,8 +350,7 @@ Each subcommand also accepts --help / -h for its own usage:
     ct release --help
     ct singbox --help
 
-Source paths: every subcommand wraps a script under scripts/*.sh —
-running the underlying script directly still works.
+Source paths: every subcommand runs a Bun script under scripts/*.ts.
 HELP
 }
 
@@ -370,10 +372,10 @@ Quick start:
 
 Run `ct commands` for the full list.
 
-This wrapper is a thin Bash dispatch — all the real work lives in
-scripts/*.sh, and every subcommand's `--help` names its source.
-The toolchain is Swift + Rust + POSIX shell only; no Ruby, no
-plugins, no global daemons.
+This wrapper is a thin Bash dispatch — all the maintenance work lives in
+scripts/*.ts, and every subcommand's `--help` names its source.
+The toolchain is Swift + Rust + Bun + POSIX shell; no Ruby, no plugins,
+no global daemons.
 HELP
         return 0
     fi

@@ -21,8 +21,8 @@
 // fail-closed-on-stat-error paths live behind the network boundary
 // and would require URLProtocol stubbing to exercise. The
 // `AppUpdater` size-cap (PR #55) shares the same pattern and is
-// already verified by code review + the production-side
-// `audit.sh` security_check.sh pass.
+// already verified by code review plus the production-side
+// `audit.ts` and `security_check.ts` passes.
 
 import XCTest
 

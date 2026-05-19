@@ -8,7 +8,7 @@ Report security issues **privately** via a [GitHub Security Advisory][advisory] 
 
 ## Historical credential leak — v2.x only
 
-Pre-v0.1.5.3 of this repository contained a real working NaiveProxy server password on a development server, in three files since deleted or scrubbed. `scripts/security_check.sh` rejects any future commit that tries to reintroduce the literal, but git history is forever — anyone who clones the repo can still recover the value. The v3.0.0 sing-box pivot replaced password auth with VLESS UUIDs, so the literal is not relevant to current installs, but if you ever copied it verbatim onto a v2.x Caddy + NaiveProxy server: rotate it.
+Pre-v0.1.5.3 of this repository contained a real working NaiveProxy server password on a development server, in three files since deleted or scrubbed. `bin/ct security` rejects any future commit that tries to reintroduce the literal, but git history is forever — anyone who clones the repo can still recover the value. The v3.0.0 sing-box pivot replaced password auth with VLESS UUIDs, so the literal is not relevant to current installs, but if you ever copied it verbatim onto a v2.x Caddy + NaiveProxy server: rotate it.
 
 ## Threat model — what Cool Tunnel does and doesn't protect
 
@@ -19,7 +19,7 @@ Pre-v0.1.5.3 of this repository contained a real working NaiveProxy server passw
 - Code-signature integrity: the bundled engine and `sing-box` binary are `SecStaticCodeCheckValidity`-verified before each spawn.
 - Anomaly auto-stop: if `sing-box` ever binds outside `127.0.0.1`, Cool Tunnel auto-stops the proxy within one monitor probe (5 seconds).
 - Log redaction: every `sing-box` log line that mentions credentials, UUIDs, or Reality keys is redacted before reaching the live log or any persisted output.
-- Binary SHA-pinning: the in-app updater downloads the matching `Cool-tunnel-vX.Y.Z.sha256` manifest alongside the binary and refuses to install on any hash mismatch. The bundled `sing-box` binary itself is pinned in `COOL-TUNNEL/singbox-core.upstream.json` and verified by `scripts/fetch_singbox-core.sh`.
+- Binary SHA-pinning: the in-app updater downloads the matching `Cool-tunnel-vX.Y.Z.sha256` manifest alongside the binary and refuses to install on any hash mismatch. The bundled `sing-box` binary itself is pinned in `COOL-TUNNEL/singbox-core.upstream.json` and verified by `bin/ct singbox`.
 
 **Does NOT protect against:**
 

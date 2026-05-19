@@ -58,7 +58,7 @@ final class LipoOutputParserTests: XCTestCase {
 
     // MARK: - Fat (universal) binary forms
 
-    /// The shape `cut_release.sh` enforces for every Cool Tunnel
+    /// The shape `cut_release.ts` enforces for every Cool Tunnel
     /// release artifact:
     ///   `Architectures in the fat file: <path> are: x86_64 arm64`
     func testParsesFatUniversalArm64AndX8664() {

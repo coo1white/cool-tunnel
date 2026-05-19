@@ -156,4 +156,42 @@ final class TunnelOrchestratorTests: XCTestCase {
         XCTAssertNoThrow(try TunnelOrchestrator.hydrateUUID(&profile, from: store))
         XCTAssertEqual(profile.uuid, "from-store")
     }
+
+    // MARK: - PAC generation
+
+    func testSmartPacOnlyRunsPrivateRangeChecksOnIPv4Literals() {
+        let pac = TunnelOrchestrator.generatePacJavaScript(
+            directDomains: ["cn"],
+            port: 1080
+        )
+
+        XCTAssertTrue(pac.contains("function isIPv4Literal(value)"))
+        XCTAssertTrue(pac.contains("if (isIPv4Literal(host)) {"))
+        XCTAssertTrue(pac.contains("isInNet(host, \"10.0.0.0\", \"255.0.0.0\")"))
+
+        guard let literalGate = pac.range(of: "if (isIPv4Literal(host)) {"),
+            let firstPrivateCheck = pac.range(of: "isInNet(host, \"10.0.0.0\"")
+        else {
+            return XCTFail("PAC did not contain the expected IPv4 literal guard")
+        }
+        XCTAssertLessThan(
+            literalGate.lowerBound,
+            firstPrivateCheck.lowerBound,
+            "PAC must not call isInNet(host, ...) before proving host is an IPv4 literal; PAC engines may DNS-resolve hostnames there."
+        )
+    }
+
+    func testSmartPacEscapesUserControlledDirectDomains() {
+        let pac = TunnelOrchestrator.generatePacJavaScript(
+            directDomains: ["good.cn", #"evil.com"; return "DIRECT"#],
+            port: 1080
+        )
+
+        XCTAssertTrue(pac.contains(#""good.cn""#))
+        XCTAssertTrue(pac.contains(#""evil.com\"; return \"DIRECT""#))
+        XCTAssertFalse(
+            pac.contains(#""evil.com"; return "DIRECT""#),
+            "User-controlled direct domains must not be able to terminate the PAC string literal."
+        )
+    }
 }
