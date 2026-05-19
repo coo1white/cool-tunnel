@@ -842,6 +842,8 @@ public final class TunnelOrchestrator {
         // with a clean banner; failure repopulates from below.
         lastError = nil
         lastErrorLayer = nil
+        var engineStarted = false
+        var systemProxyAttempted = false
 
         do {
             guard var profile = selectedProfile else {
@@ -903,9 +905,11 @@ public final class TunnelOrchestrator {
             guard case .started(let enginePID) = started else {
                 throw OrchestratorError.unexpectedResponse
             }
+            engineStarted = true
 
             switch mode {
             case .smart:
+                systemProxyAttempted = true
                 try await proxyController.enableSmartPAC(pacURL: paths.pacFile)
                 // Recovery sentinel so a crash before
                 // `disableAll()` is recoverable on next launch.
@@ -914,12 +918,14 @@ public final class TunnelOrchestrator {
                     mode: "smart"
                 )
             case .global:
+                systemProxyAttempted = true
                 try await proxyController.enableGlobalSOCKS(port: port)
                 ProxyActiveFlag.write(
                     at: ProxyActiveFlag.path(in: paths.supportDirectory),
                     mode: "global"
                 )
             case .localOnly:
+                systemProxyAttempted = true
                 try await proxyController.disableAll()
                 // Local mode doesn't touch system proxy.
                 ProxyActiveFlag.clear(
@@ -953,6 +959,15 @@ public final class TunnelOrchestrator {
             let detail =
                 (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
+            if engineStarted {
+                if systemProxyAttempted {
+                    // try-ok: best-effort fail-closed cleanup after a partial start.
+                    try? await proxyController.disableAll()
+                    ProxyActiveFlag.clear(at: ProxyActiveFlag.path(in: paths.supportDirectory))
+                }
+                // try-ok: best-effort fail-closed cleanup after a partial start.
+                _ = try? await core.send(.stopProxy)
+            }
             // Classify the failure into ISP / VPS / Local Kernel
             // so the banner chip points the user at the broken
             // node without making them run Diag manually.
@@ -1397,14 +1412,28 @@ public final class TunnelOrchestrator {
             // else flows through the local SOCKS5 listener at 127.0.0.1:\(port).
             var directDomains = [\(escaped)];
 
+            function isIPv4Literal(value) {
+                var parts = value.split(".");
+                if (parts.length != 4) { return false; }
+                for (var i = 0; i < parts.length; i++) {
+                    if (!/^[0-9]+$/.test(parts[i])) { return false; }
+                    var octet = parseInt(parts[i], 10);
+                    if (octet < 0 || octet > 255) { return false; }
+                }
+                return true;
+            }
+
             function FindProxyForURL(url, host) {
+                host = host.toLowerCase();
                 if (isPlainHostName(host)) { return "DIRECT"; }
                 if (host == "localhost" || host == "127.0.0.1" || host == "::1") {
                     return "DIRECT";
                 }
-                if (isInNet(host, "10.0.0.0", "255.0.0.0")) { return "DIRECT"; }
-                if (isInNet(host, "172.16.0.0", "255.240.0.0")) { return "DIRECT"; }
-                if (isInNet(host, "192.168.0.0", "255.255.0.0")) { return "DIRECT"; }
+                if (isIPv4Literal(host)) {
+                    if (isInNet(host, "10.0.0.0", "255.0.0.0")) { return "DIRECT"; }
+                    if (isInNet(host, "172.16.0.0", "255.240.0.0")) { return "DIRECT"; }
+                    if (isInNet(host, "192.168.0.0", "255.255.0.0")) { return "DIRECT"; }
+                }
                 for (var i = 0; i < directDomains.length; i++) {
                     if (dnsDomainIs(host, "." + directDomains[i]) || host == directDomains[i]) {
                         return "DIRECT";

@@ -11,8 +11,8 @@
 #   - swift-tests: xcodebuild test against the COOL-TUNNEL scheme.
 #                  Exercises the COOL-TUNNELTests target (regression
 #                  coverage for H2/H3/M1 and future Swift unit tests).
-#   - shellcheck:  every script under scripts/ + the brew-style
-#                  bin/ct maintenance wrapper
+#   - shellcheck:  the Xcode build helper + the brew-style bin/ct
+#                  maintenance wrapper
 #   - singbox-core-pin:
 #                  bundled sing-box binary matches
 #                  singbox-core.upstream.json (no network — just a
@@ -20,7 +20,7 @@
 #                  moving upstream tag is the separate
 #                  `singbox-core-pin-audit.yml` workflow). The
 #                  verifier itself is TypeScript+Bun, so this job
-#                  installs Bun before invoking the .sh shim.
+#                  installs Bun before invoking it.
 #   - try-ratchet: count of `try?` sites in the Swift production tree
 #                  matches the committed cap (M1 robustness-review).
 #                  Fast, no toolchain needed; runs on ubuntu.
@@ -219,8 +219,8 @@ jobs:
           persist-credentials: false
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: shellcheck scripts/*.sh bin/ct
-        run: shellcheck scripts/*.sh bin/ct
+      - name: shellcheck scripts/build_rust_core.sh bin/ct
+        run: shellcheck scripts/build_rust_core.sh bin/ct
 
   singbox-core-pin:
     name: sing-box pin verification
@@ -230,8 +230,8 @@ jobs:
         with:
           persist-credentials: false
       # The verify path lives in scripts/fetch_singbox-core.ts
-      # (TypeScript+Bun). The .sh shim shells out to `bun`, so Bun
-      # must be on PATH before the shim runs. `oven-sh/setup-bun`
+      # (TypeScript+Bun), so Bun must be on PATH before it runs.
+      # `oven-sh/setup-bun`
       # is SHA-pinned to the v2 release as of 2026-05-14 — same
       # supply-chain discipline we apply to every other third-party
       # Action.
@@ -247,7 +247,7 @@ jobs:
       # The cross-check against the actual upstream tag lives in
       # singbox-core-pin-audit.yml (scheduled, macOS, needs lipo + codesign).
       - name: Verify bundled sing-box matches singbox-core.upstream.json
-        run: bash scripts/fetch_singbox-core.sh
+        run: bun scripts/fetch_singbox-core.ts
 
   try-ratchet:
     name: try? ratchet (M1)
@@ -263,13 +263,11 @@ jobs:
       # caps the count at a committed baseline and fails if it
       # drifts in either direction; the standalone form keeps the
       # CI step lightweight (no Swift toolchain, no Rust toolchain).
-      # The .sh is a thin shim over scripts/try_question_ratchet.ts;
-      # Bun is the runtime.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: latest
       - name: Enforce try? cap
-        run: bash scripts/try_question_ratchet.sh
+        run: bun scripts/try_question_ratchet.ts
 
   bun-tests:
     name: Bun tests (cut_release + fetch_singbox-core + try_question_ratchet)

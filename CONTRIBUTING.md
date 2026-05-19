@@ -17,10 +17,10 @@ Prereqs: Xcode 16+, Rust via [rustup](https://rustup.rs/) (`rustup target add aa
 ```sh
 git clone https://github.com/coo1white/cool-tunnel
 cd cool-tunnel
-bin/ct release 2.0.55   # one-command pipeline: verify pin, build, audit, package
+bin/ct release X.Y.Z   # one-command pipeline: verify pin, build, audit, package
 ```
 
-`bin/ct commands` lists every verb; `bin/ct help <command>` shows usage. The verbs wrap `scripts/*.sh` files — direct invocation still works.
+`bin/ct commands` lists every verb; `bin/ct help <command>` shows usage. The verbs run the Bun maintenance scripts under `scripts/*.ts`.
 
 ## Running the test sweep
 
@@ -28,7 +28,7 @@ bin/ct release 2.0.55   # one-command pipeline: verify pin, build, audit, packag
 bin/ct doctor   # preflight + audit --strict + try? ratchet, one summary
 ```
 
-`bin/ct preflight` alone covers `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo deny check`, `xcrun swift-format lint --strict`, and `shellcheck scripts/*.sh` — every check `.github/workflows/ci.yml` runs, with the same flags.
+`bin/ct preflight` alone covers `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo deny check`, `xcrun swift-format lint --strict`, and `shellcheck scripts/build_rust_core.sh bin/ct` — every check `.github/workflows/ci.yml` runs, with the same flags.
 
 ## Pull request guidelines
 
@@ -36,7 +36,7 @@ bin/ct doctor   # preflight + audit --strict + try? ratchet, one summary
 - **Update CHANGELOG.md** in the same PR.
 - **Don't introduce dependencies** lightly. Justify in the PR description.
 - **Don't break the audit gates.** All seven CI jobs must be green.
-- **Don't commit secrets.** `security_check.sh` catches obvious patterns; be careful with anything new.
+- **Don't commit secrets.** `bin/ct security` catches obvious patterns; be careful with anything new.
 
 ## CI gates
 
@@ -44,7 +44,7 @@ bin/ct doctor   # preflight + audit --strict + try? ratchet, one summary
 
 `try?` silently discards the underlying error — data loss the operator never sees. Every `try?` in `COOL-TUNNEL/` must be either converted to logging `do/catch` OR annotated `// try-ok: <reason>` on the same or immediately preceding line. Legitimate cleanup (closing a `FileHandle` whose error doesn't matter, sleep cancellation, best-effort proxy revert on shutdown) qualifies; swallowing a real error (disk full, decode failure, keychain lock) does not.
 
-`scripts/try_question_ratchet.sh` counts unannotated `\btry\?` and fails on any drift from `TRY_QUESTION_CAP` (currently 0). Drift in either direction fails. `bash scripts/try_question_ratchet.sh --list` prints every unannotated site.
+`bun scripts/try_question_ratchet.ts` counts unannotated `\btry\?` and fails on any drift from `TRY_QUESTION_CAP` (currently 0). Drift in either direction fails. `bun scripts/try_question_ratchet.ts --list` prints every unannotated site.
 
 ### `xcodebuild test` — H2/H3/M1 regression coverage
 
@@ -56,10 +56,10 @@ When you change `ProfileStore` / `MigratingCredentialStore` / `KeychainStore` / 
 
 ### sing-box pin verification
 
-`COOL-TUNNEL/singbox-core.upstream.json` is authoritative for the bundled `sing-box` binary (upstream tag + per-artifact SHA-256). `scripts/fetch_singbox-core.sh` modes: default verifies the bundled binary's SHA matches the manifest (no network, runs in `cut_release.sh` + PR-time `singbox-core-pin` job); `--check-only` re-downloads at the pinned tag and verifies SHAs (daily `singbox-core-pin-audit.yml`); `--repin [TAG]` is operator-explicit, requires `CT_REPIN_CONFIRM=1`, lands as a single audited commit.
+`COOL-TUNNEL/singbox-core.upstream.json` is authoritative for the bundled `sing-box` binary (upstream tag + per-artifact SHA-256). `bun scripts/fetch_singbox-core.ts` modes: default verifies the bundled binary's SHA matches the manifest (no network, runs in `cut_release.ts` + PR-time `singbox-core-pin` job); `--check-only` re-downloads at the pinned tag and verifies SHAs (daily `singbox-core-pin-audit.yml`); `--repin [TAG]` is operator-explicit, requires `CT_REPIN_CONFIRM=1`, lands as a single audited commit.
 
-Never let `cut_release.sh` "auto-pin" — that path was the H1 supply-chain finding.
+Never let `cut_release.ts` "auto-pin" — that path was the H1 supply-chain finding.
 
 ### Other gates
 
-`cargo fmt --check`, `cargo clippy --pedantic -D warnings`, `cargo test`, `cargo deny check`; `xcrun swift-format lint -r --strict` on `COOL-TUNNEL/` + `COOL-TUNNELTests/`; `shellcheck` on every `scripts/*.sh`; Bun argv-parser tests for `cut_release.ts` / `fetch_singbox-core.ts`.
+`cargo fmt --check`, `cargo clippy --pedantic -D warnings`, `cargo test`, `cargo deny check`; `xcrun swift-format lint -r --strict` on `COOL-TUNNEL/` + `COOL-TUNNELTests/`; `shellcheck scripts/build_rust_core.sh bin/ct`; Bun tests for the maintenance scripts.

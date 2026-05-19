@@ -103,7 +103,7 @@ pub fn redact(line: &str) -> Cow<'_, str> {
 /// boundary.
 #[allow(clippy::expect_used)]
 static USERINFO_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive)://)[^/\s]+@")
+    Regex::new(r"(?i)(?P<scheme>(?:https?|socks(?:5h?|4a?)?|ftp|naive|vless)://)[^/\s]+@")
         .expect("userinfo redaction regex must compile")
 });
 
@@ -317,6 +317,18 @@ mod tests {
         let ftp = "ftp://alice:hunter2@host";
         let out = redact(ftp);
         assert!(!out.contains("hunter2"), "ftp password leaked: {out}");
+    }
+
+    #[test]
+    fn redacts_vless_scheme_userinfo() {
+        let line = "vless://alice:550e8400-e29b-41d4-a716-446655440000@proxy.example.com:443";
+        let out = redact(line);
+        assert!(!out.contains("alice"), "username leaked: {out}");
+        assert!(
+            !out.contains("550e8400-e29b-41d4-a716-446655440000"),
+            "uuid leaked: {out}"
+        );
+        assert_eq!(out, "vless://***:***@proxy.example.com:443");
     }
 
     #[test]

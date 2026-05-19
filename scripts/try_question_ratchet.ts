@@ -3,9 +3,8 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/try_question_ratchet.ts — TypeScript+Bun port of
-// try_question_ratchet.sh. Counts unannotated `try?` sites in the
-// Swift production tree and enforces a strict cap.
+// scripts/try_question_ratchet.ts — counts unannotated `try?` sites
+// in the Swift production tree and enforces a strict cap.
 //
 // A site is **annotated** (exempt from the count) when either the
 // same source line OR the immediately preceding line carries the

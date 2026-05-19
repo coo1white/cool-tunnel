@@ -3,7 +3,7 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/security_check.ts — TypeScript+Bun port of security_check.sh.
+// scripts/security_check.ts — pre-release security audit.
 //
 // Pre-release security audit for a built `Cool tunnel.app` bundle.
 // Run this *after* the Release archive completes and *before*

@@ -2,17 +2,15 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/lib/log.ts — coloured output matching the bash conventions.
+// scripts/lib/log.ts — coloured output shared by maintenance scripts.
 //
-// The bin/ct wrapper and the legacy bash scripts both use the same
-// visual idiom: `==>` blue for major steps, `Error:` red, `Warning:`
-// yellow, `ok:` green, `!!!` red for hard exits with a status code.
-// Mirror it exactly here so a mixed run (some Bun, some bash) reads
-// as one program from the operator's terminal.
+// The bin/ct wrapper and Bun scripts use the same visual idiom:
+// `==>` blue for major steps, `Error:` red, `Warning:` yellow,
+// `ok:` green, `!!!` red for hard exits with a status code.
 //
 // Colour codes are emitted only when stdout/stderr is a TTY — when
 // piped or run under CI, the output is plain bytes. Matches the
-// `bin/ct` and `cut_release.sh` behaviour so the in-CI logs and the
+// `bin/ct` and release-script behaviour so the in-CI logs and the
 // operator's terminal output diverge only in colour, not in shape.
 
 const isTTY = (stream: NodeJS.WriteStream): boolean => Boolean(stream?.isTTY);
@@ -31,8 +29,7 @@ const RED_OPEN = "\x1b[1;31m";
 const RESET = "\x1b[0m";
 
 /**
- * Major-step marker. Matches `printf '\033[1;34m==>\033[0m %s\n'`
- * from the legacy bash scripts.
+ * Major-step marker.
  */
 export function step(message: string): void {
     process.stdout.write(
@@ -69,9 +66,7 @@ export function warn(message: string): void {
 }
 
 /**
- * Fatal error. Matches `printf '\033[1;31m!!!\033[0m %s\n'` from
- * the legacy bash `die()` helper. Exits with the supplied code
- * (default 1, matching `die` in cut_release.sh / fetch_singbox-core.sh).
+ * Fatal error. Exits with the supplied code.
  */
 export function die(message: string, exitCode = 1): never {
     process.stderr.write(

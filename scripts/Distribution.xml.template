@@ -8,7 +8,7 @@
     productbuild parser will refuse the file at packaging time.
 
     Built into a .pkg by the `productbuild` tool with the
-    `distribution` flag, driven from `scripts/package_release.sh`.
+    `distribution` flag, driven from `scripts/package_release.ts`.
     The {{VERSION}} placeholder is replaced at packaging time
     with the release's marketing version (e.g. 2.0.10).
 

@@ -3,7 +3,7 @@
 // Copyright (C) 2026 coolwhite LLC
 // See LICENSE for full terms.
 //
-// scripts/package_release.ts — TypeScript+Bun port of package_release.sh.
+// scripts/package_release.ts — release artifact packaging.
 //
 // Builds the four release artefacts (.dmg, .pkg, .zip, standalone
 // universal cool-tunnel-core) from a Release `Cool tunnel.app` bundle
